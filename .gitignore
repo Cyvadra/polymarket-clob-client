@@ -37,3 +37,8 @@ Thumbs.db
 # Temporary files
 /tmp/
 *.tmp
+
+# Example binaries
+examples/*/create_order
+examples/*/market_data
+examples/*/order_management

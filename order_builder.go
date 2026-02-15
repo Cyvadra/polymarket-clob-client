@@ -241,8 +241,11 @@ func ValidatePrice(price float64, tickSize TickSize) error {
 		return fmt.Errorf("invalid tick size: %w", err)
 	}
 
-	// Check if price is a multiple of tick size
-	if math.Mod(price, tickSizeFloat) > 1e-10 {
+	// Check if price is a multiple of tick size with floating point tolerance
+	remainder := math.Mod(price, tickSizeFloat)
+	// Use a more generous epsilon based on tick size
+	epsilon := tickSizeFloat / 100.0
+	if remainder > epsilon && (tickSizeFloat-remainder) > epsilon {
 		return fmt.Errorf("price must be a multiple of tick size %s", tickSize)
 	}
 
