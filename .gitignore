@@ -24,9 +24,11 @@ go.work
 # Environment files
 .env
 .env.local
+config.yaml
 
 # OS specific
 .DS_Store
+._*
 Thumbs.db
 
 # Build artifacts

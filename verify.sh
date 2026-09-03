@@ -15,13 +15,11 @@ go build -v .
 
 echo ""
 echo "✓ Running tests..."
-go test -v . | grep -E "(PASS|FAIL|ok)"
+go test ./...
 
 echo ""
 echo "✓ Building examples..."
-cd examples/create_order && go build . && cd ../..
-cd examples/market_data && go build . && cd ../..
-cd examples/order_management && go build . && cd ../..
+go build ./examples/...
 
 echo ""
 echo "✓ Checking for security vulnerabilities with go vet..."
