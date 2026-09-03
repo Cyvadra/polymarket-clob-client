@@ -10,10 +10,9 @@ import (
 )
 
 type fakeFillStore struct {
-	record    store.FillRecord
-	applied   int
-	seen      map[string]struct{}
-	dedupSeen map[string]struct{}
+	record  store.FillRecord
+	applied int
+	seen    map[string]struct{}
 }
 
 func (s *fakeFillStore) OrderByExchangeID(_ context.Context, orderID string) (store.SignedOrderRecord, error) {
@@ -35,18 +34,6 @@ func (s *fakeFillStore) ApplyFill(_ context.Context, record store.FillRecord) (b
 	s.applied++
 	return true, nil
 }
-func (s *fakeFillStore) UnmatchedFills(context.Context) ([]store.FillRecord, error) { return nil, nil }
-func (s *fakeFillStore) InsertDedupKey(_ context.Context, record store.DedupRecord) (bool, error) {
-	if s.dedupSeen == nil {
-		s.dedupSeen = make(map[string]struct{})
-	}
-	if _, exists := s.dedupSeen[record.Key]; exists {
-		return false, nil
-	}
-	s.dedupSeen[record.Key] = struct{}{}
-	return true, nil
-}
-
 func TestConsumeMapsValidatedFillToStore(t *testing.T) {
 	now := time.Unix(20, 0).UTC()
 	repository := &fakeFillStore{}

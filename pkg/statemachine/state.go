@@ -3,6 +3,7 @@ package statemachine
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -70,14 +71,26 @@ func CanApply(current State, event Event) bool {
 // EventForOrderStatus normalizes a Polymarket order status into an internal
 // observation event shared by NATS consumers and REST reconciliation.
 func EventForOrderStatus(status string) (Event, bool) {
+	return EventForOrderObservation(status, "", "")
+}
+
+// EventForOrderObservation uses matched size to preserve partial fills when
+// the exchange reports a generic LIVE or MATCHED status.
+func EventForOrderObservation(status, matchedShares, requestedShares string) (Event, bool) {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "LIVE", "OPEN":
+	case "LIVE", "OPEN", "DELAYED":
+		if positiveMatched(matchedShares) {
+			return EventPartialFillObserved, true
+		}
 		return EventOrderLiveObserved, true
 	case "PARTIALLY_FILLED", "PARTIAL":
 		return EventPartialFillObserved, true
 	case "FILLED", "MATCHED":
+		if !fullyMatched(matchedShares, requestedShares) {
+			return EventPartialFillObserved, true
+		}
 		return EventFillObserved, true
-	case "CANCELED", "CANCELLED":
+	case "CANCELED", "CANCELLED", "UNMATCHED":
 		return EventCancelObserved, true
 	case "REJECTED":
 		return EventRejectedObserved, true
@@ -88,6 +101,20 @@ func EventForOrderStatus(status string) (Event, bool) {
 	default:
 		return "", false
 	}
+}
+
+func positiveMatched(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && value != "0" && value != "0.0" && value != "0.00"
+}
+
+func fullyMatched(matched, requested string) bool {
+	if strings.TrimSpace(requested) == "" {
+		return true
+	}
+	matchedValue, matchedOK := new(big.Rat).SetString(strings.TrimSpace(matched))
+	requestedValue, requestedOK := new(big.Rat).SetString(strings.TrimSpace(requested))
+	return matchedOK && requestedOK && matchedValue.Cmp(requestedValue) >= 0
 }
 
 func RequiresLockedExposure(state State) bool {

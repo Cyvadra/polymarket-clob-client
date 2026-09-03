@@ -153,6 +153,8 @@ func (s *UserStream) consume(ctx context.Context, payload []byte) error {
 			Price        string         `json:"price"`
 			Outcome      string         `json:"outcome"`
 			Status       string         `json:"status"`
+			FeeRateBps   string         `json:"fee_rate_bps"`
+			TraderSide   string         `json:"trader_side"`
 			Timestamp    string         `json:"timestamp"`
 			MakerOrders  []struct {
 				OrderID       string         `json:"order_id"`
@@ -167,18 +169,19 @@ func (s *UserStream) consume(ctx context.Context, payload []byte) error {
 		if err := json.Unmarshal(payload, &event); err != nil {
 			return err
 		}
-		if strings.ToUpper(event.Status) != "MATCHED" || event.Outcome == "" {
+		status := strings.TrimPrefix(strings.ToUpper(event.Status), "TRADE_STATUS_")
+		if (status != "MATCHED" && status != "MINED" && status != "CONFIRMED" && status != "FAILED") || event.Outcome == "" {
 			return nil
 		}
 		fills := make([]contracts.AccountFill, 0, len(event.MakerOrders)+1)
 		if event.TakerOrderID != "" {
-			fills = append(fills, contracts.AccountFill{SchemaVersion: contracts.SchemaVersionV1, FillID: event.ID, ExchangeOrderID: event.TakerOrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: event.AssetID, Outcome: event.Outcome, Side: event.Side, Shares: event.Size, Price: event.Price, ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
+			fills = append(fills, contracts.AccountFill{SchemaVersion: contracts.SchemaVersionV1, FillID: event.ID, ExchangeOrderID: event.TakerOrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: event.AssetID, Outcome: event.Outcome, Side: event.Side, Shares: event.Size, Price: event.Price, FeeRateBps: event.FeeRateBps, TradeStatus: status, TraderSide: event.TraderSide, ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
 		}
 		for _, maker := range event.MakerOrders {
 			if maker.OrderID == "" || maker.Outcome == "" {
 				continue
 			}
-			fills = append(fills, contracts.AccountFill{SchemaVersion: contracts.SchemaVersionV1, FillID: event.ID + ":" + maker.OrderID, ExchangeOrderID: maker.OrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: maker.AssetID, Outcome: maker.Outcome, Side: maker.Side, Shares: maker.MatchedAmount, Price: maker.Price, ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
+			fills = append(fills, contracts.AccountFill{SchemaVersion: contracts.SchemaVersionV1, FillID: event.ID + ":" + maker.OrderID, ExchangeOrderID: maker.OrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: maker.AssetID, Outcome: maker.Outcome, Side: maker.Side, Shares: maker.MatchedAmount, Price: maker.Price, FeeRateBps: event.FeeRateBps, TradeStatus: status, TraderSide: "MAKER", ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
 		}
 		for _, fill := range fills {
 			if _, err := s.fills.Consume(ctx, fill); err != nil {

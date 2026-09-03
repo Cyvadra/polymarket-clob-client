@@ -106,7 +106,7 @@ func TestReconcilePersistsMatchedSharesFromRepeatedLiveObservation(t *testing.T)
 	if err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StateLive || repository.updates[0].event != statemachine.EventOrderLiveObserved {
+	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StatePartiallyFilled || repository.updates[0].event != statemachine.EventPartialFillObserved {
 		t.Fatalf("expected matched-share observation, got %#v", repository.updates)
 	}
 }

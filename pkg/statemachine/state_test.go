@@ -67,6 +67,21 @@ func TestInvalidTransitionRejectsImmediateCancelFromSubmitting(t *testing.T) {
 	}
 }
 
+func TestOrderObservationTreatsMatchedLiveOrderAsPartial(t *testing.T) {
+	event, ok := EventForOrderObservation("LIVE", "2", "5")
+	if !ok || event != EventPartialFillObserved {
+		t.Fatalf("expected partial fill event, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderObservation("UNMATCHED", "0", "5")
+	if !ok || event != EventCancelObserved {
+		t.Fatalf("expected cancel event, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderObservation("MATCHED", "2.0", "2")
+	if !ok || event != EventFillObserved {
+		t.Fatalf("expected filled event, got %q ok=%v", event, ok)
+	}
+}
+
 func TestDuplicateTerminalObservationIsIdempotent(t *testing.T) {
 	transition, changed, err := Apply(StateCanceled, EventCancelObserved)
 	if err != nil {

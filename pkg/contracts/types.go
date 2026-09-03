@@ -12,9 +12,8 @@ const (
 	SchemaVersionV1 = "execution.v1"
 
 	SubjectStrategyExecutionIntent = "strategy.execution.intent"
+	SubjectExecutionIntentAck      = "execution.intent.ack"
 	SubjectExecutionOrderEvent     = "execution.order.event"
-	SubjectAccountTradeFill        = "account.trade.fill"
-	SubjectAccountOrderEvent       = "account.order.event"
 	SubjectPositionFeaturesPrefix  = "position.features"
 )
 
@@ -34,10 +33,30 @@ const (
 	TimeInForceGTD TimeInForce = "GTD"
 )
 
+type IntentKind string
+
+const (
+	IntentOpen  IntentKind = "OPEN"
+	IntentClose IntentKind = "CLOSE"
+)
+
+type ExecutionStyle string
+
+const (
+	ExecutionStyleLimit          ExecutionStyle = "LIMIT"
+	ExecutionStyleMakerPostOnly  ExecutionStyle = "MAKER_POST_ONLY"
+	ExecutionStyleTakerRepricing ExecutionStyle = "TAKER_REPRICING"
+)
+
 type ExecutionPolicy struct {
-	CompleteWithinMillis int64 `json:"complete_within_ms,omitempty"`
-	CancelTimeoutMillis  int64 `json:"cancel_timeout_ms,omitempty"`
-	ReduceOnly           bool  `json:"reduce_only,omitempty"`
+	CompleteWithinMillis int64          `json:"complete_within_ms,omitempty"`
+	CancelTimeoutMillis  int64          `json:"cancel_timeout_ms,omitempty"`
+	MaxFeatureAgeMillis  int64          `json:"max_feature_age_ms,omitempty"`
+	MaxReprices          int            `json:"max_reprices,omitempty"`
+	RepriceDelayMillis   int64          `json:"reprice_delay_ms,omitempty"`
+	RepriceStep          string         `json:"reprice_step,omitempty"`
+	MaxPriceDrift        string         `json:"max_price_drift,omitempty"`
+	Style                ExecutionStyle `json:"style,omitempty"`
 }
 
 type ExecutionIntent struct {
@@ -45,6 +64,7 @@ type ExecutionIntent struct {
 	IntentID           string          `json:"intent_id"`
 	IdempotencyKey     string          `json:"idempotency_key"`
 	Strategy           string          `json:"strategy"`
+	Kind               IntentKind      `json:"kind"`
 	MarketID           string          `json:"market_id,omitempty"`
 	EventSlug          string          `json:"event_slug,omitempty"`
 	ConditionID        string          `json:"condition_id"`
@@ -62,6 +82,37 @@ type ExecutionIntent struct {
 	Policy             ExecutionPolicy `json:"policy,omitempty"`
 }
 
+type IntentAckStatus string
+
+const (
+	IntentAccepted  IntentAckStatus = "ACCEPTED"
+	IntentRejected  IntentAckStatus = "REJECTED"
+	IntentCompleted IntentAckStatus = "COMPLETED"
+	IntentPartial   IntentAckStatus = "PARTIAL"
+	IntentExpired   IntentAckStatus = "EXPIRED"
+	IntentFailed    IntentAckStatus = "FAILED"
+)
+
+type ExecutionIntentAck struct {
+	SchemaVersion string          `json:"schema_version"`
+	IntentID      string          `json:"intent_id"`
+	Status        IntentAckStatus `json:"status"`
+	ReasonCode    string          `json:"reason_code,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+	FilledShares  string          `json:"filled_shares,omitempty"`
+	AveragePrice  string          `json:"average_price,omitempty"`
+	OccurredAt    time.Time       `json:"occurred_at"`
+}
+
+func PublishExecutionIntentAck(publisher ExecutionEventPublisher, ack ExecutionIntentAck) error {
+	if publisher == nil {
+		return nil
+	}
+	ack.SchemaVersion = SchemaVersionV1
+	ack.OccurredAt = ack.OccurredAt.UTC()
+	return publisher.PublishJSON(SubjectExecutionIntentAck, ack)
+}
+
 type AccountFill struct {
 	SchemaVersion   string    `json:"schema_version"`
 	FillID          string    `json:"fill_id"`
@@ -75,6 +126,9 @@ type AccountFill struct {
 	Shares          string    `json:"shares"`
 	Price           string    `json:"price"`
 	Fee             string    `json:"fee,omitempty"`
+	FeeRateBps      string    `json:"fee_rate_bps,omitempty"`
+	TradeStatus     string    `json:"trade_status,omitempty"`
+	TraderSide      string    `json:"trader_side,omitempty"`
 	ExchangeTime    time.Time `json:"exchange_time"`
 	ReceivedAt      time.Time `json:"received_at"`
 }

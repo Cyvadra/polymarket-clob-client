@@ -109,12 +109,6 @@ func run() error {
 	if err := executor.SubscribeIntents(bus, execution); err != nil {
 		return err
 	}
-	if err := accountfeed.SubscribeFills(bus, fills); err != nil {
-		return err
-	}
-	if err := accountfeed.SubscribeOrders(bus, orders); err != nil {
-		return err
-	}
 	runtime, err := service.New(
 		service.NamedModule{Name: "nats", Module: bus},
 		service.NamedModule{Name: "executor", Module: execution},

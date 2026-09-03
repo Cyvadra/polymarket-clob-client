@@ -64,7 +64,8 @@ func (c *FillConsumer) Consume(ctx context.Context, fill contracts.AccountFill) 
 		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: fill.IntentID,
 		MarketID: fill.MarketID, ConditionID: fill.ConditionID, TokenID: fill.TokenID,
 		Outcome: fill.Outcome, Side: fill.Side, Shares: fill.Shares, Price: fill.Price,
-		Fee: fill.Fee, ExchangeTime: fill.ExchangeTime, ReceivedAt: receivedAt,
+		Fee: fill.Fee, FeeRateBps: fill.FeeRateBps, TradeStatus: fill.TradeStatus,
+		TraderSide: fill.TraderSide, ExchangeTime: fill.ExchangeTime, ReceivedAt: receivedAt,
 	})
 }
 
@@ -87,6 +88,14 @@ func validateFill(fill contracts.AccountFill) error {
 	}
 	if fill.Fee != "" && !nonNegativeDecimal(fill.Fee) {
 		return fmt.Errorf("invalid fill fee %q", fill.Fee)
+	}
+	if fill.FeeRateBps != "" && !nonNegativeDecimal(fill.FeeRateBps) {
+		return fmt.Errorf("invalid fill fee rate %q", fill.FeeRateBps)
+	}
+	switch fill.TradeStatus {
+	case "", "MATCHED", "MINED", "CONFIRMED", "FAILED":
+	default:
+		return fmt.Errorf("invalid trade status %q", fill.TradeStatus)
 	}
 	return nil
 }

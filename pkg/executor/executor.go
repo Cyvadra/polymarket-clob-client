@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -57,11 +59,45 @@ func (e *Executor) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			if err := e.resumeSigned(ctx); err != nil && e.onError != nil {
+				e.onError(err)
+			}
 			if err := e.cancelExpired(ctx); err != nil && e.onError != nil {
 				e.onError(err)
 			}
 		}
 	}
+}
+
+func (e *Executor) resumeSigned(ctx context.Context) error {
+	orders, err := e.store.OpenOrders(ctx)
+	if err != nil {
+		return fmt.Errorf("load signed orders for recovery: %w", err)
+	}
+	var resumeErr error
+	for _, order := range orders {
+		if order.State != statemachine.StateSigned {
+			continue
+		}
+		intent, err := e.store.Intent(ctx, order.IntentID)
+		if err != nil {
+			resumeErr = errors.Join(resumeErr, fmt.Errorf("load signed intent %s: %w", order.IntentID, err))
+			continue
+		}
+		if err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
+			return e.resumeIntent(ctx, contracts.ExecutionIntent{
+				IntentID: intent.IntentID, IdempotencyKey: intent.IdempotencyKey, Strategy: intent.Strategy,
+				Kind: contracts.IntentKind(intent.Kind), MarketID: intent.MarketID, EventSlug: intent.EventSlug,
+				ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
+				TargetShares: intent.TargetShares, LimitPrice: intent.LimitPrice, TimeInForce: intent.TimeInForce,
+				PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt,
+				ExpiresAt: intent.ExpiresAt, Policy: intent.Policy,
+			})
+		}); err != nil {
+			resumeErr = errors.Join(resumeErr, fmt.Errorf("resume signed order %s/%d: %w", order.IntentID, order.ChildSequence, err))
+		}
+	}
+	return resumeErr
 }
 func (e *Executor) Close(context.Context) error { return nil }
 
@@ -135,9 +171,10 @@ func cancelTimeout(intent store.OrderIntentRecord) time.Duration {
 
 func (e *Executor) Execute(ctx context.Context, intent contracts.ExecutionIntent) error {
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
+		e.publishAck(intent.IntentID, contracts.IntentRejected, "INVALID_INTENT", err.Error(), "", "")
 		return err
 	}
-	return e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
+	err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
 		inserted, err := e.store.InsertIntent(ctx, intentRecord(intent, e.now().UTC()))
 		if err != nil {
 			return fmt.Errorf("persist intent: %w", err)
@@ -147,6 +184,29 @@ func (e *Executor) Execute(ctx context.Context, intent contracts.ExecutionIntent
 		}
 		return e.prepareAndSubmit(ctx, intent)
 	})
+	if err != nil {
+		status, code := contracts.IntentFailed, "EXECUTION_FAILED"
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+			status, code = contracts.IntentRejected, "NO_POSITION"
+		} else if isRejectedSubmission(err) {
+			status, code = contracts.IntentRejected, "ORDER_REJECTED"
+		}
+		e.publishAck(intent.IntentID, status, code, err.Error(), "", "")
+	}
+	return err
+}
+
+func isRejectedSubmission(err error) bool {
+	return strings.Contains(err.Error(), "order submission rejected:")
+}
+
+func (e *Executor) publishAck(intentID string, status contracts.IntentAckStatus, code, reason, filledShares, averagePrice string) {
+	if err := contracts.PublishExecutionIntentAck(e.publish, contracts.ExecutionIntentAck{
+		IntentID: intentID, Status: status, ReasonCode: code, Reason: reason,
+		FilledShares: filledShares, AveragePrice: averagePrice, OccurredAt: e.now(),
+	}); err != nil && e.onError != nil {
+		e.onError(fmt.Errorf("publish intent acknowledgement: %w", err))
+	}
 }
 
 func (e *Executor) resumeIntent(ctx context.Context, intent contracts.ExecutionIntent) error {
@@ -231,6 +291,9 @@ func (e *Executor) submitSigned(ctx context.Context, intent contracts.ExecutionI
 	}
 	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, clobOrderType(intent.TimeInForce), intent.PostOnly)
 	if submitErr != nil {
+		if submissionRejected(submitErr) {
+			return e.markSubmitRejected(ctx, updated, submitErr.Error())
+		}
 		return e.markSubmitUnknown(ctx, updated, submitErr.Error())
 	}
 	if response == nil || response.OrderID == "" {
@@ -243,7 +306,13 @@ func (e *Executor) submitSigned(ctx context.Context, intent contracts.ExecutionI
 	if err := e.publishTransition(live, "submit acknowledged"); err != nil {
 		return fmt.Errorf("publish live event: %w", err)
 	}
+	e.publishAck(intent.IntentID, contracts.IntentAccepted, "", "submit acknowledged", "0", "")
 	return nil
+}
+
+func submissionRejected(err error) bool {
+	var apiErr *transport.HTTPError
+	return errors.As(err, &apiErr) && !apiErr.Retryable()
 }
 
 func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrderRecord, reason string) error {
@@ -255,6 +324,17 @@ func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrde
 		return fmt.Errorf("publish submit-unknown event: %w", err)
 	}
 	return fmt.Errorf("order submission outcome is unknown: %s", reason)
+}
+
+func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, reason string) error {
+	rejected, err := e.store.TransitionOrder(ctx, order, statemachine.EventRejectedObserved, order.MatchedShares, order.ExchangeOrderID, reason)
+	if err != nil {
+		return fmt.Errorf("mark submit rejected: %w", err)
+	}
+	if err := e.publishTransition(rejected, reason); err != nil {
+		return fmt.Errorf("publish submit-rejected event: %w", err)
+	}
+	return fmt.Errorf("order submission rejected: %s", reason)
 }
 
 func validateIntent(intent contracts.ExecutionIntent) error {
@@ -285,11 +365,20 @@ func validateIntentAt(intent contracts.ExecutionIntent, now time.Time) error {
 	if intent.ExpiresAt.IsZero() && intent.Policy.CompleteWithinMillis == 0 {
 		return fmt.Errorf("execution intent requires expires_at or complete_within_ms")
 	}
-	if intent.Policy.CompleteWithinMillis < 0 || intent.Policy.CancelTimeoutMillis < 0 {
+	if intent.Policy.CompleteWithinMillis < 0 || intent.Policy.CancelTimeoutMillis < 0 || intent.Policy.MaxFeatureAgeMillis < 0 || intent.Policy.MaxReprices < 0 || intent.Policy.RepriceDelayMillis < 0 {
 		return fmt.Errorf("execution policy durations must not be negative")
 	}
-	if intent.Policy.ReduceOnly && intent.Side != contracts.SideSell {
-		return fmt.Errorf("reduce-only execution intent must sell")
+	if intent.Kind != contracts.IntentOpen && intent.Kind != contracts.IntentClose {
+		return fmt.Errorf("invalid intent kind %q", intent.Kind)
+	}
+	if intent.Kind == contracts.IntentClose && intent.Side != contracts.SideSell {
+		return fmt.Errorf("close execution intent must sell")
+	}
+	if intent.Policy.MaxFeatureAgeMillis > 0 && (intent.FeatureCompletedAt.IsZero() || now.Sub(intent.FeatureCompletedAt) > time.Duration(intent.Policy.MaxFeatureAgeMillis)*time.Millisecond) {
+		return fmt.Errorf("execution intent feature is stale")
+	}
+	if intent.Policy.Style != "" && intent.Policy.Style != contracts.ExecutionStyleLimit && intent.Policy.Style != contracts.ExecutionStyleMakerPostOnly && intent.Policy.Style != contracts.ExecutionStyleTakerRepricing {
+		return fmt.Errorf("invalid execution style %q", intent.Policy.Style)
 	}
 	return nil
 }
@@ -297,6 +386,7 @@ func validateIntentAt(intent contracts.ExecutionIntent, now time.Time) error {
 func intentRecord(intent contracts.ExecutionIntent, now time.Time) store.OrderIntentRecord {
 	return store.OrderIntentRecord{
 		IntentID: intent.IntentID, IdempotencyKey: intent.IdempotencyKey, Strategy: intent.Strategy, MarketID: intent.MarketID,
+		Kind:      intent.Kind,
 		EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: intent.Side, TargetShares: intent.TargetShares, LimitPrice: intent.LimitPrice,
 		TimeInForce: intent.TimeInForce, PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq,

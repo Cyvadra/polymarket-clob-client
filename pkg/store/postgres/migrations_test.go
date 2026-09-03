@@ -10,8 +10,8 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-	if len(migrations) != 1 {
-		t.Fatalf("expected one migration, got %d", len(migrations))
+	if len(migrations) != 2 {
+		t.Fatalf("expected two migrations, got %d", len(migrations))
 	}
 	if migrations[0].Name != "000001_execution_state.sql" {
 		t.Fatalf("unexpected migration name %q", migrations[0].Name)
@@ -28,10 +28,12 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS positions",
 		"PRIMARY KEY (condition_id, token_id)",
 		"CREATE TABLE IF NOT EXISTS reservations",
-		"CREATE TABLE IF NOT EXISTS dedup_keys",
 	} {
 		if !strings.Contains(sql, fragment) {
 			t.Fatalf("migration missing %q", fragment)
 		}
+	}
+	if migrations[1].Name != "000002_fill_settlement.sql" || !strings.Contains(migrations[1].SQL, "trade_status") {
+		t.Fatalf("unexpected settlement migration: %+v", migrations[1])
 	}
 }

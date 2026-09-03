@@ -52,16 +52,6 @@ func (s *fakeOrderStore) OrderByIntent(context.Context, string, int) (store.Sign
 func (s *fakeOrderStore) OpenOrders(context.Context) ([]store.SignedOrderRecord, error) {
 	return nil, nil
 }
-func (s *fakeOrderStore) InsertDedupKey(_ context.Context, record store.DedupRecord) (bool, error) {
-	if s.dedupSeen == nil {
-		s.dedupSeen = make(map[string]struct{})
-	}
-	if _, exists := s.dedupSeen[record.Key]; exists {
-		return false, nil
-	}
-	s.dedupSeen[record.Key] = struct{}{}
-	return true, nil
-}
 
 func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2}}

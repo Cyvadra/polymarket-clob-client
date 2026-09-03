@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -52,7 +51,7 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation contracts.Accou
 	if err != nil {
 		return fmt.Errorf("lookup observed order: %w", err)
 	}
-	event, ok := statemachine.EventForOrderStatus(observation.Status)
+	event, ok := statemachine.EventForOrderObservation(observation.Status, observation.MatchedShares, order.RequestedShares)
 	if !ok {
 		return fmt.Errorf("unsupported account order status %q", observation.Status)
 	}
@@ -71,20 +70,34 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation contracts.Accou
 	if err := contracts.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, c.now()); err != nil {
 		return fmt.Errorf("publish account order event: %w", err)
 	}
+	if err := PublishTerminalAck(c.publish, updated, reason, c.now()); err != nil {
+		return err
+	}
 	return nil
 }
 
-func SubscribeOrders(bus Subscriber, consumer *OrderConsumer) error {
-	if bus == nil || consumer == nil {
-		return fmt.Errorf("NATS subscriber and order consumer are required")
+func PublishTerminalAck(publisher contracts.ExecutionEventPublisher, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
+	var status contracts.IntentAckStatus
+	switch order.State {
+	case statemachine.StateFilled:
+		status = contracts.IntentCompleted
+	case statemachine.StateCanceled:
+		status = contracts.IntentPartial
+	case statemachine.StateRejected:
+		status = contracts.IntentRejected
+	case statemachine.StateExpired:
+		status = contracts.IntentExpired
+	case statemachine.StateFailed:
+		status = contracts.IntentFailed
+	default:
+		return nil
 	}
-	return bus.Subscribe(contracts.SubjectAccountOrderEvent, func(ctx context.Context, payload []byte) error {
-		observation, err := natsbus.DecodeJSON[contracts.AccountOrderEvent](payload)
-		if err != nil {
-			return err
-		}
-		return consumer.Consume(ctx, observation)
-	})
+	if err := contracts.PublishExecutionIntentAck(publisher, contracts.ExecutionIntentAck{
+		IntentID: order.IntentID, Status: status, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt,
+	}); err != nil {
+		return fmt.Errorf("publish terminal intent acknowledgement: %w", err)
+	}
+	return nil
 }
 
 func validateOrderEvent(observation contracts.AccountOrderEvent) error {

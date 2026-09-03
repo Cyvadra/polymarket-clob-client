@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS order_intents (
     intent_id TEXT PRIMARY KEY,
     idempotency_key TEXT NOT NULL UNIQUE,
     strategy TEXT NOT NULL,
+	kind TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',
     event_slug TEXT NOT NULL DEFAULT '',
     condition_id TEXT NOT NULL,
@@ -70,6 +71,9 @@ CREATE TABLE IF NOT EXISTS fills (
     shares NUMERIC(38, 18) NOT NULL CHECK (shares > 0),
     price NUMERIC(38, 18) NOT NULL CHECK (price > 0 AND price < 1),
     fee NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (fee >= 0),
+    fee_rate_bps NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (fee_rate_bps >= 0),
+    trade_status TEXT NOT NULL DEFAULT 'CONFIRMED',
+    trader_side TEXT NOT NULL DEFAULT '',
     exchange_time TIMESTAMPTZ,
     received_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -114,9 +118,3 @@ CREATE TABLE IF NOT EXISTS reservations (
 
 CREATE INDEX IF NOT EXISTS reservations_position_idx ON reservations(condition_id, token_id, state);
 CREATE INDEX IF NOT EXISTS reservations_intent_idx ON reservations(intent_id);
-
-CREATE TABLE IF NOT EXISTS dedup_keys (
-    key TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);

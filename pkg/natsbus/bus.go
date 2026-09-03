@@ -25,6 +25,7 @@ type Bus struct {
 	conn   *nats.Conn
 	mu     sync.Mutex
 	subs   []*nats.Subscription
+	ctx    context.Context
 }
 
 func New(cfg Config) (*Bus, error) {
@@ -34,9 +35,12 @@ func New(cfg Config) (*Bus, error) {
 	return &Bus{config: cfg}, nil
 }
 
-func (b *Bus) Init(context.Context) error {
+func (b *Bus) Init(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("NATS context is required")
+	}
 	if b.conn != nil {
 		return nil
 	}
@@ -52,6 +56,7 @@ func (b *Bus) Init(context.Context) error {
 		return fmt.Errorf("connect NATS: %w", err)
 	}
 	b.conn = conn
+	b.ctx = ctx
 	return nil
 }
 
@@ -77,6 +82,7 @@ func (b *Bus) Close(context.Context) error {
 		b.conn.Close()
 		b.conn = nil
 	}
+	b.ctx = nil
 	return nil
 }
 
@@ -109,7 +115,11 @@ func (b *Bus) Subscribe(subject string, handler Handler) error {
 		return fmt.Errorf("NATS bus is not initialized")
 	}
 	subscription, err := b.conn.Subscribe(subject, func(message *nats.Msg) {
-		if err := handler(context.Background(), message.Data); err != nil && b.config.OnHandlerError != nil {
+		ctx := b.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := handler(ctx, message.Data); err != nil && b.config.OnHandlerError != nil {
 			b.config.OnHandlerError(fmt.Errorf("handle NATS subject %s: %w", subject, err))
 		}
 	})

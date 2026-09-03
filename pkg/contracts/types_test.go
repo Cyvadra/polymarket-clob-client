@@ -35,6 +35,7 @@ func TestPositionFeatureEmptyPositionUsesNullEntryFields(t *testing.T) {
 
 func TestExecutionIntentKeepsDecimalValuesAsStrings(t *testing.T) {
 	intent := ExecutionIntent{
+		Kind:               IntentOpen,
 		SchemaVersion:      SchemaVersionV1,
 		IntentID:           "intent-1",
 		IdempotencyKey:     "strategy:condition:token:1",

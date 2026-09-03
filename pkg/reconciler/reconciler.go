@@ -10,6 +10,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -99,13 +100,19 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 
 func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord) error {
 	if order.ExchangeOrderID == "" {
+		if order.State == statemachine.StateSigned {
+			return nil
+		}
 		if order.State != statemachine.StateSubmitUnknown {
+			if order.State == statemachine.StateUnknownReconcile && !order.UpdatedAt.Add(r.interval).After(r.now()) {
+				return r.apply(ctx, order, statemachine.EventFailedObserved, order.MatchedShares, "unresolved submission recovery deadline elapsed")
+			}
 			return nil
 		}
 		if matched, ok, err := r.matchOpenOrder(ctx, order); err != nil {
 			return err
 		} else if ok {
-			event, eventOK := statemachine.EventForOrderStatus(matched.Status)
+			event, eventOK := statemachine.EventForOrderObservation(matched.Status, matched.SizeMatched, matched.OriginalSize)
 			if !eventOK {
 				return fmt.Errorf("matched order %s has unsupported status %q", matched.ID, matched.Status)
 			}
@@ -126,7 +133,7 @@ func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrder
 	if remote == nil {
 		return fmt.Errorf("lookup order %s: empty response", order.ExchangeOrderID)
 	}
-	event, ok := statemachine.EventForOrderStatus(remote.Status)
+	event, ok := statemachine.EventForOrderObservation(remote.Status, remote.SizeMatched, remote.OriginalSize)
 	if !ok {
 		return fmt.Errorf("order %s has unsupported status %q", order.ExchangeOrderID, remote.Status)
 	}
@@ -232,6 +239,9 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	}
 	if err := contracts.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation event: %w", err)
+	}
+	if err := accountfeed.PublishTerminalAck(r.publish, updated, reason, r.now()); err != nil {
+		return fmt.Errorf("publish reconciliation intent acknowledgement: %w", err)
 	}
 	return nil
 }

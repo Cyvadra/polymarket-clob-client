@@ -25,22 +25,11 @@ type fakeStore struct {
 	releases     []string
 	lockCalls    int
 	reservation  store.ReservationRecord
-	dedupSeen    map[string]struct{}
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
 	s.lockCalls++
 	return fn(ctx)
-}
-func (s *fakeStore) InsertDedupKey(_ context.Context, record store.DedupRecord) (bool, error) {
-	if s.dedupSeen == nil {
-		s.dedupSeen = make(map[string]struct{})
-	}
-	if _, exists := s.dedupSeen[record.Key]; exists {
-		return false, nil
-	}
-	s.dedupSeen[record.Key] = struct{}{}
-	return true, nil
 }
 func (s *fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
 	if s.intentSeen {
@@ -321,5 +310,5 @@ func TestExecuteRejectsDuplicateReservationWithoutActiveRecord(t *testing.T) {
 }
 
 func testIntent() contracts.ExecutionIntent {
-	return contracts.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: contracts.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: contracts.TimeInForceGTC, Policy: contracts.ExecutionPolicy{CompleteWithinMillis: 60_000}}
+	return contracts.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: contracts.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: contracts.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: contracts.TimeInForceGTC, Policy: contracts.ExecutionPolicy{CompleteWithinMillis: 60_000}}
 }

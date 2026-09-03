@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
@@ -76,25 +77,6 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return runMigrations(ctx, s.pool, migrations)
 }
 
-func (s *Store) InsertDedupKey(ctx context.Context, record store.DedupRecord) (bool, error) {
-	if record.Key == "" || record.Source == "" {
-		return false, fmt.Errorf("dedup key and source are required")
-	}
-	createdAt := record.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
-	}
-	commandTag, err := s.pool.Exec(ctx, `
-		INSERT INTO dedup_keys (key, source, created_at)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (key) DO NOTHING
-	`, record.Key, record.Source, createdAt)
-	if err != nil {
-		return false, fmt.Errorf("insert dedup key: %w", err)
-	}
-	return commandTag.RowsAffected() == 1, nil
-}
-
 func (s *Store) WithIntentLock(ctx context.Context, intentID string, fn func(context.Context) error) error {
 	if intentID == "" || fn == nil {
 		return fmt.Errorf("intent ID and lock function are required")
@@ -136,18 +118,18 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 
 	commandTag, err := s.pool.Exec(ctx, `
 		INSERT INTO order_intents (
-			intent_id, idempotency_key, strategy, market_id, event_slug, condition_id,
+			intent_id, idempotency_key, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_shares, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11,
-			$12, $13, $14, $15, $16,
-			$17, $18, $19, $20
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, $11, $12,
+			$13, $14, $15, $16, $17,
+			$18, $19, $20, $21
 		)
 		ON CONFLICT (intent_id) DO NOTHING
-	`, record.IntentID, record.IdempotencyKey, record.Strategy, record.MarketID, record.EventSlug, record.ConditionID,
+	`, record.IntentID, record.IdempotencyKey, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetShares, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt)
@@ -162,7 +144,7 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 		return store.OrderIntentRecord{}, fmt.Errorf("intent ID is required")
 	}
 	row := s.pool.QueryRow(ctx, `
-		SELECT intent_id, idempotency_key, strategy, market_id, event_slug, condition_id,
+		SELECT intent_id, idempotency_key, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_shares::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
@@ -378,17 +360,58 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		return false, fmt.Errorf("begin apply fill: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	tradeStatus := record.TradeStatus
+	if tradeStatus == "" {
+		tradeStatus = "CONFIRMED"
+	}
+	var priorStatus string
+	var priorSide string
+	var priorShares, priorPrice, priorTraderSide string
+	err = tx.QueryRow(ctx, `
+		SELECT trade_status, side, shares::text, price::text, trader_side
+		FROM fills WHERE fill_id = $1 FOR UPDATE
+	`, record.FillID).Scan(&priorStatus, &priorSide, &priorShares, &priorPrice, &priorTraderSide)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("lock existing fill: %w", err)
+	}
+	if err == nil {
+		if priorStatus == "FAILED" || tradeStatus != "FAILED" {
+			if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = $2 WHERE fill_id = $1`, record.FillID, tradeStatus); err != nil {
+				return false, fmt.Errorf("update fill settlement: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return false, fmt.Errorf("commit fill settlement: %w", err)
+			}
+			return false, nil
+		}
+		if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.MarketID, record.Outcome, priorSide, priorShares, priorPrice, priorTraderSide, true, receivedAt); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = 'FAILED' WHERE fill_id = $1`, record.FillID); err != nil {
+			return false, fmt.Errorf("mark failed fill: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit failed fill rollback: %w", err)
+		}
+		return true, nil
+	}
+	if tradeStatus == "FAILED" {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit unknown failed fill: %w", err)
+		}
+		return false, nil
+	}
 	commandTag, err := tx.Exec(ctx, `
 		INSERT INTO fills (
 			fill_id, exchange_order_id, intent_id, market_id, condition_id, token_id,
-			outcome, side, shares, price, fee, exchange_time, received_at
+			outcome, side, shares, price, fee, fee_rate_bps, trade_status, trader_side, exchange_time, received_at
 		) VALUES (
 			$1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6,
-			$7, $8, $9, $10, COALESCE(NULLIF($11, ''), '0'), $12, $13
+			$7, $8, $9, $10, COALESCE(NULLIF($11, ''), '0'), COALESCE(NULLIF($12, ''), '0'), $13, $14, $15, $16
 		)
 		ON CONFLICT (fill_id) DO NOTHING
 	`, record.FillID, record.ExchangeOrderID, record.IntentID, record.MarketID, record.ConditionID, record.TokenID,
-		record.Outcome, record.Side, record.Shares, record.Price, record.Fee, zeroTimeToNil(record.ExchangeTime), receivedAt)
+		record.Outcome, record.Side, record.Shares, record.Price, record.Fee, record.FeeRateBps, tradeStatus, record.TraderSide, zeroTimeToNil(record.ExchangeTime), receivedAt)
 	if err != nil {
 		return false, fmt.Errorf("insert fill: %w", err)
 	}
@@ -397,6 +420,33 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			return false, fmt.Errorf("commit duplicate fill: %w", err)
 		}
 		return false, nil
+	}
+	if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.MarketID, record.Outcome, string(record.Side), record.Shares, record.Price, record.TraderSide, false, receivedAt); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE positions SET state = CASE WHEN $1 = 'CONFIRMED' THEN CASE WHEN position_size = 0 THEN 'empty' ELSE 'open' END ELSE 'unsettled' END
+		WHERE condition_id = $2 AND token_id = $3
+	`, tradeStatus, record.ConditionID, record.TokenID); err != nil {
+		return false, fmt.Errorf("set position settlement state: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit fill: %w", err)
+	}
+	return true, nil
+}
+
+func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, marketID, outcome, side, shares, price, traderSide string, reverse bool, receivedAt time.Time) error {
+	creditedShares, err := positionShares(side, shares, price, traderSide)
+	if err != nil {
+		return err
+	}
+	direction := "BUY"
+	if side == "BUY" {
+		direction = "SELL"
+	}
+	if reverse {
+		side = direction
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO positions (
@@ -447,40 +497,27 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			END,
 			source_revision = positions.source_revision + 1,
 			updated_at = $8
-	`, record.ConditionID, record.TokenID, record.MarketID, record.Outcome, record.Side,
-		record.Shares, record.Price, receivedAt); err != nil {
-		return false, fmt.Errorf("update position from fill: %w", err)
+	`, conditionID, tokenID, marketID, outcome, side,
+		creditedShares, price, receivedAt); err != nil {
+		return fmt.Errorf("update position from fill: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit fill: %w", err)
-	}
-	return true, nil
+	return nil
 }
 
-func (s *Store) UnmatchedFills(ctx context.Context) ([]store.FillRecord, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT fill_id, exchange_order_id, intent_id, market_id, condition_id, token_id,
-			outcome, side, shares::text, price::text, fee::text, exchange_time, received_at
-		FROM fills
-		WHERE intent_id IS NULL
-		ORDER BY received_at, fill_id
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("query unmatched fills: %w", err)
+func positionShares(side, shares, price, traderSide string) (string, error) {
+	value, ok := new(big.Rat).SetString(shares)
+	if !ok || value.Sign() <= 0 {
+		return "", fmt.Errorf("invalid fill shares %q", shares)
 	}
-	defer rows.Close()
-	var fills []store.FillRecord
-	for rows.Next() {
-		fill, err := scanFill(rows)
-		if err != nil {
-			return nil, err
-		}
-		fills = append(fills, fill)
+	if side != "BUY" || traderSide != "TAKER" {
+		return value.FloatString(18), nil
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("scan unmatched fills: %w", err)
+	fillPrice, ok := new(big.Rat).SetString(price)
+	if !ok || fillPrice.Sign() <= 0 || fillPrice.Cmp(big.NewRat(1, 1)) >= 0 {
+		return "", fmt.Errorf("invalid fill price %q", price)
 	}
-	return fills, nil
+	feeFraction := new(big.Rat).Mul(big.NewRat(7, 100), new(big.Rat).Sub(big.NewRat(1, 1), fillPrice))
+	return new(big.Rat).Mul(value, new(big.Rat).Sub(big.NewRat(1, 1), feeFraction)).FloatString(18), nil
 }
 
 func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) error {
@@ -749,7 +786,7 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	var record store.OrderIntentRecord
 	var policy []byte
 	err := row.Scan(
-		&record.IntentID, &record.IdempotencyKey, &record.Strategy, &record.MarketID, &record.EventSlug, &record.ConditionID,
+		&record.IntentID, &record.IdempotencyKey, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &record.TargetShares, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &record.FeatureCompletedAt, &record.ExpiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,
@@ -906,4 +943,3 @@ var _ store.OrderRepository = (*Store)(nil)
 var _ store.FillRepository = (*Store)(nil)
 var _ store.PositionRepository = (*Store)(nil)
 var _ store.ReservationRepository = (*Store)(nil)
-var _ store.DedupRepository = (*Store)(nil)

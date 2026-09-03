@@ -20,6 +20,7 @@ type OrderIntentRecord struct {
 	IntentID           string
 	IdempotencyKey     string
 	Strategy           string
+	Kind               contracts.IntentKind
 	MarketID           string
 	EventSlug          string
 	ConditionID        string
@@ -84,6 +85,9 @@ type FillRecord struct {
 	Shares          string
 	Price           string
 	Fee             string
+	FeeRateBps      string
+	TradeStatus     string
+	TraderSide      string
 	ExchangeTime    time.Time
 	ReceivedAt      time.Time
 }
@@ -120,12 +124,6 @@ type ReservationRecord struct {
 	UpdatedAt     time.Time
 }
 
-type DedupRecord struct {
-	Key       string
-	Source    string
-	CreatedAt time.Time
-}
-
 type IntentRepository interface {
 	InsertIntent(context.Context, OrderIntentRecord) (inserted bool, err error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
@@ -157,8 +155,4 @@ type ReservationRepository interface {
 	Reservation(context.Context, string) (ReservationRecord, error)
 	Release(context.Context, string, string) error
 	ReservationsForPosition(context.Context, string, string) ([]ReservationRecord, error)
-}
-
-type DedupRepository interface {
-	InsertDedupKey(context.Context, DedupRecord) (inserted bool, err error)
 }
