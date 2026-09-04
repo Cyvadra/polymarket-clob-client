@@ -1,93 +1,55 @@
-# Execution Runtime TODO
+# 执行运行时 TODO
 
-This file records deliberately unfinished execution work. It is not a claim
-that these behaviors are already implemented by `executiond`.
+本文件记录刻意未完成的执行相关工作。它并不主张这些行为已由 `executiond` 实现。
 
-## Market-Driven Execution Tactics
+## 市场驱动的执行战术
 
-- Implement a per-intent, multi-child-order worker for post-only cross retry,
-  taker repricing, price-drift rejection, and soft-close to force-close
-  escalation.
-- Persist each child with an incremented `child_sequence`, including its price,
-  cancellation cause, and replacement relationship.
-- Consume a bounded, timestamped order-book snapshot as a dedicated runtime
-  input. Do not make the executor fetch or subscribe to pmm features.
+- 实现一个按意图、多 child-order 的 worker，用于 post-only 被穿越重试、taker 重报价、价格漂移拒绝，以及从 soft-close 升级到 force-close。
+- 将每个 child 以递增的 `child_sequence` 持久化，包括其价格、撤单原因与替换关系。
+- 消费一个有边界且带时间戳的订单簿快照，作为专用的运行时输入。不要让执行器去拉取或订阅 pmm 的特征。
 
-Why this is not implemented now: the current contract carries
-`style`, `max_reprices`, `reprice_step`, `max_price_drift`, and reprice delay,
-but `executiond` has no owned, authoritative market-data source. Implementing
-these tactics from stale REST reads would turn an execution policy into
-unbounded side effects with unknown market freshness. The strategy must provide
-an execution-safe market snapshot contract, or executiond must own a dedicated
-CLOB book feed, before this worker is added.
+为何现在未实现：当前契约已携带 `style`、`max_reprices`、`reprice_step`、`max_price_drift` 与重报价延迟，但 `executiond` 没有自有的、权威的市场数据源。基于过期的 REST 读取来实现这些战术，会把一个执行策略变成带有未知市场新鲜度的、无界副作用。在加入该 worker 之前，策略必须提供一个“执行安全”的市场快照契约，或者 `executiond` 必须自有一个专门的 CLOB 订单簿数据流。
 
-## Risk Controls
+## 风险控制
 
-- Add a durable wallet budget and allowance view.
-- Enforce per-strategy, per-market, per-token, and global notional limits.
-- Validate CLOB minimum order size and tick alignment before reservation.
-- Enforce monotonic feature sequence per strategy/market when the strategy
-  elects to use feature sequencing.
+- 增加持久化的钱包预算与额度视图。
+- 强制按策略、按市场、按 token 与全局的名义金额上限。
+- 在预留之前校验 CLOB 最小订单规模与 tick 对齐。
+- 当策略选择使用特征序列时，强制每个策略/市场的特征序列单调递增。
 
-Why this is not implemented now: there is no risk configuration schema, no
-wallet-level budget table, and no policy for handling positions created outside
-this service. Adding arbitrary fixed limits would silently change strategy
-behavior. Define those limits and their ownership first, then make reservation
-the atomic risk boundary.
+为何现在未实现：目前没有风险配置 schema，没有钱包级预算表，也没有针对本服务之外所创建仓位的处理策略。加入任意的固定上限会静默改变策略行为。应先定义这些上限及其归属，再让预留成为原子的风险边界。
 
-## Reconnect and External Activity Reconciliation
+## 重连与外部活动对账
 
-- On user-stream reconnect, backfill recent account trades and open orders
-  before accepting new stream updates.
-- Persist a CLOB trade cursor or high-water mark.
-- Record fills for unknown external orders as explicit external activity, then
-  reconcile them with the durable position view instead of dropping them.
-- Compare durable inventory with an authoritative wallet/token balance and
-  surface divergence as an execution health event.
+- 在用户流重连时，在接收新的数据流更新之前，先回补近期的账户成交与未结订单。
+- 持久化 CLOB 成交游标或高水位标记。
+- 将未知外部订单的成交记录为明确的外部活动，然后与持久化仓位视图对账，而不是丢弃它们。
+- 将持久化库存与权威的钱包/token 余额进行比较，并把分歧作为执行健康事件暴露出来。
 
-Why this is not implemented now: CLOB account APIs in the current client expose
-paginated account reads but no persisted cursor/replay contract. A naive
-`AllTrades` replay would repeatedly scan the whole account and can bind an
-unrelated historical trade. The cursor, retention period, and policy for manual
-or other-process trading must be defined before backfill is safe.
+为何现在未实现：当前客户端中的 CLOB 账户 API 提供分页的账户读取，但没有持久化的游标/重放契约。朴素的 `AllTrades` 重放会反复扫描整个账户，并可能错误绑定一笔不相关历史成交。在回补安全之前，必须先定义游标、保留周期，以及针对手工或其它进程交易的策略。
 
-## Settlement and Redemption
+## 结算与赎回
 
-- Add `settled` and `redeemed` position states.
-- Reconcile market resolution and redeemed collateral after event settlement.
-- Publish a final position feature when a market position becomes empty through
-  settlement rather than an order fill.
+- 增加 `settled` 与 `redeemed` 仓位状态。
+- 在事件结算后，对市场结果与已赎回抵押品进行对账。
+- 当一个市场仓位因结算（而非订单成交）而变为空仓时，发布最终的仓位特征。
 
-Why this is not implemented now: market resolution and on-chain redemption are
-outside the CLOB order lifecycle and require a chain/indexer authority. The
-current service deliberately reports only trade-derived execution inventory.
+为何现在未实现：市场结果与链上赎回位于 CLOB 订单生命周期之外，需要一个链/索引器权威。当前服务刻意只报告由成交产生的执行库存。
 
-## Single-Wallet Ownership and Operations
+## 单钱包所有权与运维
 
-- Acquire a PostgreSQL advisory lease keyed by wallet before starting execution.
-- Refuse startup if another `executiond` instance owns the wallet.
-- Add health/readiness endpoints and metrics for NATS, CLOB, user stream,
-  reconciliation lag, stale signed orders, failed settlements, and position
-  divergence.
-- Add PostgreSQL-backed integration tests for concurrent reservations, fill
-  rollback, terminal reservation release, and crash recovery.
+- 在执行启动前，获取一个以钱包为键的 PostgreSQL advisory lease。
+- 如果另一个 `executiond` 实例持有该钱包，则拒绝启动。
+- 增加针对 NATS、CLOB、用户流、对账延迟、过期已签名订单、失败结算与仓位分歧的健康/就绪端点与指标。
+- 增加基于 PostgreSQL 的集成测试，覆盖并发预留、成交回滚、终态预留释放与崩溃恢复。
 
-Why this is not implemented now: `executiond` currently has no configured
-wallet identity independent of CLOB credentials, and the test environment does
-not provision PostgreSQL. Both need explicit deployment configuration rather
-than process-local assumptions.
+为何现在未实现：`executiond` 目前没有独立于 CLOB 凭据的、配置好的钱包身份，测试环境也没有提供 PostgreSQL。二者都需要显式的部署配置，而不是进程本地的假设。
 
-## Current Guarantees
+## 当前保证
 
-- Signed orders are persisted before submission and `SIGNED` orders are
-  resumed after a restart.
-- Definitive CLOB submission rejections are `REJECTED`; unknown submission
-  outcomes are reconciled rather than blindly resubmitted.
-- An unresolved submission eventually reaches `FAILED`, releasing its
-  reservation.
-- Authenticated order and trade events drive durable order state and position
-  accounting.
-- Taker-buy share fees and later permanent trade failure are accounted for
-  consistently.
-- Strategies receive acceptance/rejection and terminal intent acknowledgements,
-  plus best-effort position features.
+- 已签名订单在提交前被持久化，`SIGNED` 订单会在重启后被恢复。
+- 明确的 CLOB 提交拒绝会进入 `REJECTED`；未知的提交结果会进行对账，而不是盲目重发。
+- 无法解决的提交最终会进入 `FAILED`，并释放其预留。
+- 已认证的订单与成交事件驱动持久化的订单状态与仓位记账。
+- taker 买入的份额手续费，以及其后发生的永久成交失败，会被一致地记账。
+- 策略会收到接受/拒绝与终态意图确认，外加尽力而为的仓位特征。
