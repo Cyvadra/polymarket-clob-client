@@ -15,6 +15,7 @@ import (
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/positionfeatures"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/reconciler"
@@ -107,6 +108,10 @@ func run() error {
 	repair.SetEventPublisher(bus)
 
 	if err := executor.SubscribeIntents(bus, execution); err != nil {
+		return err
+	}
+	quotes := marketquotes.New()
+	if err := marketquotes.Subscribe(bus, quotes); err != nil {
 		return err
 	}
 	runtime, err := service.New(

@@ -12,6 +12,7 @@ const (
 	SchemaVersionV1 = "execution.v1"
 
 	SubjectStrategyExecutionIntent = "strategy.execution.intent"
+	SubjectPMMMarketQuotes         = "pmm.market.quotes"
 	SubjectExecutionIntentAck      = "execution.intent.ack"
 	SubjectExecutionOrderEvent     = "execution.order.event"
 	SubjectPositionFeaturesPrefix  = "position.features"
@@ -57,6 +58,22 @@ type ExecutionPolicy struct {
 	RepriceStep          string         `json:"reprice_step,omitempty"`
 	MaxPriceDrift        string         `json:"max_price_drift,omitempty"`
 	Style                ExecutionStyle `json:"style,omitempty"`
+}
+
+type MarketQuote struct {
+	Bid       float64   `json:"bid"`
+	Ask       float64   `json:"ask"`
+	Mid       float64   `json:"mid"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// MarketQuotes is the latest best bid/ask snapshot supplied by PMM for one
+// binary market. It is an execution input, not a PMM feature payload.
+type MarketQuotes struct {
+	MarketID string      `json:"market_id"`
+	At       time.Time   `json:"at"`
+	Up       MarketQuote `json:"up"`
+	Down     MarketQuote `json:"down"`
 }
 
 type ExecutionIntent struct {

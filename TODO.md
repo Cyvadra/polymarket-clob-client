@@ -6,9 +6,9 @@
 
 - 实现一个按意图、多 child-order 的 worker，用于 post-only 被穿越重试、taker 重报价、价格漂移拒绝，以及从 soft-close 升级到 force-close。
 - 将每个 child 以递增的 `child_sequence` 持久化，包括其价格、撤单原因与替换关系。
-- 消费一个有边界且带时间戳的订单簿快照，作为专用的运行时输入。不要让执行器去拉取或订阅 pmm 的特征。
+- 已消费 `pmm.market.quotes`：以 `market_id` 为键、带时间戳的 up/down bid/ask/mid 快照进入运行时 cache。不要让执行器去拉取或订阅 pmm 的特征。
 
-为何现在未实现：当前契约已携带 `style`、`max_reprices`、`reprice_step`、`max_price_drift` 与重报价延迟，但 `executiond` 没有自有的、权威的市场数据源。基于过期的 REST 读取来实现这些战术，会把一个执行策略变成带有未知市场新鲜度的、无界副作用。在加入该 worker 之前，策略必须提供一个“执行安全”的市场快照契约，或者 `executiond` 必须自有一个专门的 CLOB 订单簿数据流。
+为何现在未实现：当前契约已携带 `style`、`max_reprices`、`reprice_step`、`max_price_drift` 与重报价延迟，且 `executiond` 已消费有序的 PMM quotes。仍需实现每个 intent 的多 child-order worker，并在下单前对 quote 新鲜度、market_id 与 intent 的 condition_id、以及价格漂移做原子校验；不能在 NATS 行情回调中直接下单。
 
 ## 风险控制
 
