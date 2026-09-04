@@ -5,10 +5,10 @@ package tactics
 import (
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
@@ -75,7 +75,7 @@ func Plan(request Request) Decision {
 	}
 	if request.ActiveChild != nil {
 		if !statemachine.RequiresLockedExposure(request.ActiveChild.State) {
-			return Decision{Action: ActionSubmitChild, NextSequence: nextSequence(request.Children), Price: intent.LimitPrice, Shares: formatPrice(remaining), PostOnly: intent.PostOnly, TimeInForce: intent.TimeInForce, Reason: "active child terminal"}
+			return Decision{Action: ActionSubmitChild, NextSequence: nextSequence(request.Children), Price: intent.LimitPrice, Shares: decimal.FormatPrice(remaining), PostOnly: intent.PostOnly, TimeInForce: intent.TimeInForce, Reason: "active child terminal"}
 		}
 		if !intervalElapsed(policy.RepriceIntervalMillis, request.LastActionAt, request.Now) {
 			return Decision{Action: ActionWait, Reason: "reprice interval has not elapsed"}
@@ -89,7 +89,7 @@ func Plan(request Request) Decision {
 			return fail("invalid active child price")
 		}
 		if math.Abs(price-currentPrice) >= driftThreshold(policy) {
-			return Decision{Action: ActionCancelActive, Price: formatPrice(price), Reason: "target price changed"}
+			return Decision{Action: ActionCancelActive, Price: decimal.FormatPrice(price), Reason: "target price changed"}
 		}
 		return Decision{Action: ActionWait, Reason: "active child remains within price band"}
 	}
@@ -97,7 +97,7 @@ func Plan(request Request) Decision {
 	if err != nil {
 		return Decision{Action: ActionWait, Reason: err.Error()}
 	}
-	return Decision{Action: ActionSubmitChild, NextSequence: nextSequence(request.Children), Price: formatPrice(price), Shares: formatPrice(remaining), PostOnly: postOnly(intent), TimeInForce: timeInForce(intent, style), Reason: "submit next child"}
+	return Decision{Action: ActionSubmitChild, NextSequence: nextSequence(request.Children), Price: decimal.FormatPrice(price), Shares: decimal.FormatPrice(remaining), PostOnly: postOnly(intent), TimeInForce: timeInForce(intent, style), Reason: "submit next child"}
 }
 
 func targetPrice(intent protocol.ExecutionIntent, snapshot marketquotes.Snapshot, hasQuote bool, now time.Time) (float64, error) {
@@ -124,8 +124,8 @@ func targetPrice(intent protocol.ExecutionIntent, snapshot marketquotes.Snapshot
 
 func makerPrice(intent protocol.ExecutionIntent, quote marketquotes.Quote) (float64, error) {
 	policy := intent.Policy
-	offset := optionalFloat(policy.QuoteOffset, 0)
-	step := optionalFloat(policy.PriceStep, defaultTick)
+	offset := decimal.OptionalFloat(policy.QuoteOffset, 0)
+	step := decimal.OptionalFloat(policy.PriceStep, defaultTick)
 	if intent.Side == protocol.SideBuy {
 		price := quote.Bid + offset
 		if price >= quote.Ask {
@@ -142,7 +142,7 @@ func makerPrice(intent protocol.ExecutionIntent, quote marketquotes.Quote) (floa
 
 func takerPrice(intent protocol.ExecutionIntent, quote marketquotes.Quote) (float64, error) {
 	policy := intent.Policy
-	step := optionalFloat(policy.PriceStep, defaultTick)
+	step := decimal.OptionalFloat(policy.PriceStep, defaultTick)
 	if intent.Side == protocol.SideBuy {
 		return clampBuy(intent, quote.Ask+step)
 	}
@@ -182,14 +182,14 @@ func quoteForToken(snapshot marketquotes.Snapshot, tokenID string) (marketquotes
 }
 
 func remainingShares(target, filled string) (float64, error) {
-	targetShares, err := strconv.ParseFloat(target, 64)
+	targetShares, err := decimal.PositiveFloat(target)
 	if err != nil || targetShares <= 0 {
 		return 0, fmt.Errorf("invalid target shares")
 	}
 	if strings.TrimSpace(filled) == "" {
 		return targetShares, nil
 	}
-	filledShares, err := strconv.ParseFloat(filled, 64)
+	filledShares, err := decimal.NonNegativeFloat(filled)
 	if err != nil || filledShares < 0 {
 		return 0, fmt.Errorf("invalid filled shares")
 	}
@@ -226,10 +226,10 @@ func intervalElapsed(intervalMillis int64, lastActionAt, now time.Time) bool {
 
 func driftThreshold(policy protocol.ExecutionPolicy) float64 {
 	if policy.PriceStep != "" {
-		return optionalFloat(policy.PriceStep, defaultTick)
+		return decimal.OptionalFloat(policy.PriceStep, defaultTick)
 	}
 	if policy.QuoteOffset != "" {
-		return optionalFloat(policy.QuoteOffset, defaultTick)
+		return decimal.OptionalFloat(policy.QuoteOffset, defaultTick)
 	}
 	return defaultTick
 }
@@ -255,22 +255,7 @@ func requiredPolicyPrice(name, value string) (float64, error) {
 }
 
 func parsePrice(value string) (float64, error) {
-	price, err := strconv.ParseFloat(value, 64)
-	if err != nil || price <= 0 || price >= 1 {
-		return 0, fmt.Errorf("invalid price %q", value)
-	}
-	return price, nil
-}
-
-func optionalFloat(value string, fallback float64) float64 {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return fallback
-	}
-	return parsed
+	return decimal.Price(value)
 }
 
 func validClamped(price float64) (float64, error) {
@@ -278,10 +263,6 @@ func validClamped(price float64) (float64, error) {
 		return 0, fmt.Errorf("planned price is outside valid range")
 	}
 	return price, nil
-}
-
-func formatPrice(value float64) string {
-	return strconv.FormatFloat(math.Round(value*1e6)/1e6, 'f', -1, 64)
 }
 
 func fail(reason string) Decision {

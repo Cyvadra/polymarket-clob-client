@@ -2,12 +2,12 @@ package executor
 
 import (
 	"fmt"
-	"math/big"
 	"strconv"
 	"strings"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -27,12 +27,12 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.Side != protocol.SideBuy && intent.Side != protocol.SideSell {
 		return fmt.Errorf("invalid side %q", intent.Side)
 	}
-	shares, err := strconv.ParseFloat(intent.TargetShares, 64)
+	shares, err := decimal.PositiveFloat(intent.TargetShares)
 	if err != nil || shares <= 0 {
 		return fmt.Errorf("invalid target shares: %w", err)
 	}
-	price, err := strconv.ParseFloat(intent.LimitPrice, 64)
-	if err != nil || price <= 0 || price >= 1 {
+	price, err := decimal.Price(intent.LimitPrice)
+	if err != nil {
 		return fmt.Errorf("invalid limit price %q", intent.LimitPrice)
 	}
 	if intent.TimeInForce != protocol.TimeInForceGTC && intent.TimeInForce != protocol.TimeInForceFOK && intent.TimeInForce != protocol.TimeInForceFAK && intent.TimeInForce != protocol.TimeInForceGTD {
@@ -87,12 +87,12 @@ func validatePolicyTactics(intent protocol.ExecutionIntent, limitPrice float64) 
 		return err
 	}
 	if policy.PriceStep != "" {
-		if step, err := strconv.ParseFloat(policy.PriceStep, 64); err != nil || step <= 0 || step >= 1 {
+		if step, err := decimal.Price(policy.PriceStep); err != nil || step <= 0 || step >= 1 {
 			return fmt.Errorf("invalid execution policy price_step %q", policy.PriceStep)
 		}
 	}
 	if policy.QuoteOffset != "" {
-		if offset, err := strconv.ParseFloat(policy.QuoteOffset, 64); err != nil || offset < 0 || offset >= 1 {
+		if offset, err := decimal.NonNegativeFloat(policy.QuoteOffset); err != nil || offset >= 1 {
 			return fmt.Errorf("invalid execution policy quote_offset %q", policy.QuoteOffset)
 		}
 	}
@@ -119,8 +119,8 @@ func optionalPolicyPrice(name, value string, fallback float64) (float64, error) 
 	if value == "" {
 		return fallback, nil
 	}
-	price, err := strconv.ParseFloat(value, 64)
-	if err != nil || price <= 0 || price >= 1 {
+	price, err := decimal.Price(value)
+	if err != nil {
 		return 0, fmt.Errorf("invalid execution policy %s %q", name, value)
 	}
 	return price, nil
@@ -154,32 +154,26 @@ func intentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 	}
 }
 
-func reservationRecord(intent protocol.ExecutionIntent, reservationID string, now time.Time) store.ReservationRecord {
+func reservationRecord(intent protocol.ExecutionIntent, child plannedChild, reservationID string, now time.Time) store.ReservationRecord {
 	notional := "0"
-	if shares, sharesOK := newRat(intent.TargetShares); sharesOK {
-		if price, priceOK := newRat(intent.LimitPrice); priceOK {
-			notional = new(big.Rat).Mul(shares, price).FloatString(18)
-		}
+	if product, ok := decimal.MulString(child.Shares, child.Price); ok {
+		notional = product
 	}
-	return store.ReservationRecord{ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: 1, MarketID: intent.MarketID, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side, Shares: intent.TargetShares, Notional: notional, State: "active", Reason: "execution intent accepted", CreatedAt: now, UpdatedAt: now}
+	return store.ReservationRecord{ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: child.Sequence, MarketID: intent.MarketID, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side, Shares: child.Shares, Notional: notional, State: "active", Reason: "execution intent accepted", CreatedAt: now, UpdatedAt: now}
 }
 
 func reservationID(intentID string, childSequence int) string {
 	return fmt.Sprintf("%s:%d", intentID, childSequence)
 }
 
-func newRat(value string) (*big.Rat, bool) {
-	return new(big.Rat).SetString(value)
-}
-
-func userOrder(intent protocol.ExecutionIntent) (clobclient.UserOrder, error) {
-	shares, err := strconv.ParseFloat(intent.TargetShares, 64)
+func userOrder(intent protocol.ExecutionIntent, child plannedChild) (clobclient.UserOrder, error) {
+	shares, err := strconv.ParseFloat(child.Shares, 64)
 	if err != nil || shares <= 0 {
-		return clobclient.UserOrder{}, fmt.Errorf("invalid target shares %q", intent.TargetShares)
+		return clobclient.UserOrder{}, fmt.Errorf("invalid planned shares %q", child.Shares)
 	}
-	price, err := strconv.ParseFloat(intent.LimitPrice, 64)
+	price, err := strconv.ParseFloat(child.Price, 64)
 	if err != nil || price <= 0 || price >= 1 {
-		return clobclient.UserOrder{}, fmt.Errorf("invalid limit price %q", intent.LimitPrice)
+		return clobclient.UserOrder{}, fmt.Errorf("invalid planned price %q", child.Price)
 	}
-	return clobclient.UserOrder{TokenID: intent.TokenID, Side: intent.Side, Shares: shares, Price: price, PostOnly: intent.PostOnly, OrderType: intent.TimeInForce}, nil
+	return clobclient.UserOrder{TokenID: intent.TokenID, Side: intent.Side, Shares: shares, Price: price, PostOnly: child.PostOnly, OrderType: child.TimeInForce}, nil
 }

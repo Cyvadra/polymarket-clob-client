@@ -25,7 +25,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
                               +-- position features and intent acknowledgements
 ```
 
-`pmm` 负责市场特征产出；`executiond` 不消费 pmm 的特征。策略负责解析市场标识符并发布完整的执行意图。`executiond` 负责签名、提交、撤单、已认证账户事件、持久化订单状态与仓位记账。
+`pmm` 负责市场特征产出并发布行情快照；策略负责解析市场标识符并发布完整的执行意图。`executiond` 负责签名、提交、撤单、已认证账户事件、持久化订单状态、仓位记账，以及使用最新行情快照为高级执行风格规划初始 child 订单。
 
 服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。意图投递刻意采用 at-most-once 语义：过期或丢失的意图不会被重放。可解码且具有 `intent_id` 的非法意图会收到拒绝确认；无效 JSON 无法确认。策略必须把缺失确认视为不确定结果，而不是“未开仓”。每个钱包只能运行一个 `executiond` 实例。
 
@@ -36,11 +36,12 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | 主题 | 方向 | 负载 | 用途 |
 | --- | --- | --- | --- |
 | `strategy.execution.intent` | strategy -> executiond | `ExecutionIntent` | 请求一个 `OPEN` 或 `CLOSE` 订单。 |
+| `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | 高级执行风格使用的最新行情快照。 |
 | `execution.intent.ack` | executiond -> strategy | `ExecutionIntentAck` | 接受、拒绝、终态完成、部分成交、过期或失败。 |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | 持久化的订单生命周期迁移。 |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
 
-`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。当前仅支持单 child 的 `LIMIT` 执行；未实现的 post-only 重试和 taker 重报价风格会显式拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。
+`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。`LIMIT` 使用意图限价直接创建初始 child；`MAKER_POST_ONLY`、`TAKER_AGGRESSIVE` 与 `AUTO` 会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force。当前运行时仍只创建一个 child；尚未实现持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 
@@ -48,7 +49,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 已认证的 CLOB 用户流是 `executiond` 中唯一的账户事件入口。Fill ID 使重复投递具备幂等性。成交生命周期状态（`MATCHED`、`MINED`、`CONFIRMED`、`FAILED`）会被持久化。taker BUY 会按所配置的 Polymarket 手续费公式计入净结果份额；如果该成交随后变为 `FAILED`，其仓位影响会按相同的计入份额数量被反向冲销。
 
-发布的仓位状态是执行视图，而非结算或赎回引擎。其余的对账与结算工作请参见 [TODO.md](TODO.md)。
+发布的仓位状态是执行视图，而非结算或赎回引擎。订单状态对账由 CLOB REST 修复未知提交结果；链上结算、赎回与跨系统资金核对不属于 `executiond` 的当前职责。
 
 ### 包边界
 
@@ -57,7 +58,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 - `polymarket`：聚合 SDK facade。
 - `cmd/executiond`：执行服务的 composition root。
 - `internal/execution/protocol`：`executiond` 私有的 Go wire types；外部协议见 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md)。
-- `pkg/accountfeed`、`pkg/executor`、`pkg/reconciler`、`pkg/store`：执行服务实现；它们不是策略集成 API。
+- `pkg/accountfeed`、`pkg/executor`、`pkg/reconciler`、`pkg/store`：执行服务实现包，保持 Go 可测试性与模块化；策略集成 API 仍以 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md) 为准。
 
 ### 运行 `executiond`
 

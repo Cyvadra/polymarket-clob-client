@@ -11,9 +11,19 @@ import (
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/executor/tactics"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
+
+type plannedChild struct {
+	Sequence    int
+	Shares      string
+	Price       string
+	PostOnly    bool
+	TimeInForce protocol.TimeInForce
+}
 
 func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
@@ -79,12 +89,16 @@ func (e *Executor) resumeIntent(ctx context.Context, intent protocol.ExecutionIn
 	if err := json.Unmarshal(order.SignedPayload, &signed); err != nil {
 		return fmt.Errorf("decode persisted signed order: %w", err)
 	}
-	return e.submitSigned(ctx, intent, signed, order.Revision)
+	return e.submitSigned(ctx, intent, signed, order.ChildSequence, order.Revision, order.OrderType, order.PostOnly)
 }
 
 func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
-	reservationID := reservationID(intent.IntentID, 1)
-	if err := e.store.Reserve(ctx, reservationRecord(intent, reservationID, e.now().UTC())); err != nil {
+	child, err := e.planInitialChild(intent)
+	if err != nil {
+		return err
+	}
+	reservationID := reservationID(intent.IntentID, child.Sequence)
+	if err := e.store.Reserve(ctx, reservationRecord(intent, child, reservationID, e.now().UTC())); err != nil {
 		if err == store.ErrDuplicate {
 			reservation, loadErr := e.store.Reservation(ctx, reservationID)
 			if loadErr != nil {
@@ -103,7 +117,7 @@ func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.Executi
 			_ = e.store.Release(context.Background(), reservationID, "prepare order failed")
 		}
 	}()
-	userOrder, err := userOrder(intent)
+	userOrder, err := userOrder(intent, child)
 	if err != nil {
 		return err
 	}
@@ -117,19 +131,32 @@ func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.Executi
 	}
 	hash := sha256.Sum256(payload)
 	if err := e.store.PersistSignedOrder(ctx, store.SignedOrderRecord{
-		IntentID: intent.IntentID, ChildSequence: 1, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
-		Salt: strconv.FormatInt(signed.Salt, 10), RequestedShares: intent.TargetShares, Price: intent.LimitPrice,
-		OrderType: intent.TimeInForce, PostOnly: intent.PostOnly, State: statemachine.StateSigned, Revision: 1,
+		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
+		Salt: strconv.FormatInt(signed.Salt, 10), RequestedShares: child.Shares, Price: child.Price,
+		OrderType: child.TimeInForce, PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
 		CreatedAt: e.now().UTC(), UpdatedAt: e.now().UTC(),
 	}); err != nil {
 		return fmt.Errorf("persist signed order: %w", err)
 	}
 	releaseOnFailure = false
-	return e.submitSigned(ctx, intent, signed, 1)
+	return e.submitSigned(ctx, intent, signed, child.Sequence, 1, child.TimeInForce, child.PostOnly)
 }
 
-func (e *Executor) submitSigned(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, revision int64) error {
-	order := store.SignedOrderRecord{IntentID: intent.IntentID, ChildSequence: 1, State: statemachine.StateSigned, Revision: revision, MatchedShares: "0"}
+func (e *Executor) planInitialChild(intent protocol.ExecutionIntent) (plannedChild, error) {
+	var quote marketquotes.Snapshot
+	hasQuote := false
+	if e.quotes != nil {
+		quote, hasQuote = e.quotes.Get(intent.ConditionID)
+	}
+	decision := tactics.Plan(tactics.Request{Intent: intent, Quote: quote, HasQuote: hasQuote, Now: e.now().UTC()})
+	if decision.Action != tactics.ActionSubmitChild {
+		return plannedChild{}, fmt.Errorf("execution plan did not produce a child order: %s", decision.Reason)
+	}
+	return plannedChild{Sequence: decision.NextSequence, Shares: decision.Shares, Price: decision.Price, PostOnly: decision.PostOnly, TimeInForce: decision.TimeInForce}, nil
+}
+
+func (e *Executor) submitSigned(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, childSequence int, revision int64, orderType protocol.TimeInForce, postOnly bool) error {
+	order := store.SignedOrderRecord{IntentID: intent.IntentID, ChildSequence: childSequence, State: statemachine.StateSigned, Revision: revision, MatchedShares: "0"}
 	updated, err := e.store.TransitionOrder(ctx, order, statemachine.EventSubmitStarted, "0", "", "submit requested")
 	if err != nil {
 		return fmt.Errorf("mark submitting: %w", err)
@@ -137,7 +164,7 @@ func (e *Executor) submitSigned(ctx context.Context, intent protocol.ExecutionIn
 	if err := e.publishTransition(updated, "submit requested"); err != nil {
 		return fmt.Errorf("publish submitting event: %w", err)
 	}
-	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, intent.TimeInForce, intent.PostOnly)
+	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, orderType, postOnly)
 	if submitErr != nil {
 		if submissionRejected(submitErr) {
 			return e.markSubmitRejected(ctx, updated, submitErr.Error())

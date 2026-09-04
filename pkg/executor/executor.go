@@ -9,6 +9,7 @@ import (
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -17,6 +18,10 @@ type CLOB interface {
 	CreateOrder(context.Context, clobclient.UserOrder) (clobclient.SignedOrderV2, error)
 	SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error)
 	CancelOrder(context.Context, string) error
+}
+
+type QuoteProvider interface {
+	Get(string) (marketquotes.Snapshot, bool)
 }
 
 type Repository interface {
@@ -29,6 +34,7 @@ type Repository interface {
 type Executor struct {
 	store   Repository
 	clob    CLOB
+	quotes  QuoteProvider
 	now     func() time.Time
 	onError func(error)
 	publish protocol.ExecutionEventPublisher
@@ -42,6 +48,10 @@ func New(repository Repository, clob CLOB, now func() time.Time) (*Executor, err
 		now = time.Now
 	}
 	return &Executor{store: repository, clob: clob, now: now}, nil
+}
+
+func (e *Executor) SetQuoteProvider(provider QuoteProvider) {
+	e.quotes = provider
 }
 
 func (e *Executor) Init(context.Context) error { return nil }

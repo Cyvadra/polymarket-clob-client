@@ -65,9 +65,11 @@ either a future `expires_at` or a positive `policy.complete_within_ms`.
 `intent_id` is the durable idempotency identity. Reusing it resumes a signed
 order if necessary and does not create a second child order in the current
 runtime. Advanced tactic fields are accepted and validated, and quote snapshots
-are cached for the tactic planner, but the live executor still creates one child
-order only. It does not yet perform cancel-replace, post-only retry, taker
-repricing, price drift controls, or soft/force-close lifecycle execution.
+are used to plan the initial child order price, post-only flag, and
+time-in-force for `MAKER_POST_ONLY`, `TAKER_AGGRESSIVE`, and `AUTO` styles. The
+live executor still creates one child order only. It does not yet perform
+cancel-replace, post-only crossing retry, price-drift repricing after submit, or
+soft/force-close lifecycle execution.
 
 Example:
 

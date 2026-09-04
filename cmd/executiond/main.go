@@ -82,6 +82,7 @@ func run() error {
 		return err
 	}
 	quotes := marketquotes.New()
+	execution.SetQuoteProvider(quotes)
 	fills, err := accountfeed.NewFillConsumer(store, time.Now)
 	if err != nil {
 		return err

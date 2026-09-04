@@ -10,8 +10,7 @@ type Quote struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// Snapshot is held for the future execution tactics worker; executiond does
-// not subscribe to or act on snapshots until that worker exists.
+// Snapshot is consumed by execution tactics when planning quote-aware child orders.
 type Snapshot struct {
 	ConditionID string    `json:"condition_id"`
 	At          time.Time `json:"at"`

@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -75,17 +75,16 @@ func validateFill(fill AccountFill) error {
 	if fill.Side != protocol.SideBuy && fill.Side != protocol.SideSell {
 		return fmt.Errorf("invalid fill side %q", fill.Side)
 	}
-	if !positiveDecimal(fill.Shares) {
+	if !decimal.Positive(fill.Shares) {
 		return fmt.Errorf("invalid fill shares %q", fill.Shares)
 	}
-	price, ok := new(big.Rat).SetString(fill.Price)
-	if !ok || price.Sign() <= 0 || price.Cmp(big.NewRat(1, 1)) >= 0 {
+	if _, err := decimal.Price(fill.Price); err != nil {
 		return fmt.Errorf("invalid fill price %q", fill.Price)
 	}
-	if fill.Fee != "" && !nonNegativeDecimal(fill.Fee) {
+	if fill.Fee != "" && !decimal.NonNegative(fill.Fee) {
 		return fmt.Errorf("invalid fill fee %q", fill.Fee)
 	}
-	if fill.FeeRateBps != "" && !nonNegativeDecimal(fill.FeeRateBps) {
+	if fill.FeeRateBps != "" && !decimal.NonNegative(fill.FeeRateBps) {
 		return fmt.Errorf("invalid fill fee rate %q", fill.FeeRateBps)
 	}
 	switch fill.TradeStatus {
@@ -94,14 +93,4 @@ func validateFill(fill AccountFill) error {
 		return fmt.Errorf("invalid trade status %q", fill.TradeStatus)
 	}
 	return nil
-}
-
-func positiveDecimal(value string) bool {
-	parsed, ok := new(big.Rat).SetString(value)
-	return ok && parsed.Sign() > 0
-}
-
-func nonNegativeDecimal(value string) bool {
-	parsed, ok := new(big.Rat).SetString(value)
-	return ok && parsed.Sign() >= 0
 }

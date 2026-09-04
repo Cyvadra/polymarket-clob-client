@@ -3,8 +3,9 @@ package statemachine
 
 import (
 	"fmt"
-	"math/big"
 	"strings"
+
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 )
 
 type State string
@@ -112,8 +113,8 @@ func fullyMatched(matched, requested string) bool {
 	if strings.TrimSpace(requested) == "" {
 		return true
 	}
-	matchedValue, matchedOK := new(big.Rat).SetString(strings.TrimSpace(matched))
-	requestedValue, requestedOK := new(big.Rat).SetString(strings.TrimSpace(requested))
+	matchedValue, matchedOK := decimal.Rat(matched)
+	requestedValue, requestedOK := decimal.Rat(requested)
 	return matchedOK && requestedOK && matchedValue.Cmp(requestedValue) >= 0
 }
 

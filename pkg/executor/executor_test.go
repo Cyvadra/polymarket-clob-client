@@ -9,6 +9,7 @@ import (
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -56,6 +57,15 @@ func (s *fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRe
 	s.revisions = append(s.revisions, order.Revision)
 	s.states = append(s.states, transition.To)
 	order.State, order.Revision, order.MatchedShares = transition.To, order.Revision+1, matchedShares
+	if s.order.IntentID == order.IntentID && s.order.ChildSequence == order.ChildSequence {
+		order.SignedPayload = s.order.SignedPayload
+		order.SignedOrderHash = s.order.SignedOrderHash
+		order.Salt = s.order.Salt
+		order.RequestedShares = s.order.RequestedShares
+		order.Price = s.order.Price
+		order.OrderType = s.order.OrderType
+		order.PostOnly = s.order.PostOnly
+	}
 	if exchangeOrderID != "" {
 		order.ExchangeOrderID = exchangeOrderID
 	}
@@ -100,18 +110,24 @@ func (s *fakeStore) ReservationsForPosition(context.Context, string, string) ([]
 }
 
 type fakeCLOB struct {
-	submitErr error
-	cancelErr error
-	response  *clobclient.OrderResponse
-	submits   int
-	cancels   int
+	submitErr         error
+	cancelErr         error
+	response          *clobclient.OrderResponse
+	submits           int
+	cancels           int
+	created           clobclient.UserOrder
+	submittedType     clobclient.OrderType
+	submittedPostOnly bool
 }
 
-func (c *fakeCLOB) CreateOrder(context.Context, clobclient.UserOrder) (clobclient.SignedOrderV2, error) {
+func (c *fakeCLOB) CreateOrder(_ context.Context, order clobclient.UserOrder) (clobclient.SignedOrderV2, error) {
+	c.created = order
 	return clobclient.SignedOrderV2{Salt: 42, TokenID: "token", Signature: "signature"}, nil
 }
-func (c *fakeCLOB) SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error) {
+func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrderV2, orderType clobclient.OrderType, postOnly bool) (*clobclient.OrderResponse, error) {
 	c.submits++
+	c.submittedType = orderType
+	c.submittedPostOnly = postOnly
 	return c.response, c.submitErr
 }
 func (c *fakeCLOB) CancelOrder(context.Context, string) error {
@@ -324,6 +340,69 @@ func TestValidateIntentAcceptsMakerPostOnlyBuyWithinMaxPrice(t *testing.T) {
 	}
 }
 
+func TestExecuteUsesPlannerForMakerPostOnlyOrder(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	executor, err := New(storer, client, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	quotes := marketquotes.New()
+	if err := quotes.Put(testQuote(now)); err != nil {
+		t.Fatalf("put quote: %v", err)
+	}
+	executor.SetQuoteProvider(quotes)
+	intent := testIntent()
+	intent.TokenID = "up-token"
+	intent.LimitPrice = "0.41"
+	intent.Policy.Style = protocol.ExecutionStyleMakerPostOnly
+	intent.Policy.InitialPrice = "0.41"
+	intent.Policy.MaxPrice = "0.55"
+	intent.Policy.PriceStep = "0.01"
+	intent.Policy.QuoteOffset = "0.01"
+	intent.Policy.QuoteMaxAgeMillis = 500
+	if err := executor.Execute(context.Background(), intent); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if client.created.Price != 0.43 || !client.created.PostOnly || client.submittedType != protocol.TimeInForceGTC || !client.submittedPostOnly {
+		t.Fatalf("expected planned maker order, created=%+v submittedType=%s submittedPostOnly=%v", client.created, client.submittedType, client.submittedPostOnly)
+	}
+	if storer.order.Price != "0.43" || !storer.order.PostOnly || storer.reservations[0].Shares != "2" || storer.reservations[0].Notional != "0.860000000000000000" {
+		t.Fatalf("expected planned order persistence, order=%+v reservations=%+v", storer.order, storer.reservations)
+	}
+}
+
+func TestExecuteUsesPlannerForTakerAggressiveOrder(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	executor, err := New(storer, client, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	quotes := marketquotes.New()
+	if err := quotes.Put(testQuote(now)); err != nil {
+		t.Fatalf("put quote: %v", err)
+	}
+	executor.SetQuoteProvider(quotes)
+	intent := testIntent()
+	intent.TokenID = "up-token"
+	intent.LimitPrice = "0.41"
+	intent.TimeInForce = protocol.TimeInForceGTC
+	intent.Policy.Style = protocol.ExecutionStyleTakerAggressive
+	intent.Policy.InitialPrice = "0.41"
+	intent.Policy.MaxPrice = "0.55"
+	intent.Policy.PriceStep = "0.01"
+	intent.Policy.QuoteMaxAgeMillis = 500
+	if err := executor.Execute(context.Background(), intent); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if client.created.Price != 0.47 || client.created.OrderType != protocol.TimeInForceFAK || client.submittedType != protocol.TimeInForceFAK {
+		t.Fatalf("expected planned taker order, created=%+v submittedType=%s", client.created, client.submittedType)
+	}
+}
+
 func TestValidateIntentRejectsBuyPolicyAboveMaxPrice(t *testing.T) {
 	intent := testIntent()
 	intent.Policy.Style = protocol.ExecutionStyleTakerAggressive
@@ -347,4 +426,8 @@ func TestValidateIntentRejectsSellPolicyBelowMinPrice(t *testing.T) {
 
 func testIntent() protocol.ExecutionIntent {
 	return protocol.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
+}
+
+func testQuote(at time.Time) marketquotes.Snapshot {
+	return marketquotes.Snapshot{ConditionID: "condition", At: at, Up: marketquotes.Quote{AssetID: "up-token", Bid: 0.42, Ask: 0.46, Mid: 0.44, Timestamp: at}, Down: marketquotes.Quote{AssetID: "down-token", Bid: 0.52, Ask: 0.56, Mid: 0.54, Timestamp: at}}
 }
