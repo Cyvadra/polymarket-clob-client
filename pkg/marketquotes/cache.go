@@ -2,69 +2,50 @@
 package marketquotes
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strings"
 	"sync"
-
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 )
-
-type Subscriber interface {
-	Subscribe(string, natsbus.Handler) error
-}
 
 type Cache struct {
 	mu     sync.RWMutex
-	quotes map[string]contracts.MarketQuotes
+	quotes map[string]Snapshot
 }
 
 func New() *Cache {
-	return &Cache{quotes: make(map[string]contracts.MarketQuotes)}
+	return &Cache{quotes: make(map[string]Snapshot)}
 }
 
-func (c *Cache) Put(quotes contracts.MarketQuotes) error {
+func (c *Cache) Put(quotes Snapshot) error {
 	if err := Validate(quotes); err != nil {
 		return err
 	}
-	quotes.MarketID = strings.TrimSpace(quotes.MarketID)
+	quotes.ConditionID = strings.TrimSpace(quotes.ConditionID)
+	quotes.Up.AssetID = strings.TrimSpace(quotes.Up.AssetID)
+	quotes.Down.AssetID = strings.TrimSpace(quotes.Down.AssetID)
 	quotes.At = quotes.At.UTC()
 	quotes.Up.Timestamp = quotes.Up.Timestamp.UTC()
 	quotes.Down.Timestamp = quotes.Down.Timestamp.UTC()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if existing, ok := c.quotes[quotes.MarketID]; ok && existing.At.After(quotes.At) {
+	if existing, ok := c.quotes[quotes.ConditionID]; ok && existing.At.After(quotes.At) {
 		return nil
 	}
-	c.quotes[quotes.MarketID] = quotes
+	c.quotes[quotes.ConditionID] = quotes
 	return nil
 }
 
-func (c *Cache) Get(marketID string) (contracts.MarketQuotes, bool) {
+func (c *Cache) Get(conditionID string) (Snapshot, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	quotes, ok := c.quotes[strings.TrimSpace(marketID)]
+	quotes, ok := c.quotes[strings.TrimSpace(conditionID)]
 	return quotes, ok
 }
 
-func Subscribe(bus Subscriber, cache *Cache) error {
-	if bus == nil || cache == nil {
-		return fmt.Errorf("NATS subscriber and market quote cache are required")
-	}
-	return bus.Subscribe(contracts.SubjectPMMMarketQuotes, func(_ context.Context, payload []byte) error {
-		quotes, err := natsbus.DecodeJSON[contracts.MarketQuotes](payload)
-		if err != nil {
-			return err
-		}
-		return cache.Put(quotes)
-	})
-}
-
-func Validate(quotes contracts.MarketQuotes) error {
-	if strings.TrimSpace(quotes.MarketID) == "" {
-		return fmt.Errorf("market quote market ID is required")
+func Validate(quotes Snapshot) error {
+	if strings.TrimSpace(quotes.ConditionID) == "" {
+		return fmt.Errorf("market quote condition ID is required")
 	}
 	if quotes.At.IsZero() {
 		return fmt.Errorf("market quote timestamp is required")
@@ -75,7 +56,10 @@ func Validate(quotes contracts.MarketQuotes) error {
 	return validateSide("down", quotes.Down)
 }
 
-func validateSide(name string, quote contracts.MarketQuote) error {
+func validateSide(name string, quote Quote) error {
+	if strings.TrimSpace(quote.AssetID) == "" {
+		return fmt.Errorf("%s quote asset ID is required", name)
+	}
 	if quote.Timestamp.IsZero() {
 		return fmt.Errorf("%s quote timestamp is required", name)
 	}

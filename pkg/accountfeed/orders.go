@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -19,7 +19,7 @@ type OrderStore interface {
 type OrderConsumer struct {
 	store   OrderStore
 	now     func() time.Time
-	publish contracts.ExecutionEventPublisher
+	publish protocol.ExecutionEventPublisher
 }
 
 func NewOrderConsumer(repository OrderStore, now func() time.Time) (*OrderConsumer, error) {
@@ -32,15 +32,11 @@ func NewOrderConsumer(repository OrderStore, now func() time.Time) (*OrderConsum
 	return &OrderConsumer{store: repository, now: now}, nil
 }
 
-func (c *OrderConsumer) Init(context.Context) error  { return nil }
-func (c *OrderConsumer) Run(context.Context) error   { return nil }
-func (c *OrderConsumer) Close(context.Context) error { return nil }
-
-func (c *OrderConsumer) SetEventPublisher(publisher contracts.ExecutionEventPublisher) {
+func (c *OrderConsumer) SetEventPublisher(publisher protocol.ExecutionEventPublisher) {
 	c.publish = publisher
 }
 
-func (c *OrderConsumer) Consume(ctx context.Context, observation contracts.AccountOrderEvent) error {
+func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEvent) error {
 	if err := validateOrderEvent(observation); err != nil {
 		return err
 	}
@@ -67,7 +63,7 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation contracts.Accou
 	if err != nil {
 		return fmt.Errorf("persist account order observation: %w", err)
 	}
-	if err := contracts.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, c.now()); err != nil {
+	if err := protocol.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, c.now()); err != nil {
 		return fmt.Errorf("publish account order event: %w", err)
 	}
 	if err := PublishTerminalAck(c.publish, updated, reason, c.now()); err != nil {
@@ -76,23 +72,23 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation contracts.Accou
 	return nil
 }
 
-func PublishTerminalAck(publisher contracts.ExecutionEventPublisher, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
-	var status contracts.IntentAckStatus
+func PublishTerminalAck(publisher protocol.ExecutionEventPublisher, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
+	var status protocol.IntentAckStatus
 	switch order.State {
 	case statemachine.StateFilled:
-		status = contracts.IntentCompleted
+		status = protocol.IntentCompleted
 	case statemachine.StateCanceled:
-		status = contracts.IntentPartial
+		status = protocol.IntentPartial
 	case statemachine.StateRejected:
-		status = contracts.IntentRejected
+		status = protocol.IntentRejected
 	case statemachine.StateExpired:
-		status = contracts.IntentExpired
+		status = protocol.IntentExpired
 	case statemachine.StateFailed:
-		status = contracts.IntentFailed
+		status = protocol.IntentFailed
 	default:
 		return nil
 	}
-	if err := contracts.PublishExecutionIntentAck(publisher, contracts.ExecutionIntentAck{
+	if err := protocol.PublishExecutionIntentAck(publisher, protocol.ExecutionIntentAck{
 		IntentID: order.IntentID, Status: status, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt,
 	}); err != nil {
 		return fmt.Errorf("publish terminal intent acknowledgement: %w", err)
@@ -100,8 +96,8 @@ func PublishTerminalAck(publisher contracts.ExecutionEventPublisher, order store
 	return nil
 }
 
-func validateOrderEvent(observation contracts.AccountOrderEvent) error {
-	if observation.SchemaVersion != "" && observation.SchemaVersion != contracts.SchemaVersionV1 {
+func validateOrderEvent(observation AccountOrderEvent) error {
+	if observation.SchemaVersion != "" && observation.SchemaVersion != protocol.SchemaVersionV1 {
 		return fmt.Errorf("unsupported order-event schema version %q", observation.SchemaVersion)
 	}
 	if observation.EventID == "" || observation.ExchangeOrderID == "" || observation.Status == "" {

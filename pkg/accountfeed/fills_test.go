@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
@@ -66,15 +66,15 @@ func TestConsumeRejectsInvalidDecimalBeforeStore(t *testing.T) {
 	}
 }
 
-func testFill() contracts.AccountFill {
-	return contracts.AccountFill{
-		SchemaVersion:   contracts.SchemaVersionV1,
+func testFill() AccountFill {
+	return AccountFill{
+		SchemaVersion:   protocol.SchemaVersionV1,
 		FillID:          "fill-1",
 		ExchangeOrderID: "order-1",
 		ConditionID:     "condition",
 		TokenID:         "token",
 		Outcome:         "Up",
-		Side:            contracts.SideBuy,
+		Side:            protocol.SideBuy,
 		Shares:          "2.5",
 		Price:           "0.42",
 	}

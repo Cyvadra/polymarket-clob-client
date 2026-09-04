@@ -6,7 +6,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -83,9 +83,9 @@ func TestFillConsumerIgnoresUnknownOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inserted, err := consumer.Consume(context.Background(), contracts.AccountFill{
+	inserted, err := consumer.Consume(context.Background(), AccountFill{
 		FillID: "fill-1", ExchangeOrderID: "missing", ConditionID: "condition", TokenID: "token",
-		Outcome: "Up", Side: contracts.SideBuy, Shares: "1", Price: "0.5",
+		Outcome: "Up", Side: protocol.SideBuy, Shares: "1", Price: "0.5",
 	})
 	if err != nil || inserted || len(repository.fills) != 0 {
 		t.Fatalf("unknown fill must be ignored: inserted=%v fills=%+v err=%v", inserted, repository.fills, err)

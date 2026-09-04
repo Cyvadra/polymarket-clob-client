@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/pkg/accounting"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 	"github.com/jackc/pgx/v5"
@@ -437,7 +437,7 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 }
 
 func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, marketID, outcome, side, shares, price, traderSide string, reverse bool, receivedAt time.Time) error {
-	creditedShares, err := positionShares(side, shares, price, traderSide)
+	creditedShares, err := accounting.CreditedShares(side, shares, price, traderSide)
 	if err != nil {
 		return err
 	}
@@ -502,22 +502,6 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, ma
 		return fmt.Errorf("update position from fill: %w", err)
 	}
 	return nil
-}
-
-func positionShares(side, shares, price, traderSide string) (string, error) {
-	value, ok := new(big.Rat).SetString(shares)
-	if !ok || value.Sign() <= 0 {
-		return "", fmt.Errorf("invalid fill shares %q", shares)
-	}
-	if side != "BUY" || traderSide != "TAKER" {
-		return value.FloatString(18), nil
-	}
-	fillPrice, ok := new(big.Rat).SetString(price)
-	if !ok || fillPrice.Sign() <= 0 || fillPrice.Cmp(big.NewRat(1, 1)) >= 0 {
-		return "", fmt.Errorf("invalid fill price %q", price)
-	}
-	feeFraction := new(big.Rat).Mul(big.NewRat(7, 100), new(big.Rat).Sub(big.NewRat(1, 1), fillPrice))
-	return new(big.Rat).Mul(value, new(big.Rat).Sub(big.NewRat(1, 1), feeFraction)).FloatString(18), nil
 }
 
 func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) error {

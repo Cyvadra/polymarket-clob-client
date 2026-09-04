@@ -8,7 +8,7 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
@@ -32,13 +32,9 @@ func NewFillConsumer(repository FillStore, now func() time.Time) (*FillConsumer,
 	return &FillConsumer{store: repository, now: now}, nil
 }
 
-func (c *FillConsumer) Init(context.Context) error  { return nil }
-func (c *FillConsumer) Run(context.Context) error   { return nil }
-func (c *FillConsumer) Close(context.Context) error { return nil }
-
 // Consume stores a fill exactly once. The caller may safely retry a delivery
 // whose acknowledgement was lost because FillID is the durable idempotency key.
-func (c *FillConsumer) Consume(ctx context.Context, fill contracts.AccountFill) (bool, error) {
+func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, error) {
 	if err := validateFill(fill); err != nil {
 		return false, err
 	}
@@ -69,14 +65,14 @@ func (c *FillConsumer) Consume(ctx context.Context, fill contracts.AccountFill) 
 	})
 }
 
-func validateFill(fill contracts.AccountFill) error {
-	if fill.SchemaVersion != "" && fill.SchemaVersion != contracts.SchemaVersionV1 {
+func validateFill(fill AccountFill) error {
+	if fill.SchemaVersion != "" && fill.SchemaVersion != protocol.SchemaVersionV1 {
 		return fmt.Errorf("unsupported fill schema version %q", fill.SchemaVersion)
 	}
 	if fill.FillID == "" || fill.ConditionID == "" || fill.TokenID == "" || fill.Outcome == "" {
 		return fmt.Errorf("fill ID, condition ID, token ID, and outcome are required")
 	}
-	if fill.Side != contracts.SideBuy && fill.Side != contracts.SideSell {
+	if fill.Side != protocol.SideBuy && fill.Side != protocol.SideSell {
 		return fmt.Errorf("invalid fill side %q", fill.Side)
 	}
 	if !positiveDecimal(fill.Shares) {

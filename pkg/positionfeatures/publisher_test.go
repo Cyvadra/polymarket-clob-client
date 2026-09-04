@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
@@ -25,7 +25,7 @@ func (s fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, er
 
 type publishedMessage struct {
 	subject string
-	value   contracts.PositionFeature
+	value   protocol.PositionFeature
 }
 
 type fakePublisher struct {
@@ -37,7 +37,7 @@ func (p *fakePublisher) PublishJSON(subject string, value any) error {
 	if p.err != nil {
 		return p.err
 	}
-	feature, ok := value.(contracts.PositionFeature)
+	feature, ok := value.(protocol.PositionFeature)
 	if !ok {
 		return errors.New("unexpected payload type")
 	}
@@ -73,7 +73,7 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 	if open.value.EntryTime == nil || !open.value.EntryTime.Equal(entry) || open.value.SecondsSinceEntry != 180 {
 		t.Errorf("open feature timing fields = %+v", open.value)
 	}
-	if open.value.Seq != 1 || open.value.SchemaVersion != contracts.SchemaVersionV1 {
+	if open.value.Seq != 1 || open.value.SchemaVersion != protocol.SchemaVersionV1 {
 		t.Errorf("open feature metadata = %+v", open.value)
 	}
 

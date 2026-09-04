@@ -8,7 +8,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -197,7 +197,7 @@ func TestCancelExpiredRequestsAndSubmitsCancellation(t *testing.T) {
 	storer.order.IntentID = "intent-1"
 	storer.order.State = statemachine.StateLive
 	storer.order.Revision = 3
-	storer.intent = store.OrderIntentRecord{IntentID: "intent-1", CreatedAt: now.Add(-time.Second), Policy: contracts.ExecutionPolicy{CompleteWithinMillis: 1}}
+	storer.intent = store.OrderIntentRecord{IntentID: "intent-1", CreatedAt: now.Add(-time.Second), Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
 	if err := executor.cancelExpired(context.Background()); err != nil {
 		t.Fatalf("cancel elapsed order: %v", err)
 	}
@@ -309,6 +309,6 @@ func TestExecuteRejectsDuplicateReservationWithoutActiveRecord(t *testing.T) {
 	}
 }
 
-func testIntent() contracts.ExecutionIntent {
-	return contracts.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: contracts.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: contracts.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: contracts.TimeInForceGTC, Policy: contracts.ExecutionPolicy{CompleteWithinMillis: 60_000}}
+func testIntent() protocol.ExecutionIntent {
+	return protocol.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
 }

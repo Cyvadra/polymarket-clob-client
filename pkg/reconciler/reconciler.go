@@ -10,8 +10,8 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -34,7 +34,7 @@ type Reconciler struct {
 	now      func() time.Time
 	interval time.Duration
 	onError  func(error)
-	publish  contracts.ExecutionEventPublisher
+	publish  protocol.ExecutionEventPublisher
 }
 
 func New(repository Repository, clob CLOB, now func() time.Time, interval time.Duration) (*Reconciler, error) {
@@ -78,7 +78,7 @@ func (r *Reconciler) SetErrorHandler(handler func(error)) {
 	r.onError = handler
 }
 
-func (r *Reconciler) SetEventPublisher(publisher contracts.ExecutionEventPublisher) {
+func (r *Reconciler) SetEventPublisher(publisher protocol.ExecutionEventPublisher) {
 	r.publish = publisher
 }
 
@@ -237,7 +237,7 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	if err != nil {
 		return fmt.Errorf("persist reconciliation observation for %s/%d: %w", order.IntentID, order.ChildSequence, err)
 	}
-	if err := contracts.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, r.now()); err != nil {
+	if err := protocol.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation event: %w", err)
 	}
 	if err := accountfeed.PublishTerminalAck(r.publish, updated, reason, r.now()); err != nil {

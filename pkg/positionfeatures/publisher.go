@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
@@ -84,7 +84,7 @@ func (p *PublisherModule) Publish(ctx context.Context) error {
 		if p.wasPublished(key, position.SourceRevision) {
 			continue
 		}
-		subject, err := contracts.PositionFeaturesSubject(position.ConditionID, position.TokenID)
+		subject, err := protocol.PositionFeaturesSubject(position.ConditionID, position.TokenID)
 		if err != nil {
 			return fmt.Errorf("build position feature subject: %w", err)
 		}

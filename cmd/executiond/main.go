@@ -13,9 +13,9 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/nats"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/positionfeatures"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/reconciler"
@@ -62,6 +62,7 @@ func run() error {
 	if err := bus.Init(ctx); err != nil {
 		return err
 	}
+	defer bus.Close(context.Background())
 
 	clobConfig, err := clobclient.ConfigFromEnv()
 	if err != nil {
@@ -107,18 +108,11 @@ func run() error {
 	orders.SetEventPublisher(bus)
 	repair.SetEventPublisher(bus)
 
-	if err := executor.SubscribeIntents(bus, execution); err != nil {
-		return err
-	}
-	quotes := marketquotes.New()
-	if err := marketquotes.Subscribe(bus, quotes); err != nil {
+	if err := nats.SubscribeIntents(bus, execution); err != nil {
 		return err
 	}
 	runtime, err := service.New(
-		service.NamedModule{Name: "nats", Module: bus},
 		service.NamedModule{Name: "executor", Module: execution},
-		service.NamedModule{Name: "account-fills", Module: fills},
-		service.NamedModule{Name: "account-orders", Module: orders},
 		service.NamedModule{Name: "account-stream", Module: accountStream},
 		service.NamedModule{Name: "reconciler", Module: repair},
 		service.NamedModule{Name: "position-features", Module: positions},

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/gorilla/websocket"
 )
 
@@ -141,29 +141,29 @@ func (s *UserStream) consume(ctx context.Context, payload []byte) error {
 		if err := json.Unmarshal(payload, &event); err != nil {
 			return err
 		}
-		return s.orders.Consume(ctx, contracts.AccountOrderEvent{SchemaVersion: contracts.SchemaVersionV1, EventID: event.ID + ":" + event.Status + ":" + event.SizeMatched, ExchangeOrderID: event.ID, ConditionID: event.Market, TokenID: event.AssetID, Status: event.Status, MatchedShares: event.SizeMatched, ReceivedAt: time.Now().UTC(), ExchangeTime: streamTime(event.Timestamp)})
+		return s.orders.Consume(ctx, AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: event.ID + ":" + event.Status + ":" + event.SizeMatched, ExchangeOrderID: event.ID, ConditionID: event.Market, TokenID: event.AssetID, Status: event.Status, MatchedShares: event.SizeMatched, ReceivedAt: time.Now().UTC(), ExchangeTime: streamTime(event.Timestamp)})
 	case "trade":
 		var event struct {
-			ID           string         `json:"id"`
-			TakerOrderID string         `json:"taker_order_id"`
-			Market       string         `json:"market"`
-			AssetID      string         `json:"asset_id"`
-			Side         contracts.Side `json:"side"`
-			Size         string         `json:"size"`
-			Price        string         `json:"price"`
-			Outcome      string         `json:"outcome"`
-			Status       string         `json:"status"`
-			FeeRateBps   string         `json:"fee_rate_bps"`
-			TraderSide   string         `json:"trader_side"`
-			Timestamp    string         `json:"timestamp"`
+			ID           string        `json:"id"`
+			TakerOrderID string        `json:"taker_order_id"`
+			Market       string        `json:"market"`
+			AssetID      string        `json:"asset_id"`
+			Side         protocol.Side `json:"side"`
+			Size         string        `json:"size"`
+			Price        string        `json:"price"`
+			Outcome      string        `json:"outcome"`
+			Status       string        `json:"status"`
+			FeeRateBps   string        `json:"fee_rate_bps"`
+			TraderSide   string        `json:"trader_side"`
+			Timestamp    string        `json:"timestamp"`
 			MakerOrders  []struct {
-				OrderID       string         `json:"order_id"`
-				Owner         string         `json:"owner"`
-				MatchedAmount string         `json:"matched_amount"`
-				Price         string         `json:"price"`
-				AssetID       string         `json:"asset_id"`
-				Outcome       string         `json:"outcome"`
-				Side          contracts.Side `json:"side"`
+				OrderID       string        `json:"order_id"`
+				Owner         string        `json:"owner"`
+				MatchedAmount string        `json:"matched_amount"`
+				Price         string        `json:"price"`
+				AssetID       string        `json:"asset_id"`
+				Outcome       string        `json:"outcome"`
+				Side          protocol.Side `json:"side"`
 			} `json:"maker_orders"`
 		}
 		if err := json.Unmarshal(payload, &event); err != nil {
@@ -173,15 +173,15 @@ func (s *UserStream) consume(ctx context.Context, payload []byte) error {
 		if (status != "MATCHED" && status != "MINED" && status != "CONFIRMED" && status != "FAILED") || event.Outcome == "" {
 			return nil
 		}
-		fills := make([]contracts.AccountFill, 0, len(event.MakerOrders)+1)
+		fills := make([]AccountFill, 0, len(event.MakerOrders)+1)
 		if event.TakerOrderID != "" {
-			fills = append(fills, contracts.AccountFill{SchemaVersion: contracts.SchemaVersionV1, FillID: event.ID, ExchangeOrderID: event.TakerOrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: event.AssetID, Outcome: event.Outcome, Side: event.Side, Shares: event.Size, Price: event.Price, FeeRateBps: event.FeeRateBps, TradeStatus: status, TraderSide: event.TraderSide, ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
+			fills = append(fills, AccountFill{SchemaVersion: protocol.SchemaVersionV1, FillID: event.ID, ExchangeOrderID: event.TakerOrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: event.AssetID, Outcome: event.Outcome, Side: event.Side, Shares: event.Size, Price: event.Price, FeeRateBps: event.FeeRateBps, TradeStatus: status, TraderSide: event.TraderSide, ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
 		}
 		for _, maker := range event.MakerOrders {
 			if maker.OrderID == "" || maker.Outcome == "" {
 				continue
 			}
-			fills = append(fills, contracts.AccountFill{SchemaVersion: contracts.SchemaVersionV1, FillID: event.ID + ":" + maker.OrderID, ExchangeOrderID: maker.OrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: maker.AssetID, Outcome: maker.Outcome, Side: maker.Side, Shares: maker.MatchedAmount, Price: maker.Price, FeeRateBps: event.FeeRateBps, TradeStatus: status, TraderSide: "MAKER", ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
+			fills = append(fills, AccountFill{SchemaVersion: protocol.SchemaVersionV1, FillID: event.ID + ":" + maker.OrderID, ExchangeOrderID: maker.OrderID, MarketID: event.Market, ConditionID: event.Market, TokenID: maker.AssetID, Outcome: maker.Outcome, Side: maker.Side, Shares: maker.MatchedAmount, Price: maker.Price, FeeRateBps: event.FeeRateBps, TradeStatus: status, TraderSide: "MAKER", ExchangeTime: streamTime(event.Timestamp), ReceivedAt: time.Now().UTC()})
 		}
 		for _, fill := range fills {
 			if _, err := s.fills.Consume(ctx, fill); err != nil {

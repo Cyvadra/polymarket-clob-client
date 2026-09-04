@@ -1,8 +1,12 @@
-// Package contracts defines JSON payloads exchanged over NATS by the
-// execution runtime.
-package contracts
+// Package protocol defines versioned JSON messages exchanged by executiond
+// over NATS. The external contract is documented in docs/protocol/nats-v1.md.
+package protocol
 
-import "time"
+import (
+	"time"
+
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
+)
 
 type ExecutionEventPublisher interface {
 	PublishJSON(string, any) error
@@ -12,26 +16,25 @@ const (
 	SchemaVersionV1 = "execution.v1"
 
 	SubjectStrategyExecutionIntent = "strategy.execution.intent"
-	SubjectPMMMarketQuotes         = "pmm.market.quotes"
 	SubjectExecutionIntentAck      = "execution.intent.ack"
 	SubjectExecutionOrderEvent     = "execution.order.event"
 	SubjectPositionFeaturesPrefix  = "position.features"
 )
 
-type Side string
+type Side = clobclient.Side
 
 const (
-	SideBuy  Side = "BUY"
-	SideSell Side = "SELL"
+	SideBuy  = clobclient.SideBuy
+	SideSell = clobclient.SideSell
 )
 
-type TimeInForce string
+type TimeInForce = clobclient.OrderType
 
 const (
-	TimeInForceGTC TimeInForce = "GTC"
-	TimeInForceFOK TimeInForce = "FOK"
-	TimeInForceFAK TimeInForce = "FAK"
-	TimeInForceGTD TimeInForce = "GTD"
+	TimeInForceGTC = clobclient.OrderTypeGTC
+	TimeInForceFOK = clobclient.OrderTypeFOK
+	TimeInForceFAK = clobclient.OrderTypeFAK
+	TimeInForceGTD = clobclient.OrderTypeGTD
 )
 
 type IntentKind string
@@ -43,37 +46,13 @@ const (
 
 type ExecutionStyle string
 
-const (
-	ExecutionStyleLimit          ExecutionStyle = "LIMIT"
-	ExecutionStyleMakerPostOnly  ExecutionStyle = "MAKER_POST_ONLY"
-	ExecutionStyleTakerRepricing ExecutionStyle = "TAKER_REPRICING"
-)
+const ExecutionStyleLimit ExecutionStyle = "LIMIT"
 
 type ExecutionPolicy struct {
 	CompleteWithinMillis int64          `json:"complete_within_ms,omitempty"`
 	CancelTimeoutMillis  int64          `json:"cancel_timeout_ms,omitempty"`
 	MaxFeatureAgeMillis  int64          `json:"max_feature_age_ms,omitempty"`
-	MaxReprices          int            `json:"max_reprices,omitempty"`
-	RepriceDelayMillis   int64          `json:"reprice_delay_ms,omitempty"`
-	RepriceStep          string         `json:"reprice_step,omitempty"`
-	MaxPriceDrift        string         `json:"max_price_drift,omitempty"`
 	Style                ExecutionStyle `json:"style,omitempty"`
-}
-
-type MarketQuote struct {
-	Bid       float64   `json:"bid"`
-	Ask       float64   `json:"ask"`
-	Mid       float64   `json:"mid"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// MarketQuotes is the latest best bid/ask snapshot supplied by PMM for one
-// binary market. It is an execution input, not a PMM feature payload.
-type MarketQuotes struct {
-	MarketID string      `json:"market_id"`
-	At       time.Time   `json:"at"`
-	Up       MarketQuote `json:"up"`
-	Down     MarketQuote `json:"down"`
 }
 
 type ExecutionIntent struct {
@@ -128,40 +107,6 @@ func PublishExecutionIntentAck(publisher ExecutionEventPublisher, ack ExecutionI
 	ack.SchemaVersion = SchemaVersionV1
 	ack.OccurredAt = ack.OccurredAt.UTC()
 	return publisher.PublishJSON(SubjectExecutionIntentAck, ack)
-}
-
-type AccountFill struct {
-	SchemaVersion   string    `json:"schema_version"`
-	FillID          string    `json:"fill_id"`
-	ExchangeOrderID string    `json:"exchange_order_id,omitempty"`
-	IntentID        string    `json:"intent_id,omitempty"`
-	MarketID        string    `json:"market_id,omitempty"`
-	ConditionID     string    `json:"condition_id"`
-	TokenID         string    `json:"token_id"`
-	Outcome         string    `json:"outcome"`
-	Side            Side      `json:"side"`
-	Shares          string    `json:"shares"`
-	Price           string    `json:"price"`
-	Fee             string    `json:"fee,omitempty"`
-	FeeRateBps      string    `json:"fee_rate_bps,omitempty"`
-	TradeStatus     string    `json:"trade_status,omitempty"`
-	TraderSide      string    `json:"trader_side,omitempty"`
-	ExchangeTime    time.Time `json:"exchange_time"`
-	ReceivedAt      time.Time `json:"received_at"`
-}
-
-type AccountOrderEvent struct {
-	SchemaVersion   string    `json:"schema_version"`
-	EventID         string    `json:"event_id"`
-	ExchangeOrderID string    `json:"exchange_order_id"`
-	IntentID        string    `json:"intent_id,omitempty"`
-	ConditionID     string    `json:"condition_id,omitempty"`
-	TokenID         string    `json:"token_id,omitempty"`
-	Status          string    `json:"status"`
-	MatchedShares   string    `json:"matched_shares,omitempty"`
-	AveragePrice    string    `json:"average_price,omitempty"`
-	ExchangeTime    time.Time `json:"exchange_time"`
-	ReceivedAt      time.Time `json:"received_at"`
 }
 
 type ExecutionOrderEvent struct {

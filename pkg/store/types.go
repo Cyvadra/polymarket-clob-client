@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 )
 
@@ -20,22 +20,22 @@ type OrderIntentRecord struct {
 	IntentID           string
 	IdempotencyKey     string
 	Strategy           string
-	Kind               contracts.IntentKind
+	Kind               protocol.IntentKind
 	MarketID           string
 	EventSlug          string
 	ConditionID        string
 	TokenID            string
 	Outcome            string
-	Side               contracts.Side
+	Side               protocol.Side
 	TargetShares       string
 	LimitPrice         string
-	TimeInForce        contracts.TimeInForce
+	TimeInForce        protocol.TimeInForce
 	PostOnly           bool
 	FeatureSeq         int64
 	FeatureCompletedAt time.Time
 	ExpiresAt          time.Time
 	Status             statemachine.State
-	Policy             contracts.ExecutionPolicy
+	Policy             protocol.ExecutionPolicy
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -50,7 +50,7 @@ type SignedOrderRecord struct {
 	RequestedShares string
 	MatchedShares   string
 	Price           string
-	OrderType       contracts.TimeInForce
+	OrderType       protocol.TimeInForce
 	PostOnly        bool
 	State           statemachine.State
 	Revision        int64
@@ -81,7 +81,7 @@ type FillRecord struct {
 	ConditionID     string
 	TokenID         string
 	Outcome         string
-	Side            contracts.Side
+	Side            protocol.Side
 	Shares          string
 	Price           string
 	Fee             string
@@ -115,7 +115,7 @@ type ReservationRecord struct {
 	ConditionID   string
 	TokenID       string
 	Outcome       string
-	Side          contracts.Side
+	Side          protocol.Side
 	Shares        string
 	Notional      string
 	State         string

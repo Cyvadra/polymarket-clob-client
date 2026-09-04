@@ -37,10 +37,13 @@ func New(modules ...NamedModule) (*Service, error) {
 }
 
 func (s *Service) Init(ctx context.Context) error {
+	initialized := make([]NamedModule, 0, len(s.modules))
 	for _, module := range s.modules {
 		if err := module.Module.Init(ctx); err != nil {
-			return fmt.Errorf("init %s: %w", module.Name, err)
+			closeErr := closeModules(ctx, initialized)
+			return errors.Join(fmt.Errorf("init %s: %w", module.Name, err), closeErr)
 		}
+		initialized = append(initialized, module)
 	}
 	return nil
 }
@@ -81,9 +84,13 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) Close(ctx context.Context) error {
+	return closeModules(ctx, s.modules)
+}
+
+func closeModules(ctx context.Context, modules []NamedModule) error {
 	var closeErr error
-	for idx := len(s.modules) - 1; idx >= 0; idx-- {
-		module := s.modules[idx]
+	for idx := len(modules) - 1; idx >= 0; idx-- {
+		module := modules[idx]
 		if err := module.Module.Close(ctx); err != nil {
 			closeErr = errors.Join(closeErr, fmt.Errorf("close %s: %w", module.Name, err))
 		}

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -59,7 +59,7 @@ func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
 	}
-	err = consumer.Consume(context.Background(), contracts.AccountOrderEvent{SchemaVersion: contracts.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1.25"})
+	err = consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1.25"})
 	if err != nil {
 		t.Fatalf("consume order event: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestOrderConsumerIgnoresUnknownOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
 	}
-	if err := consumer.Consume(context.Background(), contracts.AccountOrderEvent{EventID: "event-1", ExchangeOrderID: "missing", Status: "LIVE"}); err != nil {
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{EventID: "event-1", ExchangeOrderID: "missing", Status: "LIVE"}); err != nil {
 		t.Fatalf("unknown order should be deferred to reconciliation: %v", err)
 	}
 }
@@ -87,7 +87,7 @@ func TestOrderConsumerDuplicateObservationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
 	}
-	event := contracts.AccountOrderEvent{EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1.25"}
+	event := AccountOrderEvent{EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1.25"}
 	if err := consumer.Consume(context.Background(), event); err != nil {
 		t.Fatalf("consume first order event: %v", err)
 	}

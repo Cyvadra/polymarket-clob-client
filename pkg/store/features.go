@@ -3,10 +3,10 @@ package store
 import (
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/contracts"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 )
 
-func BuildPositionFeature(position PositionRecord, sequence int64, publishedAt time.Time) contracts.PositionFeature {
+func BuildPositionFeature(position PositionRecord, sequence int64, publishedAt time.Time) protocol.PositionFeature {
 	var entryPrice *string
 	if position.EntryPrice != "" && position.PositionSize != "" && position.PositionSize != "0" {
 		entryPrice = &position.EntryPrice
@@ -22,8 +22,8 @@ func BuildPositionFeature(position PositionRecord, sequence int64, publishedAt t
 		}
 	}
 
-	return contracts.PositionFeature{
-		SchemaVersion:     contracts.SchemaVersionV1,
+	return protocol.PositionFeature{
+		SchemaVersion:     protocol.SchemaVersionV1,
 		Seq:               sequence,
 		MarketID:          position.MarketID,
 		ConditionID:       position.ConditionID,

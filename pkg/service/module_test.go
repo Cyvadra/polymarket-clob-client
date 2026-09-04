@@ -94,6 +94,27 @@ func TestServiceRunCancelsPeersOnError(t *testing.T) {
 	}
 }
 
+func TestServiceInitClosesInitializedModulesOnFailure(t *testing.T) {
+	var events []string
+	boom := errors.New("boom")
+	svc, err := New(
+		NamedModule{Name: "one", Module: &fakeModule{name: "one", events: &events}},
+		NamedModule{Name: "two", Module: &fakeModule{name: "two", events: &events, initErr: boom}},
+	)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	err = svc.Init(context.Background())
+	if err == nil || !errors.Is(err, boom) {
+		t.Fatalf("expected init error wrapping boom, got %v", err)
+	}
+	want := []string{"init:one", "init:two", "close:one"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events=%v want=%v", events, want)
+	}
+}
+
 func TestServiceRejectsInvalidModules(t *testing.T) {
 	if _, err := New(NamedModule{Name: "missing"}); err == nil {
 		t.Fatal("expected nil module error")

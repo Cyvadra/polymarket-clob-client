@@ -1,4 +1,4 @@
-package contracts
+package protocol
 
 import (
 	"fmt"
@@ -11,7 +11,7 @@ func PositionFeaturesSubject(conditionID, tokenID string) (string, error) {
 	if conditionID == "" || tokenID == "" {
 		return "", fmt.Errorf("condition ID and token ID are required")
 	}
-	if strings.ContainsAny(conditionID, "*.>") || strings.ContainsAny(tokenID, "*.>") {
+	if strings.ContainsAny(conditionID, "*.") || strings.ContainsAny(tokenID, "*.") || strings.Contains(conditionID, ">") || strings.Contains(tokenID, ">") {
 		return "", fmt.Errorf("condition ID and token ID cannot contain NATS wildcard tokens")
 	}
 	return SubjectPositionFeaturesPrefix + "." + conditionID + "." + tokenID, nil
