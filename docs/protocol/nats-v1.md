@@ -17,6 +17,10 @@ authenticated CLOB user-stream adapter, never as a strategy integration rule.
 - Published acknowledgements, order events, and position features are
   best-effort. Strategies must tolerate a missing event and use their own
   deadline for the at-most-once intent decision.
+- On startup and each reconciliation tick, `executiond` replays account trades
+  from CLOB REST through the same idempotent fill path as the user stream.
+  This repairs fills missed during WebSocket disconnects when CLOB REST exposes
+  the trade.
 
 ## Subjects
 
@@ -54,22 +58,21 @@ either a future `expires_at` or a positive `policy.complete_within_ms`.
 | `policy.min_price` | Required for advanced `SELL` tactics; hard floor for automatic repricing. |
 | `policy.price_step` | Optional decimal string for tactic price increments. |
 | `policy.quote_offset` | Optional decimal string offset from best bid/ask for maker planning. |
-| `policy.reprice_interval_ms` | Optional minimum interval between active-child reprice decisions. |
-| `policy.max_reprices` | Optional maximum replacement count. |
+| `policy.reprice_interval_ms` | Not implemented; non-zero values are rejected. |
+| `policy.max_reprices` | Not implemented; non-zero values are rejected. |
 | `policy.quote_max_age_ms` | Optional maximum age for quote snapshots used by tactics. |
-| `policy.post_only_cross_retry` | Optional marker for post-only cross retry behavior. |
-| `policy.soft_close_after_ms` | Optional elapsed-time threshold for soft close planning. |
-| `policy.force_close_after_ms` | Optional elapsed-time threshold for force/aggressive close planning. |
-| `policy.cancel_replace_timeout_ms` | Optional timeout budget for cancel-before-replace flow. |
+| `policy.post_only_cross_retry` | Not implemented; true is rejected. |
+| `policy.soft_close_after_ms` | Not implemented; non-zero values are rejected. |
+| `policy.force_close_after_ms` | Not implemented; non-zero values are rejected. |
+| `policy.cancel_replace_timeout_ms` | Not implemented; non-zero values are rejected. |
 
 `intent_id` is the durable idempotency identity. Reusing it resumes a signed
 order if necessary and does not create a second child order in the current
-runtime. Advanced tactic fields are accepted and validated, and quote snapshots
-are used to plan the initial child order price, post-only flag, and
+runtime. Quote snapshots are used to plan the initial child order price, post-only flag, and
 time-in-force for `MAKER_POST_ONLY`, `TAKER_AGGRESSIVE`, and `AUTO` styles. The
 live executor still creates one child order only. It does not yet perform
 cancel-replace, post-only crossing retry, price-drift repricing after submit, or
-soft/force-close lifecycle execution.
+soft/force-close lifecycle execution; policy fields for those behaviors are rejected.
 
 Example:
 
@@ -116,23 +119,31 @@ Maker post-only policy example accepted by validation and the tactic planner:
     "max_price": "0.48",
     "price_step": "0.01",
     "quote_offset": "0.01",
-    "reprice_interval_ms": 250,
-    "max_reprices": 3,
-    "quote_max_age_ms": 500,
-    "post_only_cross_retry": true
+    "quote_max_age_ms": 500
   }
 }
 ```
+
+Lifecycle controls such as `reprice_interval_ms`, `max_reprices`,
+`post_only_cross_retry`, `soft_close_after_ms`, `force_close_after_ms`, and
+`cancel_replace_timeout_ms` are reserved for later cancel-replace execution and
+are currently rejected with `UNIMPLEMENTED_POLICY` when non-zero or true.
 
 ## Output messages
 
 `ExecutionIntentAck.status` is one of `ACCEPTED`, `REJECTED`, `COMPLETED`,
 `PARTIAL`, `EXPIRED`, or `FAILED`. Rejections use stable reason codes where
-available: `INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `NO_POSITION`, and
-`ORDER_REJECTED`.
+available: `INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`,
+`UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`,
+`DUPLICATE_INTENT`, and `ORDER_REJECTED`.
 
 `ExecutionOrderEvent.state` is the persisted runtime state. Consumers should
 treat it as an observational event rather than command an order from it.
+
+If a submitted order has an unresolved outcome and CLOB REST returns `404`,
+`executiond` first marks the order `UNKNOWN_RECONCILE`. Only after the
+configured missing-order grace period does a continuing `404` become terminal
+`FAILED`, which releases any active reservation.
 
 `PositionFeature.seq` is process-local and resets after an `executiond`
 restart. For durable change detection, use the per-position

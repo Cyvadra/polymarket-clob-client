@@ -50,13 +50,13 @@ func TestExecutionIntentKeepsDecimalValuesAsStrings(t *testing.T) {
 }
 
 func TestExecutionPolicyTacticsMarshalAsDecimalStrings(t *testing.T) {
-	policy := ExecutionPolicy{Style: ExecutionStyleMakerPostOnly, InitialPrice: "0.41", MaxPrice: "0.47", PriceStep: "0.01", RepriceIntervalMillis: 250, MaxReprices: 3, QuoteMaxAgeMillis: 500}
+	policy := ExecutionPolicy{Style: ExecutionStyleMakerPostOnly, InitialPrice: "0.41", MaxPrice: "0.47", PriceStep: "0.01", QuoteMaxAgeMillis: 500}
 	payload, err := json.Marshal(policy)
 	if err != nil {
 		t.Fatalf("marshal execution policy: %v", err)
 	}
 	body := string(payload)
-	for _, want := range []string{`"style":"MAKER_POST_ONLY"`, `"initial_price":"0.41"`, `"max_price":"0.47"`, `"price_step":"0.01"`, `"reprice_interval_ms":250`, `"max_reprices":3`, `"quote_max_age_ms":500`} {
+	for _, want := range []string{`"style":"MAKER_POST_ONLY"`, `"initial_price":"0.41"`, `"max_price":"0.47"`, `"price_step":"0.01"`, `"quote_max_age_ms":500`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %s in payload, got %s", want, body)
 		}

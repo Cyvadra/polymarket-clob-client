@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -15,17 +16,18 @@ import (
 )
 
 type fakeStore struct {
-	inserted     bool
-	intentSeen   bool
-	order        store.SignedOrderRecord
-	intent       store.OrderIntentRecord
-	reserveErr   error
-	states       []statemachine.State
-	revisions    []int64
-	reservations []store.ReservationRecord
-	releases     []string
-	lockCalls    int
-	reservation  store.ReservationRecord
+	inserted            bool
+	intentSeen          bool
+	order               store.SignedOrderRecord
+	intent              store.OrderIntentRecord
+	reserveErr          error
+	states              []statemachine.State
+	revisions           []int64
+	reservations        []store.ReservationRecord
+	releases            []string
+	lockCalls           int
+	reservation         store.ReservationRecord
+	conflictOnSubmitAck bool
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
@@ -50,6 +52,15 @@ func (s *fakeStore) PersistSignedOrder(_ context.Context, record store.SignedOrd
 	return nil
 }
 func (s *fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, _ string) (store.SignedOrderRecord, error) {
+	if event == statemachine.EventSubmitAcknowledged && s.conflictOnSubmitAck {
+		s.order.State = statemachine.StateLive
+		s.order.Revision = order.Revision + 1
+		s.order.MatchedShares = matchedShares
+		if exchangeOrderID != "" {
+			s.order.ExchangeOrderID = exchangeOrderID
+		}
+		return store.SignedOrderRecord{}, store.ErrConflict
+	}
 	transition, _, err := statemachine.Apply(order.State, event)
 	if err != nil {
 		return store.SignedOrderRecord{}, err
@@ -61,6 +72,7 @@ func (s *fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRe
 		order.SignedPayload = s.order.SignedPayload
 		order.SignedOrderHash = s.order.SignedOrderHash
 		order.Salt = s.order.Salt
+		order.ExchangeOrderID = s.order.ExchangeOrderID
 		order.RequestedShares = s.order.RequestedShares
 		order.Price = s.order.Price
 		order.OrderType = s.order.OrderType
@@ -105,7 +117,8 @@ func (s *fakeStore) Release(_ context.Context, reservationID, _ string) error {
 	s.releases = append(s.releases, reservationID)
 	return nil
 }
-func (s *fakeStore) ReservationsForPosition(context.Context, string, string) ([]store.ReservationRecord, error) {
+func (s *fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error) { return false, nil }
+func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return nil, nil
 }
 
@@ -113,6 +126,7 @@ type fakeCLOB struct {
 	submitErr         error
 	cancelErr         error
 	response          *clobclient.OrderResponse
+	createdOrderID    string
 	submits           int
 	cancels           int
 	created           clobclient.UserOrder
@@ -120,9 +134,32 @@ type fakeCLOB struct {
 	submittedPostOnly bool
 }
 
+type failingPublisher struct{}
+
+func (failingPublisher) PublishJSON(string, any) error { return errors.New("nats unavailable") }
+
+type recordedAckPublisher struct {
+	acks []protocol.ExecutionIntentAck
+}
+
+func (p *recordedAckPublisher) PublishJSON(subject string, value any) error {
+	if subject != protocol.SubjectExecutionIntentAck {
+		return nil
+	}
+	ack, ok := value.(protocol.ExecutionIntentAck)
+	if ok {
+		p.acks = append(p.acks, ack)
+	}
+	return nil
+}
+
 func (c *fakeCLOB) CreateOrder(_ context.Context, order clobclient.UserOrder) (clobclient.SignedOrderV2, error) {
 	c.created = order
-	return clobclient.SignedOrderV2{Salt: 42, TokenID: "token", Signature: "signature"}, nil
+	orderID := c.createdOrderID
+	if orderID == "" {
+		orderID = "order-1"
+	}
+	return clobclient.SignedOrderV2{OrderID: orderID, Salt: 42, TokenID: "token", Signature: "signature"}, nil
 }
 func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrderV2, orderType clobclient.OrderType, postOnly bool) (*clobclient.OrderResponse, error) {
 	c.submits++
@@ -151,11 +188,30 @@ func TestExecutePersistsBeforeSubmitting(t *testing.T) {
 	if len(storer.reservations) != 1 || storer.reservations[0].ReservationID != "intent-1:1" || storer.reservations[0].Notional != "1.000000000000000000" {
 		t.Fatalf("expected one active reservation, got %+v", storer.reservations)
 	}
+	if storer.order.ExchangeOrderID != "order-1" {
+		t.Fatalf("expected signed order ID to be persisted, got %q", storer.order.ExchangeOrderID)
+	}
 	if storer.lockCalls != 1 {
 		t.Fatalf("expected intent lock, got %d calls", storer.lockCalls)
 	}
 	if len(storer.releases) != 0 {
 		t.Fatalf("reservation released after submit side effect: %v", storer.releases)
+	}
+}
+
+func TestExecuteSubmitsWhenTransitionPublicationFails(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	executor.SetEventPublisher(failingPublisher{})
+	if err := executor.Execute(context.Background(), testIntent()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if client.submits != 1 || storer.order.State != statemachine.StateLive {
+		t.Fatalf("submission must proceed despite publication failure: submits=%d order=%+v", client.submits, storer.order)
 	}
 }
 
@@ -171,6 +227,104 @@ func TestExecuteMarksUnknownWithoutRetryingSubmit(t *testing.T) {
 	}
 	if client.submits != 1 || len(storer.states) != 2 || storer.states[1] != statemachine.StateSubmitUnknown {
 		t.Fatalf("expected one submit then unknown state: submits=%d states=%v", client.submits, storer.states)
+	}
+}
+
+func TestExecuteMarksUnknownWhenSubmittedOrderIDDiffers(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{createdOrderID: "signed-order", response: &clobclient.OrderResponse{Success: true, OrderID: "different-order"}}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	if err := executor.Execute(context.Background(), testIntent()); err == nil {
+		t.Fatal("expected mismatched order ID to be unknown")
+	}
+	if client.submits != 1 || len(storer.states) != 2 || storer.states[1] != statemachine.StateSubmitUnknown {
+		t.Fatalf("expected unknown state after mismatched order ID: submits=%d states=%v", client.submits, storer.states)
+	}
+	if storer.order.ExchangeOrderID != "signed-order" {
+		t.Fatalf("expected persisted signed order ID to be retained, got %q", storer.order.ExchangeOrderID)
+	}
+}
+
+func TestExecuteMarksRejectedResponseAsRejected(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{submitErr: &clobclient.OrderRejectedError{Message: "insufficient balance"}}
+	publisher := &recordedAckPublisher{}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	executor.SetEventPublisher(publisher)
+	if err := executor.Execute(context.Background(), testIntent()); err == nil {
+		t.Fatal("expected rejected order error")
+	}
+	if client.submits != 1 || len(storer.states) != 2 || storer.states[1] != statemachine.StateRejected {
+		t.Fatalf("expected one submit then rejected state: submits=%d states=%v", client.submits, storer.states)
+	}
+	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentRejected || publisher.acks[0].ReasonCode != "ORDER_REJECTED" || publisher.acks[0].Reason != "insufficient balance" {
+		t.Fatalf("unexpected rejection ack: %+v", publisher.acks)
+	}
+}
+
+func TestExecuteMarksAPIErrorAsUnknown(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{submitErr: &clobclient.APIError{StatusCode: http.StatusUnauthorized}}
+	publisher := &recordedAckPublisher{}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	executor.SetEventPublisher(publisher)
+	if err := executor.Execute(context.Background(), testIntent()); err == nil {
+		t.Fatal("expected API error")
+	}
+	if client.submits != 1 || len(storer.states) != 2 || storer.states[1] != statemachine.StateSubmitUnknown {
+		t.Fatalf("expected API error to be unknown, submits=%d states=%v", client.submits, storer.states)
+	}
+	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentFailed || publisher.acks[0].ReasonCode != "EXECUTION_FAILED" {
+		t.Fatalf("unexpected API error ack: %+v", publisher.acks)
+	}
+}
+
+func TestExecuteAcceptsConcurrentSubmitObservation(t *testing.T) {
+	storer := &fakeStore{inserted: true, conflictOnSubmitAck: true}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	publisher := &recordedAckPublisher{}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	executor.SetEventPublisher(publisher)
+	if err := executor.Execute(context.Background(), testIntent()); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if client.submits != 1 || storer.order.State != statemachine.StateLive {
+		t.Fatalf("expected concurrently observed live order, submits=%d order=%+v", client.submits, storer.order)
+	}
+	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentAccepted {
+		t.Fatalf("expected accepted ack, got %+v", publisher.acks)
+	}
+}
+
+func TestExecutePublishesSanitizedReserveRejection(t *testing.T) {
+	storer := &fakeStore{inserted: true, reserveErr: store.ErrConflict}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	publisher := &recordedAckPublisher{}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	executor.SetEventPublisher(publisher)
+	intent := testIntent()
+	intent.Kind = protocol.IntentClose
+	intent.Side = protocol.SideSell
+	if err := executor.Execute(context.Background(), intent); err == nil {
+		t.Fatal("expected reserve rejection")
+	}
+	if client.submits != 0 || len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentRejected || publisher.acks[0].ReasonCode != "NO_POSITION" || publisher.acks[0].Reason != "no available position for close intent" {
+		t.Fatalf("unexpected reserve rejection: submits=%d acks=%+v", client.submits, publisher.acks)
 	}
 }
 
@@ -223,17 +377,45 @@ func TestCancelExpiredRequestsAndSubmitsCancellation(t *testing.T) {
 }
 
 func TestExecuteSkipsDuplicateSubmittedIntent(t *testing.T) {
-	storer := &fakeStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, State: statemachine.StateSubmitUnknown, Revision: 2}}
+	storer := &fakeStore{intent: intentRecord(testIntent(), time.Unix(1, 0).UTC()), order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, State: statemachine.StateSubmitUnknown, Revision: 2}}
 	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	publisher := &recordedAckPublisher{}
 	executor, err := New(storer, client, time.Now)
 	if err != nil {
 		t.Fatalf("new executor: %v", err)
 	}
+	executor.SetEventPublisher(publisher)
 	if err := executor.Execute(context.Background(), testIntent()); err != nil {
 		t.Fatalf("execute duplicate: %v", err)
 	}
 	if client.submits != 0 {
 		t.Fatalf("duplicate unresolved intent submitted %d orders", client.submits)
+	}
+	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentAccepted {
+		t.Fatalf("expected duplicate accepted ack, got %+v", publisher.acks)
+	}
+}
+
+func TestExecuteRejectsDuplicateIntentWithDifferentPayload(t *testing.T) {
+	stored := testIntent()
+	incoming := testIntent()
+	incoming.LimitPrice = "0.55"
+	storer := &fakeStore{intent: intentRecord(stored, time.Unix(1, 0).UTC()), order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, State: statemachine.StateSubmitUnknown, Revision: 2}}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	publisher := &recordedAckPublisher{}
+	executor, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	executor.SetEventPublisher(publisher)
+	if err := executor.Execute(context.Background(), incoming); err == nil {
+		t.Fatal("expected duplicate payload rejection")
+	}
+	if client.submits != 0 {
+		t.Fatalf("duplicate mismatched intent submitted %d orders", client.submits)
+	}
+	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentRejected || publisher.acks[0].ReasonCode != "DUPLICATE_INTENT" || publisher.acks[0].Reason != "intent ID already belongs to a different intent" {
+		t.Fatalf("unexpected duplicate rejection ack: %+v", publisher.acks)
 	}
 }
 
@@ -243,7 +425,7 @@ func TestExecuteResumesPersistedSignedOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal signed order: %v", err)
 	}
-	storer := &fakeStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, SignedPayload: payload, State: statemachine.StateSigned, Revision: 5}, reservation: store.ReservationRecord{ReservationID: "intent-1:1", State: "active"}}
+	storer := &fakeStore{intent: intentRecord(testIntent(), time.Unix(1, 0).UTC()), order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, SignedPayload: payload, State: statemachine.StateSigned, Revision: 5}, reservation: store.ReservationRecord{ReservationID: "intent-1:1", State: "active"}}
 	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
 	executor, err := New(storer, client, time.Now)
 	if err != nil {
@@ -261,7 +443,7 @@ func TestExecuteResumesPersistedSignedOrder(t *testing.T) {
 }
 
 func TestExecutePreparesOrderWhenDuplicateIntentHasNoOrder(t *testing.T) {
-	storer := &fakeStore{reservation: store.ReservationRecord{ReservationID: "intent-1:1", IntentID: "intent-1", State: "active"}}
+	storer := &fakeStore{intent: intentRecord(testIntent(), time.Unix(1, 0).UTC()), reservation: store.ReservationRecord{ReservationID: "intent-1:1", IntentID: "intent-1", State: "active"}}
 	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
 	executor, err := New(storer, client, time.Now)
 	if err != nil {
@@ -332,11 +514,17 @@ func TestValidateIntentAcceptsMakerPostOnlyBuyWithinMaxPrice(t *testing.T) {
 	intent.Policy.InitialPrice = "0.50"
 	intent.Policy.MaxPrice = "0.55"
 	intent.Policy.PriceStep = "0.01"
-	intent.Policy.RepriceIntervalMillis = 250
-	intent.Policy.MaxReprices = 2
 	intent.Policy.QuoteMaxAgeMillis = 500
 	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err != nil {
 		t.Fatalf("validate maker policy: %v", err)
+	}
+}
+
+func TestValidateIntentRejectsUnimplementedLifecyclePolicy(t *testing.T) {
+	intent := testIntent()
+	intent.Policy.RepriceIntervalMillis = 250
+	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
+		t.Fatal("expected unimplemented lifecycle policy rejection")
 	}
 }
 
@@ -425,7 +613,7 @@ func TestValidateIntentRejectsSellPolicyBelowMinPrice(t *testing.T) {
 }
 
 func testIntent() protocol.ExecutionIntent {
-	return protocol.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
+	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
 }
 
 func testQuote(at time.Time) marketquotes.Snapshot {

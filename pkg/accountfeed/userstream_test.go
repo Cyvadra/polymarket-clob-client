@@ -48,6 +48,23 @@ func (s *userStreamStore) ApplyFill(_ context.Context, fill store.FillRecord) (b
 	s.fills = append(s.fills, fill)
 	return true, nil
 }
+func (s *userStreamStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
+	return fn(ctx)
+}
+func (s *userStreamStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
+	return false, nil
+}
+func (s *userStreamStore) Intent(context.Context, string) (store.OrderIntentRecord, error) {
+	return store.OrderIntentRecord{}, store.ErrNotFound
+}
+func (s *userStreamStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
+	return nil, nil
+}
+func (s *userStreamStore) Reserve(context.Context, store.ReservationRecord) error { return nil }
+func (s *userStreamStore) Reservation(context.Context, string) (store.ReservationRecord, error) {
+	return store.ReservationRecord{}, store.ErrNotFound
+}
+func (s *userStreamStore) Release(context.Context, string, string) error { return nil }
 
 func TestUserStreamConsumesOrderAndMatchedTrade(t *testing.T) {
 	repository := &userStreamStore{order: store.SignedOrderRecord{IntentID: "intent-1", ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 1}}
@@ -69,7 +86,7 @@ func TestUserStreamConsumesOrderAndMatchedTrade(t *testing.T) {
 	if repository.order.State != statemachine.StateFilled || repository.order.MatchedShares != "2" {
 		t.Fatalf("order observation = %+v", repository.order)
 	}
-	if err := stream.consume(context.Background(), []byte(`{"event_type":"trade","id":"fill-1","taker_order_id":"order-1","market":"condition","asset_id":"token","side":"BUY","size":"2","price":"0.5","outcome":"Up","status":"MATCHED","timestamp":"1000"}`)); err != nil {
+	if err := stream.consume(context.Background(), []byte(`{"event_type":"trade","id":"fill-1","taker_order_id":"order-1","market":"condition","asset_id":"token","side":"BUY","size":"2","price":"0.5","outcome":"Up","status":"MATCHED","trader_side":"TAKER","timestamp":"1000"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if len(repository.fills) != 1 || repository.fills[0].FillID != "fill-1" || !repository.fills[0].ExchangeTime.Equal(time.Unix(1, 0).UTC()) {
@@ -77,7 +94,20 @@ func TestUserStreamConsumesOrderAndMatchedTrade(t *testing.T) {
 	}
 }
 
-func TestFillConsumerIgnoresUnknownOrder(t *testing.T) {
+func TestUserStreamOnlyConsumesOwnedMakerTrades(t *testing.T) {
+	repository := &userStreamStore{order: store.SignedOrderRecord{IntentID: "intent-1", ExchangeOrderID: "our-maker", State: statemachine.StateLive, Revision: 1}}
+	orders, _ := NewOrderConsumer(repository, time.Now)
+	fills, _ := NewFillConsumer(repository, time.Now)
+	stream, _ := NewUserStream(UserStreamConfig{Credentials: clobclient.Credentials{APIKey: "key", Secret: "secret", Passphrase: "pass"}}, orders, fills)
+	if err := stream.consume(context.Background(), []byte(`{"event_type":"trade","id":"fill-1","taker_order_id":"other-taker","market":"condition","asset_id":"token","side":"BUY","size":"2","price":"0.5","outcome":"Up","status":"MATCHED","trader_side":"MAKER","owner":"key","timestamp":"1000","maker_orders":[{"order_id":"our-maker","owner":"key","matched_amount":"1","price":"0.5","asset_id":"token","outcome":"Up","side":"SELL"},{"order_id":"other-maker","owner":"someone-else","matched_amount":"1","price":"0.5","asset_id":"token","outcome":"Up","side":"SELL"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "our-maker" || repository.fills[0].TraderSide != "MAKER" {
+		t.Fatalf("expected only owned maker fill, got %+v", repository.fills)
+	}
+}
+
+func TestFillConsumerPersistsUnknownOrder(t *testing.T) {
 	repository := &userStreamStore{}
 	consumer, err := NewFillConsumer(repository, time.Now)
 	if err != nil {

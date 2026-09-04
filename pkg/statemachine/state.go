@@ -30,7 +30,6 @@ const (
 type Event string
 
 const (
-	EventIntentAccepted        Event = "INTENT_ACCEPTED"
 	EventSigned                Event = "SIGNED"
 	EventSubmitStarted         Event = "SUBMIT_STARTED"
 	EventSubmitAcknowledged    Event = "SUBMIT_ACKNOWLEDGED"
@@ -62,17 +61,6 @@ func Apply(current State, event Event) (Transition, bool, error) {
 		return Transition{}, false, fmt.Errorf("invalid transition from %s by %s", current, event)
 	}
 	return Transition{From: current, To: next, By: event}, next != current, nil
-}
-
-func CanApply(current State, event Event) bool {
-	_, _, err := Apply(current, event)
-	return err == nil
-}
-
-// EventForOrderStatus normalizes a Polymarket order status into an internal
-// observation event shared by NATS consumers and REST reconciliation.
-func EventForOrderStatus(status string) (Event, bool) {
-	return EventForOrderObservation(status, "", "")
 }
 
 // EventForOrderObservation uses matched size to preserve partial fills when
@@ -132,9 +120,6 @@ func IsTerminal(state State) bool {
 }
 
 var transitions = map[State]map[Event]State{
-	"": {
-		EventIntentAccepted: StateIntentReceived,
-	},
 	StateIntentReceived: {
 		EventSigned:           StateSigned,
 		EventRejectedObserved: StateRejected,
@@ -148,6 +133,9 @@ var transitions = map[State]map[Event]State{
 		EventOrderLiveObserved:     StateLive,
 		EventPartialFillObserved:   StatePartiallyFilled,
 		EventFillObserved:          StateFilled,
+		EventCancelObserved:        StateCanceled,
+		EventExpiredObserved:       StateExpired,
+		EventFailedObserved:        StateFailed,
 		EventRejectedObserved:      StateRejected,
 		EventReconcileInconclusive: StateUnknownReconcile,
 	},
@@ -156,7 +144,10 @@ var transitions = map[State]map[Event]State{
 		EventOrderLiveObserved:     StateLive,
 		EventPartialFillObserved:   StatePartiallyFilled,
 		EventFillObserved:          StateFilled,
+		EventCancelObserved:        StateCanceled,
 		EventRejectedObserved:      StateRejected,
+		EventExpiredObserved:       StateExpired,
+		EventFailedObserved:        StateFailed,
 		EventReconcileInconclusive: StateUnknownReconcile,
 	},
 	StateLive: {
@@ -178,6 +169,7 @@ var transitions = map[State]map[Event]State{
 		EventFailedObserved:      StateFailed,
 	},
 	StateCancelRequested: {
+		EventOrderLiveObserved:     StateCancelRequested,
 		EventCancelAccepted:        StateCancelPending,
 		EventCancelObserved:        StateCanceled,
 		EventPartialFillObserved:   StatePartiallyFilled,
@@ -185,6 +177,7 @@ var transitions = map[State]map[Event]State{
 		EventReconcileInconclusive: StateUnknownReconcile,
 	},
 	StateCancelPending: {
+		EventOrderLiveObserved:     StateCancelPending,
 		EventCancelObserved:        StateCanceled,
 		EventPartialFillObserved:   StatePartiallyFilled,
 		EventFillObserved:          StateFilled,

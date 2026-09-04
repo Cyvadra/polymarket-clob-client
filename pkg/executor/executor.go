@@ -24,15 +24,8 @@ type QuoteProvider interface {
 	Get(string) (marketquotes.Snapshot, bool)
 }
 
-type Repository interface {
-	store.IntentRepository
-	store.IntentLockRepository
-	store.OrderRepository
-	store.ReservationRepository
-}
-
 type Executor struct {
-	store   Repository
+	store   store.ExecutionStore
 	clob    CLOB
 	quotes  QuoteProvider
 	now     func() time.Time
@@ -40,7 +33,7 @@ type Executor struct {
 	publish protocol.ExecutionEventPublisher
 }
 
-func New(repository Repository, clob CLOB, now func() time.Time) (*Executor, error) {
+func New(repository store.ExecutionStore, clob CLOB, now func() time.Time) (*Executor, error) {
 	if repository == nil || clob == nil {
 		return nil, fmt.Errorf("repository and CLOB client are required")
 	}
@@ -89,14 +82,7 @@ func (e *Executor) resumeSigned(ctx context.Context) error {
 			continue
 		}
 		if err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-			return e.resumeIntent(ctx, protocol.ExecutionIntent{
-				IntentID: intent.IntentID, IdempotencyKey: intent.IdempotencyKey, Strategy: intent.Strategy,
-				Kind: protocol.IntentKind(intent.Kind), MarketID: intent.MarketID, EventSlug: intent.EventSlug,
-				ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
-				TargetShares: intent.TargetShares, LimitPrice: intent.LimitPrice, TimeInForce: intent.TimeInForce,
-				PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt,
-				ExpiresAt: intent.ExpiresAt, Policy: intent.Policy,
-			})
+			return e.resumeIntent(ctx, executionIntent(intent))
 		}); err != nil {
 			resumeErr = errors.Join(resumeErr, fmt.Errorf("resume signed order %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
@@ -113,8 +99,10 @@ func (e *Executor) SetEventPublisher(publisher protocol.ExecutionEventPublisher)
 	e.publish = publisher
 }
 
-func (e *Executor) publishTransition(order store.SignedOrderRecord, reason string) error {
-	return protocol.PublishExecutionOrderEvent(e.publish, order.ExchangeOrderID, string(order.State), order.IntentID, order.MatchedShares, reason, e.now())
+func (e *Executor) publishTransition(order store.SignedOrderRecord, reason string) {
+	if err := protocol.PublishExecutionOrderEvent(e.publish, order.ExchangeOrderID, string(order.State), order.IntentID, order.MatchedShares, reason, e.now()); err != nil && e.onError != nil {
+		e.onError(fmt.Errorf("publish order transition: %w", err))
+	}
 }
 
 func (e *Executor) cancelExpired(ctx context.Context) error {

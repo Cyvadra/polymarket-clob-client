@@ -25,37 +25,60 @@ type plannedChild struct {
 	TimeInForce protocol.TimeInForce
 }
 
+type executionRejection struct {
+	code   string
+	reason string
+	cause  error
+}
+
+func (e executionRejection) Error() string { return e.reason }
+func (e executionRejection) Unwrap() error { return e.cause }
+
 func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
 		if strings.TrimSpace(intent.IntentID) != "" {
-			e.publishAck(intent.IntentID, protocol.IntentRejected, validationReasonCode(err), err.Error(), "", "")
+			e.publishAck(intent.IntentID, protocol.IntentRejected, validationReasonCode(err), publicReason(err), "", "")
 		}
 		return err
 	}
 	err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
 		inserted, err := e.store.InsertIntent(ctx, intentRecord(intent, e.now().UTC()))
 		if err != nil {
+			if errors.Is(err, store.ErrIdempotencyConflict) {
+				return executionRejection{code: "DUPLICATE_INTENT", reason: "idempotency key already belongs to another intent", cause: err}
+			}
 			return fmt.Errorf("persist intent: %w", err)
 		}
 		if !inserted {
-			return e.resumeIntent(ctx, intent)
+			existing, err := e.store.Intent(ctx, intent.IntentID)
+			if err != nil {
+				return fmt.Errorf("load duplicate intent: %w", err)
+			}
+			if !sameIntent(intent, existing) {
+				return executionRejection{code: "DUPLICATE_INTENT", reason: "intent ID already belongs to a different intent", cause: store.ErrIdempotencyConflict}
+			}
+			return e.resumeIntent(ctx, executionIntent(existing))
 		}
 		return e.prepareAndSubmit(ctx, intent)
 	})
 	if err != nil {
 		status, code := protocol.IntentFailed, "EXECUTION_FAILED"
-		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
-			status, code = protocol.IntentRejected, "NO_POSITION"
+		reason := publicReason(err)
+		var rejection executionRejection
+		if errors.As(err, &rejection) {
+			status, code = protocol.IntentRejected, rejection.code
+			reason = rejection.reason
 		} else if isRejectedSubmission(err) {
 			status, code = protocol.IntentRejected, "ORDER_REJECTED"
 		}
-		e.publishAck(intent.IntentID, status, code, err.Error(), "", "")
+		e.publishAck(intent.IntentID, status, code, reason, "", "")
 	}
 	return err
 }
 
 func isRejectedSubmission(err error) bool {
-	return strings.Contains(err.Error(), "order submission rejected:")
+	var rejected *clobclient.OrderRejectedError
+	return errors.As(err, &rejected)
 }
 
 func (e *Executor) publishAck(intentID string, status protocol.IntentAckStatus, code, reason, filledShares, averagePrice string) {
@@ -76,6 +99,7 @@ func (e *Executor) resumeIntent(ctx context.Context, intent protocol.ExecutionIn
 		return fmt.Errorf("load existing order: %w", err)
 	}
 	if order.State != statemachine.StateSigned {
+		e.publishAckForOrder(order, "duplicate intent")
 		return nil
 	}
 	reservation, err := e.store.Reservation(ctx, reservationID(intent.IntentID, order.ChildSequence))
@@ -107,6 +131,12 @@ func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.Executi
 			if reservation.State != "active" || reservation.IntentID != intent.IntentID {
 				return fmt.Errorf("duplicate reservation is not an active reservation for this intent")
 			}
+		} else if errors.Is(err, store.ErrConflict) {
+			return executionRejection{code: "NO_POSITION", reason: "no available position for close intent", cause: err}
+		} else if errors.Is(err, store.ErrActiveSellReservation) {
+			return executionRejection{code: "ACTIVE_SELL_RESERVATION", reason: "active sell reservation already exists", cause: err}
+		} else if errors.Is(err, store.ErrIdempotencyConflict) {
+			return executionRejection{code: "DUPLICATE_INTENT", reason: "idempotency key already belongs to another intent", cause: err}
 		} else {
 			return fmt.Errorf("reserve order exposure: %w", err)
 		}
@@ -132,7 +162,7 @@ func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.Executi
 	hash := sha256.Sum256(payload)
 	if err := e.store.PersistSignedOrder(ctx, store.SignedOrderRecord{
 		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
-		Salt: strconv.FormatInt(signed.Salt, 10), RequestedShares: child.Shares, Price: child.Price,
+		Salt: strconv.FormatInt(signed.Salt, 10), ExchangeOrderID: signed.OrderID, RequestedShares: child.Shares, Price: child.Price,
 		OrderType: child.TimeInForce, PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
 		CreatedAt: e.now().UTC(), UpdatedAt: e.now().UTC(),
 	}); err != nil {
@@ -161,33 +191,55 @@ func (e *Executor) submitSigned(ctx context.Context, intent protocol.ExecutionIn
 	if err != nil {
 		return fmt.Errorf("mark submitting: %w", err)
 	}
-	if err := e.publishTransition(updated, "submit requested"); err != nil {
-		return fmt.Errorf("publish submitting event: %w", err)
-	}
+	e.publishTransition(updated, "submit requested")
 	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, orderType, postOnly)
 	if submitErr != nil {
 		if submissionRejected(submitErr) {
-			return e.markSubmitRejected(ctx, updated, submitErr.Error())
+			return e.markSubmitRejected(ctx, updated, submitErr)
 		}
 		return e.markSubmitUnknown(ctx, updated, submitErr.Error())
 	}
 	if response == nil || response.OrderID == "" {
 		return e.markSubmitUnknown(ctx, updated, "successful submission missing exchange order ID")
 	}
+	if updated.ExchangeOrderID != "" && response.OrderID != updated.ExchangeOrderID {
+		return e.markSubmitUnknown(ctx, updated, "submission returned unexpected exchange order ID")
+	}
 	live, err := e.store.TransitionOrder(ctx, updated, statemachine.EventSubmitAcknowledged, "0", response.OrderID, "submit acknowledged")
 	if err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return e.acceptConcurrentSubmitObservation(ctx, intent, childSequence, response.OrderID)
+		}
 		return fmt.Errorf("mark order live: %w", err)
 	}
-	if err := e.publishTransition(live, "submit acknowledged"); err != nil {
-		return fmt.Errorf("publish live event: %w", err)
-	}
+	e.publishTransition(live, "submit acknowledged")
 	e.publishAck(intent.IntentID, protocol.IntentAccepted, "", "submit acknowledged", "0", "")
 	return nil
 }
 
+func (e *Executor) acceptConcurrentSubmitObservation(ctx context.Context, intent protocol.ExecutionIntent, childSequence int, exchangeOrderID string) error {
+	current, err := e.store.OrderByIntent(ctx, intent.IntentID, childSequence)
+	if err != nil {
+		return fmt.Errorf("load concurrently observed order: %w", err)
+	}
+	if current.ExchangeOrderID != exchangeOrderID {
+		return fmt.Errorf("mark order live: %w", store.ErrConflict)
+	}
+	switch current.State {
+	case statemachine.StateLive, statemachine.StatePartiallyFilled:
+		e.publishAck(intent.IntentID, protocol.IntentAccepted, "", "submit acknowledged after concurrent observation", current.MatchedShares, "")
+		return nil
+	case statemachine.StateFilled, statemachine.StateCanceled, statemachine.StateRejected, statemachine.StateExpired, statemachine.StateFailed:
+		e.publishAckForOrder(current, "submit acknowledged after concurrent terminal observation")
+		return nil
+	default:
+		return fmt.Errorf("mark order live: %w", store.ErrConflict)
+	}
+}
+
 func submissionRejected(err error) bool {
-	var apiErr *clobclient.APIError
-	return errors.As(err, &apiErr) && !apiErr.Retryable()
+	var rejected *clobclient.OrderRejectedError
+	return errors.As(err, &rejected)
 }
 
 func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrderRecord, reason string) error {
@@ -195,19 +247,33 @@ func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrde
 	if err != nil {
 		return fmt.Errorf("mark submit unknown: %w", err)
 	}
-	if err := e.publishTransition(unknown, reason); err != nil {
-		return fmt.Errorf("publish submit-unknown event: %w", err)
-	}
+	e.publishTransition(unknown, reason)
 	return fmt.Errorf("order submission outcome is unknown: %s", reason)
 }
 
-func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, reason string) error {
+func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, submitErr error) error {
+	reason := publicReason(submitErr)
 	rejected, err := e.store.TransitionOrder(ctx, order, statemachine.EventRejectedObserved, order.MatchedShares, order.ExchangeOrderID, reason)
 	if err != nil {
 		return fmt.Errorf("mark submit rejected: %w", err)
 	}
-	if err := e.publishTransition(rejected, reason); err != nil {
-		return fmt.Errorf("publish submit-rejected event: %w", err)
+	e.publishTransition(rejected, reason)
+	return executionRejection{code: "ORDER_REJECTED", reason: reason, cause: submitErr}
+}
+
+func publicReason(err error) string {
+	var rejected *clobclient.OrderRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.Message
 	}
-	return fmt.Errorf("order submission rejected: %s", reason)
+	return "execution failed"
+}
+
+func (e *Executor) publishAckForOrder(order store.SignedOrderRecord, reason string) {
+	ack, ok := store.TerminalAckForOrder(order, reason, e.now())
+	if !ok {
+		e.publishAck(order.IntentID, protocol.IntentAccepted, "", reason, order.MatchedShares, "")
+		return
+	}
+	e.publishAck(ack.IntentID, ack.Status, ack.ReasonCode, ack.Reason, ack.FilledShares, ack.AveragePrice)
 }

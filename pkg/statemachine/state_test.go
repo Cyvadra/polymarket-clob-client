@@ -3,8 +3,8 @@ package statemachine
 import "testing"
 
 func TestHappyPathTransitionsToLiveAndFilled(t *testing.T) {
-	state := State("")
-	for _, event := range []Event{EventIntentAccepted, EventSigned, EventSubmitStarted, EventSubmitAcknowledged, EventFillObserved} {
+	state := StateIntentReceived
+	for _, event := range []Event{EventSigned, EventSubmitStarted, EventSubmitAcknowledged, EventFillObserved} {
 		transition, changed, err := Apply(state, event)
 		if err != nil {
 			t.Fatalf("apply %s from %s: %v", event, state, err)
@@ -20,8 +20,8 @@ func TestHappyPathTransitionsToLiveAndFilled(t *testing.T) {
 }
 
 func TestSubmitUnknownKeepsExposureLockedUntilResolved(t *testing.T) {
-	state := State("")
-	for _, event := range []Event{EventIntentAccepted, EventSigned, EventSubmitStarted, EventSubmitTimedOut} {
+	state := StateIntentReceived
+	for _, event := range []Event{EventSigned, EventSubmitStarted, EventSubmitTimedOut} {
 		transition, _, err := Apply(state, event)
 		if err != nil {
 			t.Fatalf("apply %s from %s: %v", event, state, err)
@@ -61,9 +61,34 @@ func TestCancelPendingDoesNotReleaseExposure(t *testing.T) {
 	}
 }
 
-func TestInvalidTransitionRejectsImmediateCancelFromSubmitting(t *testing.T) {
-	if _, _, err := Apply(StateSubmitting, EventCancelObserved); err == nil {
-		t.Fatal("expected cancel observation from submitting without live evidence to be invalid")
+func TestTerminalObservationsResolveSubmitting(t *testing.T) {
+	for _, tc := range []struct {
+		event Event
+		state State
+	}{
+		{EventCancelObserved, StateCanceled},
+		{EventExpiredObserved, StateExpired},
+		{EventFailedObserved, StateFailed},
+	} {
+		transition, changed, err := Apply(StateSubmitting, tc.event)
+		if err != nil {
+			t.Fatalf("apply %s from submitting: %v", tc.event, err)
+		}
+		if !changed || transition.To != tc.state {
+			t.Fatalf("expected %s, got %+v changed=%v", tc.state, transition, changed)
+		}
+	}
+}
+
+func TestLiveObservationDuringCancelKeepsCancelState(t *testing.T) {
+	for _, state := range []State{StateCancelRequested, StateCancelPending} {
+		transition, changed, err := Apply(state, EventOrderLiveObserved)
+		if err != nil {
+			t.Fatalf("apply live observation from %s: %v", state, err)
+		}
+		if changed || transition.To != state {
+			t.Fatalf("expected %s to remain unchanged, got %+v changed=%v", state, transition, changed)
+		}
 	}
 }
 

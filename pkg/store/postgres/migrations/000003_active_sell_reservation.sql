@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_active_sell_idx ON reservations(condition_id, token_id) WHERE side = 'SELL' AND state = 'active';

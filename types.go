@@ -1,7 +1,5 @@
 package clobclient
 
-import "time"
-
 type Side string
 
 const (
@@ -57,6 +55,7 @@ type UserOrder struct {
 }
 
 type SignedOrderV2 struct {
+	OrderID       string `json:"-"`
 	Salt          int64  `json:"salt"`
 	Maker         string `json:"maker"`
 	Signer        string `json:"signer"`
@@ -130,13 +129,31 @@ type Token struct {
 }
 
 type Trade struct {
-	ID        string `json:"id"`
-	AssetID   string `json:"asset_id"`
-	Market    string `json:"market"`
-	Side      Side   `json:"side"`
-	Price     string `json:"price"`
-	Size      string `json:"size"`
-	Timestamp string `json:"timestamp"`
+	ID           string       `json:"id"`
+	TakerOrderID string       `json:"taker_order_id"`
+	AssetID      string       `json:"asset_id"`
+	Market       string       `json:"market"`
+	Side         Side         `json:"side"`
+	Price        string       `json:"price"`
+	Size         string       `json:"size"`
+	Outcome      string       `json:"outcome"`
+	Status       string       `json:"status"`
+	FeeRateBps   string       `json:"fee_rate_bps"`
+	TraderSide   string       `json:"trader_side"`
+	Owner        string       `json:"owner"`
+	TradeOwner   string       `json:"trade_owner"`
+	Timestamp    string       `json:"timestamp"`
+	MakerOrders  []MakerTrade `json:"maker_orders"`
+}
+
+type MakerTrade struct {
+	OrderID       string `json:"order_id"`
+	Owner         string `json:"owner"`
+	MatchedAmount string `json:"matched_amount"`
+	Price         string `json:"price"`
+	AssetID       string `json:"asset_id"`
+	Outcome       string `json:"outcome"`
+	Side          Side   `json:"side"`
 }
 
 type PriceHistoryPoint struct {
@@ -156,24 +173,4 @@ type Notification struct {
 	Type    int    `json:"type"`
 	Owner   string `json:"owner"`
 	Payload any    `json:"payload"`
-}
-
-type ExecutionStatus string
-
-const (
-	ExecutionLive     ExecutionStatus = "LIVE"
-	ExecutionMatched  ExecutionStatus = "MATCHED"
-	ExecutionCanceled ExecutionStatus = "CANCELED"
-	ExecutionDelayed  ExecutionStatus = "DELAYED"
-	ExecutionUnknown  ExecutionStatus = "UNKNOWN"
-)
-
-type Execution struct {
-	OrderID         string
-	Status          ExecutionStatus
-	RequestedShares float64
-	MatchedShares   float64
-	AveragePrice    float64
-	Terminal        bool
-	UpdatedAt       time.Time
 }

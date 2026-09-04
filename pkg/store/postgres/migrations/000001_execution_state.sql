@@ -118,3 +118,4 @@ CREATE TABLE IF NOT EXISTS reservations (
 
 CREATE INDEX IF NOT EXISTS reservations_position_idx ON reservations(condition_id, token_id, state);
 CREATE INDEX IF NOT EXISTS reservations_intent_idx ON reservations(intent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_active_sell_idx ON reservations(condition_id, token_id) WHERE side = 'SELL' AND state = 'active';

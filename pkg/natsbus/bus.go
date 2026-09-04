@@ -26,6 +26,7 @@ type Bus struct {
 	mu     sync.Mutex
 	subs   []*nats.Subscription
 	ctx    context.Context
+	done   chan error
 }
 
 func New(cfg Config) (*Bus, error) {
@@ -51,21 +52,51 @@ func (b *Bus) Init(ctx context.Context) error {
 	if b.config.ConnectTimeout > 0 {
 		options = append(options, nats.Timeout(b.config.ConnectTimeout))
 	}
+	options = append(options,
+		nats.ErrorHandler(func(_ *nats.Conn, subscription *nats.Subscription, err error) {
+			if b.config.OnHandlerError != nil {
+				subject := ""
+				if subscription != nil {
+					subject = subscription.Subject
+				}
+				b.config.OnHandlerError(fmt.Errorf("NATS async error on subject %s: %w", subject, err))
+			}
+		}),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			if err != nil && b.config.OnHandlerError != nil {
+				b.config.OnHandlerError(fmt.Errorf("NATS disconnected: %w", err))
+			}
+		}),
+		nats.ClosedHandler(func(_ *nats.Conn) {
+			b.finish(fmt.Errorf("NATS connection closed"))
+		}),
+	)
 	conn, err := nats.Connect(b.config.URL, options...)
 	if err != nil {
 		return fmt.Errorf("connect NATS: %w", err)
 	}
 	b.conn = conn
 	b.ctx = ctx
+	b.done = make(chan error, 1)
 	return nil
 }
 
 func (b *Bus) Run(ctx context.Context) error {
-	if err := b.Init(ctx); err != nil {
+	b.mu.Lock()
+	done := b.done
+	b.mu.Unlock()
+	if done == nil {
+		return fmt.Errorf("NATS bus is not initialized")
+	}
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-done:
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
-	<-ctx.Done()
-	return ctx.Err()
 }
 
 func (b *Bus) Close(context.Context) error {
@@ -83,6 +114,7 @@ func (b *Bus) Close(context.Context) error {
 		b.conn = nil
 	}
 	b.ctx = nil
+	b.done = nil
 	return nil
 }
 
@@ -103,6 +135,19 @@ func (b *Bus) PublishJSON(subject string, value any) error {
 		return fmt.Errorf("publish NATS payload: %w", err)
 	}
 	return nil
+}
+
+func (b *Bus) finish(err error) {
+	b.mu.Lock()
+	done := b.done
+	b.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case done <- err:
+	default:
+	}
 }
 
 func (b *Bus) Subscribe(subject string, handler Handler) error {

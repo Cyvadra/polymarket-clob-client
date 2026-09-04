@@ -18,6 +18,21 @@ type fakeOrderStore struct {
 	dedupSeen      map[string]struct{}
 }
 
+type recordedPublisher struct {
+	acks []protocol.ExecutionIntentAck
+}
+
+func (p *recordedPublisher) PublishJSON(subject string, value any) error {
+	if subject != protocol.SubjectExecutionIntentAck {
+		return nil
+	}
+	ack, ok := value.(protocol.ExecutionIntentAck)
+	if ok {
+		p.acks = append(p.acks, ack)
+	}
+	return nil
+}
+
 func (s *fakeOrderStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error {
 	return nil
 }
@@ -46,12 +61,6 @@ func (s *fakeOrderStore) OrderByExchangeID(_ context.Context, exchangeOrderID st
 	}
 	return s.order, nil
 }
-func (s *fakeOrderStore) OrderByIntent(context.Context, string, int) (store.SignedOrderRecord, error) {
-	return store.SignedOrderRecord{}, store.ErrNotFound
-}
-func (s *fakeOrderStore) OpenOrders(context.Context) ([]store.SignedOrderRecord, error) {
-	return nil, nil
-}
 
 func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2}}
@@ -68,6 +77,30 @@ func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 	}
 	if repository.matchedShares != "1.25" {
 		t.Fatalf("expected matched shares to be observed, got %q", repository.matchedShares)
+	}
+}
+
+func TestPublishTerminalAckCanceledWithoutFillIsExpired(t *testing.T) {
+	for _, matchedShares := range []string{"0", "0.000000000000000000"} {
+		publisher := &recordedPublisher{}
+		order := store.SignedOrderRecord{IntentID: "intent-1", State: statemachine.StateCanceled, MatchedShares: matchedShares}
+		if err := PublishTerminalAck(publisher, order, "canceled", time.Unix(1, 0)); err != nil {
+			t.Fatalf("publish ack: %v", err)
+		}
+		if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentExpired {
+			t.Fatalf("expected expired ack for %q, got %+v", matchedShares, publisher.acks)
+		}
+	}
+}
+
+func TestPublishTerminalAckCanceledWithFillIsPartial(t *testing.T) {
+	publisher := &recordedPublisher{}
+	order := store.SignedOrderRecord{IntentID: "intent-1", State: statemachine.StateCanceled, MatchedShares: "1.25"}
+	if err := PublishTerminalAck(publisher, order, "canceled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish ack: %v", err)
+	}
+	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentPartial {
+		t.Fatalf("expected partial ack, got %+v", publisher.acks)
 	}
 }
 
@@ -96,15 +129,5 @@ func TestOrderConsumerDuplicateObservationIsIdempotent(t *testing.T) {
 	}
 	if len(repository.observedEvents) != 1 {
 		t.Fatalf("expected one observed event, got %v", repository.observedEvents)
-	}
-}
-
-func TestStatusEvent(t *testing.T) {
-	event, ok := statemachine.EventForOrderStatus("partially_filled")
-	if !ok {
-		t.Fatalf("expected status to map to an event")
-	}
-	if event != statemachine.EventPartialFillObserved {
-		t.Fatalf("expected partial fill observed event, got %s", event)
 	}
 }

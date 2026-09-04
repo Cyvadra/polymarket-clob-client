@@ -12,17 +12,13 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
-type OrderStore interface {
-	store.OrderRepository
-}
-
 type OrderConsumer struct {
-	store   OrderStore
+	store   store.AccountOrderStore
 	now     func() time.Time
 	publish protocol.ExecutionEventPublisher
 }
 
-func NewOrderConsumer(repository OrderStore, now func() time.Time) (*OrderConsumer, error) {
+func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) (*OrderConsumer, error) {
 	if repository == nil {
 		return nil, fmt.Errorf("order store is required")
 	}
@@ -73,24 +69,11 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 }
 
 func PublishTerminalAck(publisher protocol.ExecutionEventPublisher, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
-	var status protocol.IntentAckStatus
-	switch order.State {
-	case statemachine.StateFilled:
-		status = protocol.IntentCompleted
-	case statemachine.StateCanceled:
-		status = protocol.IntentPartial
-	case statemachine.StateRejected:
-		status = protocol.IntentRejected
-	case statemachine.StateExpired:
-		status = protocol.IntentExpired
-	case statemachine.StateFailed:
-		status = protocol.IntentFailed
-	default:
+	ack, ok := store.TerminalAckForOrder(order, reason, occurredAt)
+	if !ok {
 		return nil
 	}
-	if err := protocol.PublishExecutionIntentAck(publisher, protocol.ExecutionIntentAck{
-		IntentID: order.IntentID, Status: status, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt,
-	}); err != nil {
+	if err := protocol.PublishExecutionIntentAck(publisher, ack); err != nil {
 		return fmt.Errorf("publish terminal intent acknowledgement: %w", err)
 	}
 	return nil

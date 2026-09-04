@@ -15,6 +15,7 @@ untracked local environment file.
 | `EXECUTION_POSTGRES_URL` | Yes | PostgreSQL connection URL. |
 | `EXECUTION_POSITION_FEATURE_INTERVAL` | No | Position snapshot frequency; default `500ms`. |
 | `EXECUTION_RECONCILE_INTERVAL` | No | REST reconciliation frequency; default `30s`. |
+| `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | No | How long an unresolved submitted order may return REST 404 before it is failed; default `2m`. |
 | `EXECUTION_CONNECT_TIMEOUT` | No | NATS and PostgreSQL connection timeout; default `10s`. |
 | `EXECUTION_SHUTDOWN_GRACE_PERIOD` | No | Graceful shutdown deadline; default `10s`. |
 

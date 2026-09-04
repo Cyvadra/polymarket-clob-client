@@ -10,8 +10,8 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-	if len(migrations) != 2 {
-		t.Fatalf("expected two migrations, got %d", len(migrations))
+	if len(migrations) != 3 {
+		t.Fatalf("expected three migrations, got %d", len(migrations))
 	}
 	if migrations[0].Name != "000001_execution_state.sql" {
 		t.Fatalf("unexpected migration name %q", migrations[0].Name)
@@ -35,5 +35,8 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	}
 	if migrations[1].Name != "000002_fill_settlement.sql" || !strings.Contains(migrations[1].SQL, "trade_status") {
 		t.Fatalf("unexpected settlement migration: %+v", migrations[1])
+	}
+	if migrations[2].Name != "000003_active_sell_reservation.sql" || !strings.Contains(migrations[2].SQL, "reservations_one_active_sell_idx") {
+		t.Fatalf("unexpected active sell reservation migration: %+v", migrations[2])
 	}
 }

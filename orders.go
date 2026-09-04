@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	pollutil "github.com/Cyvadra/polymarket-clob-client/internal/poll"
 	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
 )
 
@@ -184,7 +183,7 @@ func (c *Client) SubmitSignedOrder(ctx context.Context, signed SignedOrderV2, or
 		return nil, err
 	}
 	if !out.Success {
-		return &out, fmt.Errorf("order rejected: %s", out.ErrorMsg)
+		return &out, &OrderRejectedError{Message: out.ErrorMsg}
 	}
 	return &out, nil
 }
@@ -391,24 +390,4 @@ func addBuilderHeaders(headers http.Header, creds *BuilderCredentials, now time.
 	headers.Set("POLY_BUILDER_PASSPHRASE", creds.Passphrase)
 	headers.Set("POLY_BUILDER_SIGNATURE", sig)
 	return nil
-}
-
-func (c *Client) ResolveExecution(ctx context.Context, orderID string, requested float64, poll time.Duration) (Execution, error) {
-	if poll <= 0 {
-		poll = 500 * time.Millisecond
-	}
-	var latest Execution
-	err := pollutil.Until(ctx, poll, func() (bool, error) {
-		order, err := c.Order(ctx, orderID)
-		if err != nil {
-			return false, err
-		}
-		exec, err := ExecutionFromOrder(orderID, order, requested, c.cfg.Now())
-		if err != nil {
-			return false, err
-		}
-		latest = exec
-		return exec.Terminal, nil
-	})
-	return latest, err
 }

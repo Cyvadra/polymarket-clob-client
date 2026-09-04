@@ -6,7 +6,6 @@ import (
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 )
 
 func TestPlanMakerPostOnlyBuySubmitsAtBidOffsetBelowMax(t *testing.T) {
@@ -27,24 +26,6 @@ func TestPlanMakerPostOnlyBuyClampsAtMaxPrice(t *testing.T) {
 	}
 }
 
-func TestPlanCancelsActiveChildWhenQuoteDrifts(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	child := &Child{Sequence: 1, State: statemachine.StateLive, Price: "0.40"}
-	decision := Plan(Request{Intent: tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly), Quote: tacticQuote(now), HasQuote: true, ActiveChild: child, Now: now, LastActionAt: now.Add(-time.Second)})
-	if decision.Action != ActionCancelActive || decision.Price != "0.43" {
-		t.Fatalf("expected cancel for repricing, got %+v", decision)
-	}
-}
-
-func TestPlanWaitsWhenRepriceIntervalHasNotElapsed(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	child := &Child{Sequence: 1, State: statemachine.StateLive, Price: "0.40"}
-	decision := Plan(Request{Intent: tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly), Quote: tacticQuote(now), HasQuote: true, ActiveChild: child, Now: now, LastActionAt: now.Add(-100 * time.Millisecond)})
-	if decision.Action != ActionWait {
-		t.Fatalf("expected wait, got %+v", decision)
-	}
-}
-
 func TestPlanTakerAggressiveBuyUsesAskPlusStepAndFAK(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleTakerAggressive)
@@ -52,6 +33,16 @@ func TestPlanTakerAggressiveBuyUsesAskPlusStepAndFAK(t *testing.T) {
 	decision := Plan(Request{Intent: intent, Quote: tacticQuote(now), HasQuote: true, Now: now})
 	if decision.Action != ActionSubmitChild || decision.Price != "0.47" || decision.TimeInForce != protocol.TimeInForceFAK || decision.PostOnly {
 		t.Fatalf("unexpected taker decision: %+v", decision)
+	}
+}
+
+func TestPlanAutoBuyUsesAskPlusStepAndFAK(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleAuto)
+	intent.TimeInForce = protocol.TimeInForceGTC
+	decision := Plan(Request{Intent: intent, Quote: tacticQuote(now), HasQuote: true, Now: now})
+	if decision.Action != ActionSubmitChild || decision.Price != "0.47" || decision.TimeInForce != protocol.TimeInForceFAK {
+		t.Fatalf("unexpected auto decision: %+v", decision)
 	}
 }
 
@@ -64,15 +55,6 @@ func TestPlanWaitsForFreshQuote(t *testing.T) {
 	}
 }
 
-func TestPlanSubmitsNextChildOnlyAfterTerminalActiveChild(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	child := Child{Sequence: 1, State: statemachine.StateCanceled, Price: "0.40"}
-	decision := Plan(Request{Intent: tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly), Quote: tacticQuote(now), HasQuote: true, Children: []Child{child}, ActiveChild: &child, Now: now})
-	if decision.Action != ActionSubmitChild || decision.NextSequence != 2 {
-		t.Fatalf("expected next child after terminal active child, got %+v", decision)
-	}
-}
-
 func tacticIntent(side protocol.Side, style protocol.ExecutionStyle) protocol.ExecutionIntent {
 	minPrice := "0.35"
 	maxPrice := "0.55"
@@ -81,7 +63,7 @@ func tacticIntent(side protocol.Side, style protocol.ExecutionStyle) protocol.Ex
 	} else {
 		minPrice = ""
 	}
-	return protocol.ExecutionIntent{IntentID: "intent-1", ConditionID: "condition", TokenID: "up-token", Outcome: "Up", Side: side, TargetShares: "2", LimitPrice: "0.41", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{Style: style, InitialPrice: "0.41", MaxPrice: maxPrice, MinPrice: minPrice, PriceStep: "0.01", QuoteOffset: "0.01", RepriceIntervalMillis: 250, MaxReprices: 3, QuoteMaxAgeMillis: 500}}
+	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", ConditionID: "condition", TokenID: "up-token", Outcome: "Up", Side: side, TargetShares: "2", LimitPrice: "0.41", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{Style: style, InitialPrice: "0.41", MaxPrice: maxPrice, MinPrice: minPrice, PriceStep: "0.01", QuoteOffset: "0.01", QuoteMaxAgeMillis: 500}}
 }
 
 func tacticQuote(at time.Time) marketquotes.Snapshot {

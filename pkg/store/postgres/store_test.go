@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -108,5 +109,32 @@ func TestRunMigrationsWrapsRecordError(t *testing.T) {
 func TestZeroTimeToNil(t *testing.T) {
 	if value := zeroTimeToNil(time.Time{}); value != nil {
 		t.Fatalf("expected nil zero time, got %v", value)
+	}
+}
+
+func TestUniqueConstraintMatchesNamedPostgresViolation(t *testing.T) {
+	err := &pgconn.PgError{Code: "23505", ConstraintName: "reservations_one_active_sell_idx"}
+	if !isUniqueConstraint(err, "reservations_one_active_sell_idx") {
+		t.Fatal("expected active sell reservation constraint to match")
+	}
+	if isUniqueConstraint(err, "order_intents_idempotency_key_key") {
+		t.Fatal("unexpected idempotency constraint match")
+	}
+}
+
+func TestTransitionOrderReturnsPersistedValuesFromDatabase(t *testing.T) {
+	body, err := os.ReadFile("store.go")
+	if err != nil {
+		t.Fatalf("read store.go: %v", err)
+	}
+	source := string(body)
+	for _, fragment := range []string{
+		"RETURNING matched_shares::text, exchange_order_id, updated_at",
+		"order.State, order.Revision, order.MatchedShares = transition.To, newRevision, persistedMatchedShares",
+		"order.ExchangeOrderID = persistedExchangeID",
+	} {
+		if !strings.Contains(source, fragment) {
+			t.Fatalf("TransitionOrder must return persisted DB values; missing %q", fragment)
+		}
 	}
 }

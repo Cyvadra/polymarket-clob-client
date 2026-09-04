@@ -6,14 +6,17 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 )
 
 var (
-	ErrDuplicate = errors.New("duplicate record")
-	ErrConflict  = errors.New("state conflict")
-	ErrNotFound  = errors.New("record not found")
+	ErrDuplicate             = errors.New("duplicate record")
+	ErrConflict              = errors.New("state conflict")
+	ErrNotFound              = errors.New("record not found")
+	ErrIdempotencyConflict   = errors.New("idempotency key already belongs to another intent")
+	ErrActiveSellReservation = errors.New("active sell reservation already exists")
 )
 
 type OrderIntentRecord struct {
@@ -124,16 +127,13 @@ type ReservationRecord struct {
 	UpdatedAt     time.Time
 }
 
-type IntentRepository interface {
+type IntentStore interface {
+	WithIntentLock(context.Context, string, func(context.Context) error) error
 	InsertIntent(context.Context, OrderIntentRecord) (inserted bool, err error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
 }
 
-type IntentLockRepository interface {
-	WithIntentLock(context.Context, string, func(context.Context) error) error
-}
-
-type OrderRepository interface {
+type OrderStore interface {
 	PersistSignedOrder(context.Context, SignedOrderRecord) error
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OrderByIntent(context.Context, string, int) (SignedOrderRecord, error)
@@ -141,18 +141,71 @@ type OrderRepository interface {
 	OpenOrders(context.Context) ([]SignedOrderRecord, error)
 }
 
-type FillRepository interface {
+type FillStore interface {
 	ApplyFill(context.Context, FillRecord) (inserted bool, err error)
 }
 
-type PositionRepository interface {
-	Position(context.Context, string, string) (PositionRecord, error)
+type PositionStore interface {
 	PositionFeatures(context.Context) ([]PositionRecord, error)
 }
 
-type ReservationRepository interface {
+type ReservationStore interface {
 	Reserve(context.Context, ReservationRecord) error
 	Reservation(context.Context, string) (ReservationRecord, error)
 	Release(context.Context, string, string) error
-	ReservationsForPosition(context.Context, string, string) ([]ReservationRecord, error)
+}
+
+type ExecutionStore interface {
+	IntentStore
+	OrderStore
+	ReservationStore
+}
+
+type AccountFillStore interface {
+	FillStore
+	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)
+}
+
+type AccountOrderStore interface {
+	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
+	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)
+}
+
+type ReconcileStore interface {
+	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
+	OpenOrders(context.Context) ([]SignedOrderRecord, error)
+}
+
+type Store interface {
+	ExecutionStore
+	FillStore
+	PositionStore
+}
+
+func TerminalAckForOrder(order SignedOrderRecord, reason string, occurredAt time.Time) (protocol.ExecutionIntentAck, bool) {
+	ack := protocol.ExecutionIntentAck{IntentID: order.IntentID, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt}
+	switch order.State {
+	case statemachine.StateFilled:
+		ack.Status = protocol.IntentCompleted
+	case statemachine.StateCanceled:
+		ack.Status = protocol.IntentExpired
+		if hasMatchedShares(order.MatchedShares) {
+			ack.Status = protocol.IntentPartial
+		}
+	case statemachine.StateRejected:
+		ack.Status = protocol.IntentRejected
+		ack.ReasonCode = "ORDER_REJECTED"
+	case statemachine.StateExpired:
+		ack.Status = protocol.IntentExpired
+	case statemachine.StateFailed:
+		ack.Status = protocol.IntentFailed
+		ack.ReasonCode = "EXECUTION_FAILED"
+	default:
+		return protocol.ExecutionIntentAck{}, false
+	}
+	return ack, true
+}
+
+func hasMatchedShares(value string) bool {
+	return decimal.Positive(value)
 }

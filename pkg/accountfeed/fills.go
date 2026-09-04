@@ -3,7 +3,6 @@ package accountfeed
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -12,17 +11,12 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
-type FillStore interface {
-	store.FillRepository
-	OrderByExchangeID(context.Context, string) (store.SignedOrderRecord, error)
-}
-
 type FillConsumer struct {
-	store FillStore
+	store store.AccountFillStore
 	now   func() time.Time
 }
 
-func NewFillConsumer(repository FillStore, now func() time.Time) (*FillConsumer, error) {
+func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*FillConsumer, error) {
 	if repository == nil {
 		return nil, fmt.Errorf("fill store is required")
 	}
@@ -42,22 +36,18 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 		return false, fmt.Errorf("exchange order ID is required for an account fill")
 	}
 	order, err := c.store.OrderByExchangeID(ctx, fill.ExchangeOrderID)
-	if errors.Is(err, store.ErrNotFound) {
+	if err == store.ErrNotFound {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("lookup filled order: %w", err)
+		return false, fmt.Errorf("lookup fill order: %w", err)
 	}
-	if order.IntentID == "" {
-		return false, fmt.Errorf("filled order %s has no intent ID", fill.ExchangeOrderID)
-	}
-	fill.IntentID = order.IntentID
 	receivedAt := fill.ReceivedAt
 	if receivedAt.IsZero() {
 		receivedAt = c.now().UTC()
 	}
 	return c.store.ApplyFill(ctx, store.FillRecord{
-		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: fill.IntentID,
+		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: order.IntentID,
 		MarketID: fill.MarketID, ConditionID: fill.ConditionID, TokenID: fill.TokenID,
 		Outcome: fill.Outcome, Side: fill.Side, Shares: fill.Shares, Price: fill.Price,
 		Fee: fill.Fee, FeeRateBps: fill.FeeRateBps, TradeStatus: fill.TradeStatus,

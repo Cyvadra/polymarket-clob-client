@@ -74,7 +74,21 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return runMigrations(ctx, s.pool, migrations)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin migrations: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('executiond-migrations', 0))`); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	if err := runMigrations(ctx, tx, migrations); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit migrations: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) WithIntentLock(ctx context.Context, intentID string, fn func(context.Context) error) error {
@@ -134,6 +148,9 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt)
 	if err != nil {
+		if isUniqueConstraint(err, "order_intents_idempotency_key_key") {
+			return false, store.ErrIdempotencyConflict
+		}
 		return false, fmt.Errorf("insert intent: %w", err)
 	}
 	return commandTag.RowsAffected() == 1, nil
@@ -244,17 +261,25 @@ func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderReco
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	newRevision := order.Revision + 1
-	commandTag, err := tx.Exec(ctx, `
+	var persistedExchangeOrderID *string
+	var persistedMatchedShares string
+	var persistedUpdatedAt time.Time
+	err = tx.QueryRow(ctx, `
 		UPDATE orders
 		SET state = $1, revision = $2, matched_shares = GREATEST(matched_shares, $3::numeric),
 			exchange_order_id = COALESCE(NULLIF($4, ''), exchange_order_id), updated_at = now()
 		WHERE intent_id = $5 AND child_sequence = $6 AND revision = $7 AND state = $8
-	`, transition.To, newRevision, matchedShares, exchangeOrderID, order.IntentID, order.ChildSequence, order.Revision, order.State)
+		RETURNING matched_shares::text, exchange_order_id, updated_at
+	`, transition.To, newRevision, matchedShares, exchangeOrderID, order.IntentID, order.ChildSequence, order.Revision, order.State).Scan(&persistedMatchedShares, &persistedExchangeOrderID, &persistedUpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.SignedOrderRecord{}, store.ErrConflict
+	}
 	if err != nil {
 		return store.SignedOrderRecord{}, fmt.Errorf("update order transition: %w", err)
 	}
-	if commandTag.RowsAffected() != 1 {
-		return store.SignedOrderRecord{}, store.ErrConflict
+	persistedExchangeID := ""
+	if persistedExchangeOrderID != nil {
+		persistedExchangeID = *persistedExchangeOrderID
 	}
 	if statemachine.IsTerminal(transition.To) {
 		if err := releaseReservationTx(ctx, tx, fmt.Sprintf("%s:%d", order.IntentID, order.ChildSequence), "order reached "+string(transition.To)); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -263,7 +288,7 @@ func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderReco
 	}
 	if err := insertOrderEvent(ctx, tx, store.OrderEventRecord{
 		EventID: eventID(order.IntentID, order.ChildSequence, newRevision, event), IntentID: order.IntentID,
-		ChildSequence: order.ChildSequence, ExchangeOrderID: exchangeOrderID, FromState: order.State,
+		ChildSequence: order.ChildSequence, ExchangeOrderID: persistedExchangeID, FromState: order.State,
 		ToState: transition.To, Event: event, Reason: reason, ReceivedAt: time.Now().UTC(),
 	}); err != nil {
 		return store.SignedOrderRecord{}, err
@@ -271,10 +296,9 @@ func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderReco
 	if err := tx.Commit(ctx); err != nil {
 		return store.SignedOrderRecord{}, fmt.Errorf("commit order transition: %w", err)
 	}
-	order.State, order.Revision, order.MatchedShares = transition.To, newRevision, matchedShares
-	if exchangeOrderID != "" {
-		order.ExchangeOrderID = exchangeOrderID
-	}
+	order.State, order.Revision, order.MatchedShares = transition.To, newRevision, persistedMatchedShares
+	order.ExchangeOrderID = persistedExchangeID
+	order.UpdatedAt = persistedUpdatedAt
 	return order, nil
 }
 
@@ -375,9 +399,18 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		return false, fmt.Errorf("lock existing fill: %w", err)
 	}
 	if err == nil {
-		if priorStatus == "FAILED" || tradeStatus != "FAILED" {
+		if priorStatus == "FAILED" {
+			if err := tx.Commit(ctx); err != nil {
+				return false, fmt.Errorf("commit terminal failed fill: %w", err)
+			}
+			return false, nil
+		}
+		if tradeStatus != "FAILED" {
 			if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = $2 WHERE fill_id = $1`, record.FillID, tradeStatus); err != nil {
 				return false, fmt.Errorf("update fill settlement: %w", err)
+			}
+			if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, tradeStatus); err != nil {
+				return false, err
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return false, fmt.Errorf("commit fill settlement: %w", err)
@@ -394,12 +427,6 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			return false, fmt.Errorf("commit failed fill rollback: %w", err)
 		}
 		return true, nil
-	}
-	if tradeStatus == "FAILED" {
-		if err := tx.Commit(ctx); err != nil {
-			return false, fmt.Errorf("commit unknown failed fill: %w", err)
-		}
-		return false, nil
 	}
 	commandTag, err := tx.Exec(ctx, `
 		INSERT INTO fills (
@@ -421,19 +448,32 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		}
 		return false, nil
 	}
+	if tradeStatus == "FAILED" {
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("commit failed fill tombstone: %w", err)
+		}
+		return true, nil
+	}
 	if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.MarketID, record.Outcome, string(record.Side), record.Shares, record.Price, record.TraderSide, false, receivedAt); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE positions SET state = CASE WHEN $1 = 'CONFIRMED' THEN CASE WHEN position_size = 0 THEN 'empty' ELSE 'open' END ELSE 'unsettled' END
-		WHERE condition_id = $2 AND token_id = $3
-	`, tradeStatus, record.ConditionID, record.TokenID); err != nil {
-		return false, fmt.Errorf("set position settlement state: %w", err)
+	if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, tradeStatus); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit fill: %w", err)
 	}
 	return true, nil
+}
+
+func setPositionSettlementState(ctx context.Context, tx pgx.Tx, conditionID, tokenID, tradeStatus string) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE positions SET state = CASE WHEN $1 = 'CONFIRMED' THEN CASE WHEN position_size = 0 THEN 'empty' ELSE 'open' END ELSE 'unsettled' END
+		WHERE condition_id = $2 AND token_id = $3
+	`, tradeStatus, conditionID, tokenID); err != nil {
+		return fmt.Errorf("set position settlement state: %w", err)
+	}
+	return nil
 }
 
 func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, marketID, outcome, side, shares, price, traderSide string, reverse bool, receivedAt time.Time) error {
@@ -558,6 +598,9 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	`, record.ReservationID, record.IntentID, record.ChildSequence, record.MarketID, record.ConditionID, record.TokenID,
 		record.Outcome, record.Side, record.Shares, record.Notional, state, record.Reason, createdAt, updatedAt)
 	if err != nil {
+		if isUniqueConstraint(err, "reservations_one_active_sell_idx") {
+			return store.ErrActiveSellReservation
+		}
 		if isUniqueViolation(err) {
 			return store.ErrDuplicate
 		}
@@ -670,43 +713,6 @@ func restoreReservationPosition(ctx context.Context, tx pgx.Tx, record store.Res
 		return fmt.Errorf("restore sell position: %w", err)
 	}
 	return nil
-}
-
-func (s *Store) ReservationsForPosition(ctx context.Context, conditionID, tokenID string) ([]store.ReservationRecord, error) {
-	if conditionID == "" || tokenID == "" {
-		return nil, fmt.Errorf("condition ID and token ID are required")
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT reservation_id, intent_id, child_sequence, market_id, condition_id, token_id,
-			outcome, side, shares::text, notional::text, state, reason, created_at, updated_at
-		FROM reservations
-		WHERE condition_id = $1 AND token_id = $2 AND state = 'active'
-		ORDER BY created_at, reservation_id
-	`, conditionID, tokenID)
-	if err != nil {
-		return nil, fmt.Errorf("query reservations: %w", err)
-	}
-	defer rows.Close()
-	var reservations []store.ReservationRecord
-	for rows.Next() {
-		reservation, err := scanReservation(rows)
-		if err != nil {
-			return nil, err
-		}
-		reservations = append(reservations, reservation)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("scan reservations: %w", err)
-	}
-	return reservations, nil
-}
-
-func (s *Store) Position(ctx context.Context, conditionID, tokenID string) (store.PositionRecord, error) {
-	if conditionID == "" || tokenID == "" {
-		return store.PositionRecord{}, fmt.Errorf("condition ID and token ID are required")
-	}
-	row := s.pool.QueryRow(ctx, positionSelectSQL()+" WHERE condition_id = $1 AND token_id = $2", conditionID, tokenID)
-	return scanPosition(row)
 }
 
 func (s *Store) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
@@ -822,10 +828,6 @@ func positionSelectSQL() string {
 	`
 }
 
-func (s *Store) insertOrderEvent(ctx context.Context, record store.OrderEventRecord) error {
-	return insertOrderEvent(ctx, s.pool, record)
-}
-
 func insertOrderEvent(ctx context.Context, execer migrationExecer, record store.OrderEventRecord) error {
 	receivedAt := record.ReceivedAt
 	if receivedAt.IsZero() {
@@ -867,28 +869,6 @@ func scanOrder(row rowScanner) (store.SignedOrderRecord, error) {
 	return record, nil
 }
 
-func scanFill(row rowScanner) (store.FillRecord, error) {
-	var record store.FillRecord
-	var exchangeOrderID, intentID *string
-	var exchangeTime *time.Time
-	err := row.Scan(&record.FillID, &exchangeOrderID, &intentID, &record.MarketID, &record.ConditionID,
-		&record.TokenID, &record.Outcome, &record.Side, &record.Shares, &record.Price, &record.Fee,
-		&exchangeTime, &record.ReceivedAt)
-	if err != nil {
-		return store.FillRecord{}, fmt.Errorf("scan fill: %w", err)
-	}
-	if exchangeOrderID != nil {
-		record.ExchangeOrderID = *exchangeOrderID
-	}
-	if intentID != nil {
-		record.IntentID = *intentID
-	}
-	if exchangeTime != nil {
-		record.ExchangeTime = *exchangeTime
-	}
-	return record, nil
-}
-
 func scanReservation(row rowScanner) (store.ReservationRecord, error) {
 	var record store.ReservationRecord
 	var childSequence *int
@@ -910,8 +890,21 @@ func eventID(intentID string, childSequence int, revision int64, event statemach
 }
 
 func isUniqueViolation(err error) bool {
+	_, ok := uniqueViolation(err)
+	return ok
+}
+
+func isUniqueConstraint(err error, constraint string) bool {
+	pgError, ok := uniqueViolation(err)
+	return ok && pgError.ConstraintName == constraint
+}
+
+func uniqueViolation(err error) (*pgconn.PgError, bool) {
 	var pgError *pgconn.PgError
-	return errors.As(err, &pgError) && pgError.Code == "23505"
+	if !errors.As(err, &pgError) || pgError.Code != "23505" {
+		return nil, false
+	}
+	return pgError, true
 }
 
 func zeroTimeToNil(value time.Time) any {
@@ -921,9 +914,4 @@ func zeroTimeToNil(value time.Time) any {
 	return value
 }
 
-var _ store.IntentRepository = (*Store)(nil)
-var _ store.IntentLockRepository = (*Store)(nil)
-var _ store.OrderRepository = (*Store)(nil)
-var _ store.FillRepository = (*Store)(nil)
-var _ store.PositionRepository = (*Store)(nil)
-var _ store.ReservationRepository = (*Store)(nil)
+var _ store.Store = (*Store)(nil)

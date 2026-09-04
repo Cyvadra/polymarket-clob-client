@@ -3,12 +3,13 @@ package store
 import (
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 )
 
 func BuildPositionFeature(position PositionRecord, sequence int64, publishedAt time.Time) protocol.PositionFeature {
 	var entryPrice *string
-	if position.EntryPrice != "" && position.PositionSize != "" && position.PositionSize != "0" {
+	if position.EntryPrice != "" && decimal.Positive(position.PositionSize) {
 		entryPrice = &position.EntryPrice
 	}
 

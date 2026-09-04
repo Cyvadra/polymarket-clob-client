@@ -100,19 +100,19 @@ func (c *Client) signOrder(order UserOrder, tickSize float64, negRisk bool) (Sig
 		side = 1
 	}
 	values := []interface{}{v2OrderHash, big.NewInt(salt), maker, signer, decimalBig(order.TokenID), makerAmt, takerAmt, side, uint8(c.cfg.SignatureType), big.NewInt(timestamp), common.HexToHash(metadata), common.HexToHash(builder)}
+	digest, err := eip712.HashTypedDataV4(domain, v2OrderStruct, values)
+	if err != nil {
+		return SignedOrderV2{}, fmt.Errorf("hash V2 order: %w", err)
+	}
 	var signature string
 	if c.cfg.SignatureType == SignatureTypePoly1271 {
 		signature, err = poly1271Signature(c.key, domain, maker, c.cfg.ChainID, values)
 	} else {
-		var digest common.Hash
-		digest, err = eip712.HashTypedDataV4(domain, v2OrderStruct, values)
+		var sig []byte
+		sig, err = crypto.Sign(digest.Bytes(), c.key)
 		if err == nil {
-			var sig []byte
-			sig, err = crypto.Sign(digest.Bytes(), c.key)
-			if err == nil {
-				sig[64] += 27
-				signature = hexutil.Encode(sig)
-			}
+			sig[64] += 27
+			signature = hexutil.Encode(sig)
 		}
 	}
 	if err != nil {
@@ -122,7 +122,7 @@ func (c *Client) signOrder(order UserOrder, tickSize float64, negRisk bool) (Sig
 	if order.Expiration > 0 {
 		expiration = strconv.FormatInt(order.Expiration, 10)
 	}
-	return SignedOrderV2{Salt: salt, Maker: maker.Hex(), Signer: signer.Hex(), TokenID: order.TokenID, MakerAmount: makerAmt.String(), TakerAmount: takerAmt.String(), Expiration: expiration, Side: string(order.Side), SignatureType: int(c.cfg.SignatureType), Timestamp: strconv.FormatInt(timestamp, 10), Metadata: metadata, Builder: builder, Signature: signature}, nil
+	return SignedOrderV2{OrderID: digest.Hex(), Salt: salt, Maker: maker.Hex(), Signer: signer.Hex(), TokenID: order.TokenID, MakerAmount: makerAmt.String(), TakerAmount: takerAmt.String(), Expiration: expiration, Side: string(order.Side), SignatureType: int(c.cfg.SignatureType), Timestamp: strconv.FormatInt(timestamp, 10), Metadata: metadata, Builder: builder, Signature: signature}, nil
 }
 
 func orderAmounts(side Side, price, shares float64, kind OrderType) (*big.Int, *big.Int) {

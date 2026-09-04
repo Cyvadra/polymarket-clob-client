@@ -34,6 +34,7 @@ func (s *fakeFillStore) ApplyFill(_ context.Context, record store.FillRecord) (b
 	s.applied++
 	return true, nil
 }
+
 func TestConsumeMapsValidatedFillToStore(t *testing.T) {
 	now := time.Unix(20, 0).UTC()
 	repository := &fakeFillStore{}

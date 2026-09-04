@@ -13,7 +13,6 @@
 - 持久化的执行意图、已签名订单恢复、到期撤单与订单状态对账
 - 已认证用户流的订单与成交处理，以及持久化的仓位记账
 - 面向策略的仓位特征：持仓、可用与预留份额、入场价与入场时间
-- 独立的 Gamma 发现与 Data API 仓位客户端，或一个聚合 `polymarket.Client`
 
 ## 执行运行时
 
@@ -41,9 +40,10 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | 持久化的订单生命周期迁移。 |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
 
-`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。`LIMIT` 使用意图限价直接创建初始 child；`MAKER_POST_ONLY`、`TAKER_AGGRESSIVE` 与 `AUTO` 会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force。当前运行时仍只创建一个 child；尚未实现持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。
+`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。`LIMIT` 使用意图限价直接创建初始 child；`MAKER_POST_ONLY`、`TAKER_AGGRESSIVE` 与 `AUTO` 会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force。当前运行时仍只创建一个 child；持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期尚未实现，对应策略字段会被拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。同一个条件 ID 与 token ID 同时只允许一个活跃卖出预留。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
+对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
 
 ### 仓位记账
 
@@ -53,9 +53,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 ### 包边界
 
-- 仓库根目录：公共 CLOB SDK。
-- `gamma` 与 `data`：独立的 Gamma 和 Data API 客户端。
-- `polymarket`：聚合 SDK facade。
+- 仓库根目录：`executiond` 使用的 CLOB API 客户端。
 - `cmd/executiond`：执行服务的 composition root。
 - `internal/execution/protocol`：`executiond` 私有的 Go wire types；外部协议见 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md)。
 - `pkg/accountfeed`、`pkg/executor`、`pkg/reconciler`、`pkg/store`：执行服务实现包，保持 Go 可测试性与模块化；策略集成 API 仍以 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md) 为准。
@@ -72,6 +70,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | `EXECUTION_POSTGRES_URL` | 是 | - |
 | `EXECUTION_POSITION_FEATURE_INTERVAL` | 否 | `500ms` |
 | `EXECUTION_RECONCILE_INTERVAL` | 否 | `30s` |
+| `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | 否 | `2m` |
 | `EXECUTION_CONNECT_TIMEOUT` | 否 | `10s` |
 | `EXECUTION_SHUTDOWN_GRACE_PERIOD` | 否 | `10s` |
 

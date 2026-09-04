@@ -13,17 +13,9 @@ import (
 
 const defaultInterval = 500 * time.Millisecond
 
-type PositionStore interface {
-	store.PositionRepository
-}
-
-type Publisher interface {
-	PublishJSON(subject string, value any) error
-}
-
 type PublisherModule struct {
-	store     PositionStore
-	publisher Publisher
+	store     store.PositionStore
+	publisher protocol.ExecutionEventPublisher
 	now       func() time.Time
 	interval  time.Duration
 	onError   func(error)
@@ -33,7 +25,7 @@ type PublisherModule struct {
 	published map[string]int64
 }
 
-func New(repository PositionStore, publisher Publisher, now func() time.Time, interval time.Duration) (*PublisherModule, error) {
+func New(repository store.PositionStore, publisher protocol.ExecutionEventPublisher, now func() time.Time, interval time.Duration) (*PublisherModule, error) {
 	if repository == nil || publisher == nil {
 		return nil, fmt.Errorf("position store and publisher are required")
 	}

@@ -15,10 +15,6 @@ type fakeStore struct {
 	err       error
 }
 
-func (s fakeStore) Position(context.Context, string, string) (store.PositionRecord, error) {
-	return store.PositionRecord{}, store.ErrNotFound
-}
-
 func (s fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return s.positions, s.err
 }

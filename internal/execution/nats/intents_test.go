@@ -55,10 +55,9 @@ func (fakeStore) Reserve(context.Context, store.ReservationRecord) error        
 func (fakeStore) Reservation(context.Context, string) (store.ReservationRecord, error) {
 	return store.ReservationRecord{}, store.ErrNotFound
 }
-func (fakeStore) Release(context.Context, string, string) error { return nil }
-func (fakeStore) ReservationsForPosition(context.Context, string, string) ([]store.ReservationRecord, error) {
-	return nil, nil
-}
+func (fakeStore) Release(context.Context, string, string) error                    { return nil }
+func (fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error)        { return false, nil }
+func (fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) { return nil, nil }
 
 type fakeCLOB struct{}
 
@@ -96,7 +95,7 @@ func TestSubscribeIntentsDecodesAndExecutes(t *testing.T) {
 	if subscriber.subject != protocol.SubjectStrategyExecutionIntent || subscriber.handler == nil {
 		t.Fatalf("subscription=%+v", subscriber)
 	}
-	intent := protocol.ExecutionIntent{IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
+	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -117,7 +116,7 @@ func TestSubscribeIntentsAcknowledgesDecodableInvalidIntent(t *testing.T) {
 	if err := SubscribeIntents(subscriber, execution); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	intent := protocol.ExecutionIntent{IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
+	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

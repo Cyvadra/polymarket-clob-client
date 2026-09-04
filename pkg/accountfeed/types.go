@@ -27,6 +27,35 @@ type AccountFill struct {
 	ReceivedAt      time.Time     `json:"received_at"`
 }
 
+type AccountTrade struct {
+	SchemaVersion string             `json:"schema_version,omitempty"`
+	ID            string             `json:"id"`
+	TakerOrderID  string             `json:"taker_order_id"`
+	Market        string             `json:"market"`
+	AssetID       string             `json:"asset_id"`
+	Side          protocol.Side      `json:"side"`
+	Size          string             `json:"size"`
+	Price         string             `json:"price"`
+	Outcome       string             `json:"outcome"`
+	Status        string             `json:"status"`
+	FeeRateBps    string             `json:"fee_rate_bps"`
+	TraderSide    string             `json:"trader_side"`
+	Owner         string             `json:"owner"`
+	TradeOwner    string             `json:"trade_owner"`
+	Timestamp     string             `json:"timestamp"`
+	MakerOrders   []AccountMakerFill `json:"maker_orders"`
+}
+
+type AccountMakerFill struct {
+	OrderID       string        `json:"order_id"`
+	Owner         string        `json:"owner"`
+	MatchedAmount string        `json:"matched_amount"`
+	Price         string        `json:"price"`
+	AssetID       string        `json:"asset_id"`
+	Outcome       string        `json:"outcome"`
+	Side          protocol.Side `json:"side"`
+}
+
 // AccountOrderEvent is an in-process normalized event from the authenticated user stream.
 type AccountOrderEvent struct {
 	SchemaVersion   string    `json:"schema_version"`

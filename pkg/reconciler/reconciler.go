@@ -3,10 +3,9 @@ package reconciler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
+	"net/http"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -16,28 +15,29 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
-const defaultInterval = 30 * time.Second
+const (
+	defaultInterval          = 30 * time.Second
+	defaultMissingOrderGrace = 2 * time.Minute
+)
 
 type CLOB interface {
 	Order(context.Context, string) (*clobclient.Order, error)
-	AllOpenOrders(context.Context) ([]clobclient.Order, error)
 	AllTrades(context.Context) ([]clobclient.Trade, error)
 }
 
-type Repository interface {
-	store.OrderRepository
-}
-
 type Reconciler struct {
-	store    Repository
-	clob     CLOB
-	now      func() time.Time
-	interval time.Duration
-	onError  func(error)
-	publish  protocol.ExecutionEventPublisher
+	store             store.ReconcileStore
+	clob              CLOB
+	fills             *accountfeed.FillConsumer
+	apiKey            string
+	now               func() time.Time
+	interval          time.Duration
+	missingOrderGrace time.Duration
+	onError           func(error)
+	publish           protocol.ExecutionEventPublisher
 }
 
-func New(repository Repository, clob CLOB, now func() time.Time, interval time.Duration) (*Reconciler, error) {
+func New(repository store.ReconcileStore, clob CLOB, fills *accountfeed.FillConsumer, apiKey string, now func() time.Time, interval time.Duration) (*Reconciler, error) {
 	if repository == nil || clob == nil {
 		return nil, fmt.Errorf("repository and CLOB client are required")
 	}
@@ -47,7 +47,13 @@ func New(repository Repository, clob CLOB, now func() time.Time, interval time.D
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	return &Reconciler{store: repository, clob: clob, now: now, interval: interval}, nil
+	return &Reconciler{store: repository, clob: clob, fills: fills, apiKey: apiKey, now: now, interval: interval, missingOrderGrace: defaultMissingOrderGrace}, nil
+}
+
+func (r *Reconciler) SetMissingOrderGrace(grace time.Duration) {
+	if grace > 0 {
+		r.missingOrderGrace = grace
+	}
 }
 
 func (r *Reconciler) Init(ctx context.Context) error {
@@ -85,6 +91,9 @@ func (r *Reconciler) SetEventPublisher(publisher protocol.ExecutionEventPublishe
 func (r *Reconciler) Close(context.Context) error { return nil }
 
 func (r *Reconciler) Reconcile(ctx context.Context) error {
+	if err := r.replayTrades(ctx); err != nil {
+		return err
+	}
 	orders, err := r.store.OpenOrders(ctx)
 	if err != nil {
 		return fmt.Errorf("load unresolved orders: %w", err)
@@ -98,132 +107,85 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	return reconcileErr
 }
 
+func (r *Reconciler) replayTrades(ctx context.Context) error {
+	if r.fills == nil {
+		return nil
+	}
+	trades, err := r.clob.AllTrades(ctx)
+	if err != nil {
+		return fmt.Errorf("load account trades for reconciliation: %w", err)
+	}
+	for _, trade := range trades {
+		for _, fill := range accountfeed.OwnedFillsFromTrade(accountTrade(trade), r.apiKey, r.now().UTC()) {
+			if _, err := r.fills.Consume(ctx, fill); err != nil {
+				return fmt.Errorf("replay account trade %s: %w", trade.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func accountTrade(trade clobclient.Trade) accountfeed.AccountTrade {
+	makerOrders := make([]accountfeed.AccountMakerFill, 0, len(trade.MakerOrders))
+	for _, maker := range trade.MakerOrders {
+		makerOrders = append(makerOrders, accountfeed.AccountMakerFill{OrderID: maker.OrderID, Owner: maker.Owner, MatchedAmount: maker.MatchedAmount, Price: maker.Price, AssetID: maker.AssetID, Outcome: maker.Outcome, Side: protocol.Side(maker.Side)})
+	}
+	return accountfeed.AccountTrade{ID: trade.ID, TakerOrderID: trade.TakerOrderID, Market: trade.Market, AssetID: trade.AssetID, Side: protocol.Side(trade.Side), Size: trade.Size, Price: trade.Price, Outcome: trade.Outcome, Status: trade.Status, FeeRateBps: trade.FeeRateBps, TraderSide: trade.TraderSide, Owner: trade.Owner, TradeOwner: trade.TradeOwner, Timestamp: trade.Timestamp, MakerOrders: makerOrders}
+}
+
 func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord) error {
 	if order.ExchangeOrderID == "" {
 		if order.State == statemachine.StateSigned {
 			return nil
 		}
 		if order.State != statemachine.StateSubmitUnknown {
-			if order.State == statemachine.StateUnknownReconcile && !order.UpdatedAt.Add(r.interval).After(r.now()) {
-				return r.apply(ctx, order, statemachine.EventFailedObserved, order.MatchedShares, "unresolved submission recovery deadline elapsed")
-			}
 			return nil
-		}
-		if matched, ok, err := r.matchOpenOrder(ctx, order); err != nil {
-			return err
-		} else if ok {
-			event, eventOK := statemachine.EventForOrderObservation(matched.Status, matched.SizeMatched, matched.OriginalSize)
-			if !eventOK {
-				return fmt.Errorf("matched order %s has unsupported status %q", matched.ID, matched.Status)
-			}
-			return r.apply(ctx, withExchangeOrderID(order, matched.ID), event, matched.SizeMatched, "REST open-order recovery "+matched.Status)
-		}
-		if matched, ok, err := r.matchTrade(ctx, order); err != nil {
-			return err
-		} else if ok {
-			return r.apply(ctx, order, statemachine.EventFillObserved, matched.Size, "REST trade recovery "+matched.ID)
 		}
 		return r.apply(ctx, order, statemachine.EventReconcileInconclusive, order.MatchedShares, "missing exchange order ID during reconciliation")
 	}
 
 	remote, err := r.clob.Order(ctx, order.ExchangeOrderID)
 	if err != nil {
+		if isMissingOrder(err) && isUnresolvedSubmission(order.State) {
+			if r.missingOrderExpired(order) {
+				return r.apply(ctx, order, statemachine.EventFailedObserved, order.MatchedShares, "REST order lookup still returned 404 after reconciliation grace period")
+			}
+			if order.State == statemachine.StateSubmitUnknown {
+				return r.apply(ctx, order, statemachine.EventReconcileInconclusive, order.MatchedShares, "REST order lookup returned 404 during unresolved submission")
+			}
+			return nil
+		}
 		return fmt.Errorf("lookup order %s: %w", order.ExchangeOrderID, err)
 	}
 	if remote == nil {
 		return fmt.Errorf("lookup order %s: empty response", order.ExchangeOrderID)
 	}
+	return r.applyRemoteOrder(ctx, order, *remote, "REST order observation "+remote.Status)
+}
+
+func isMissingOrder(err error) bool {
+	var apiErr *clobclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func isUnresolvedSubmission(state statemachine.State) bool {
+	return state == statemachine.StateSubmitUnknown || state == statemachine.StateUnknownReconcile
+}
+
+func (r *Reconciler) missingOrderExpired(order store.SignedOrderRecord) bool {
+	anchor := order.UpdatedAt
+	if anchor.IsZero() {
+		anchor = order.CreatedAt
+	}
+	return !anchor.IsZero() && !anchor.Add(r.missingOrderGrace).After(r.now().UTC())
+}
+
+func (r *Reconciler) applyRemoteOrder(ctx context.Context, order store.SignedOrderRecord, remote clobclient.Order, reason string) error {
 	event, ok := statemachine.EventForOrderObservation(remote.Status, remote.SizeMatched, remote.OriginalSize)
 	if !ok {
-		return fmt.Errorf("order %s has unsupported status %q", order.ExchangeOrderID, remote.Status)
+		return fmt.Errorf("order %s has unsupported status %q", remote.ID, remote.Status)
 	}
-	return r.apply(ctx, order, event, remote.SizeMatched, "REST order observation "+remote.Status)
-}
-
-func (r *Reconciler) matchOpenOrder(ctx context.Context, local store.SignedOrderRecord) (clobclient.Order, bool, error) {
-	var signed clobclient.SignedOrderV2
-	if err := json.Unmarshal(local.SignedPayload, &signed); err != nil {
-		return clobclient.Order{}, false, nil
-	}
-	orders, err := r.clob.AllOpenOrders(ctx)
-	if err != nil {
-		return clobclient.Order{}, false, fmt.Errorf("load CLOB open orders: %w", err)
-	}
-	var matched clobclient.Order
-	count := 0
-	for _, remote := range orders {
-		if sameOrder(local, signed, remote) {
-			matched = remote
-			count++
-		}
-	}
-	return matched, count == 1, nil
-}
-
-func (r *Reconciler) matchTrade(ctx context.Context, local store.SignedOrderRecord) (clobclient.Trade, bool, error) {
-	var signed clobclient.SignedOrderV2
-	if err := json.Unmarshal(local.SignedPayload, &signed); err != nil {
-		return clobclient.Trade{}, false, nil
-	}
-	trades, err := r.clob.AllTrades(ctx)
-	if err != nil {
-		return clobclient.Trade{}, false, fmt.Errorf("load CLOB trades: %w", err)
-	}
-	var matched clobclient.Trade
-	count := 0
-	for _, trade := range trades {
-		if sameTrade(local, signed, trade) {
-			matched = trade
-			count++
-		}
-	}
-	return matched, count == 1, nil
-}
-
-func sameOrder(local store.SignedOrderRecord, signed clobclient.SignedOrderV2, remote clobclient.Order) bool {
-	if remote.ID == "" || remote.AssetID != signed.TokenID || string(remote.Side) != signed.Side {
-		return false
-	}
-	if remote.CreatedAt > 0 && !local.CreatedAt.IsZero() {
-		createdAt := time.Unix(remote.CreatedAt, 0)
-		if local.CreatedAt.Sub(createdAt) > 5*time.Minute || createdAt.Sub(local.CreatedAt) > 5*time.Minute {
-			return false
-		}
-	}
-	return sameDecimal(remote.Price, local.Price) && sameDecimal(remote.OriginalSize, local.RequestedShares)
-}
-
-func sameTrade(local store.SignedOrderRecord, signed clobclient.SignedOrderV2, trade clobclient.Trade) bool {
-	if trade.ID == "" || trade.AssetID != signed.TokenID || string(trade.Side) != signed.Side {
-		return false
-	}
-	if !sameDecimal(trade.Price, local.Price) || !sameDecimal(trade.Size, local.RequestedShares) {
-		return false
-	}
-	if trade.Timestamp != "" && !local.CreatedAt.IsZero() {
-		if timestamp, err := strconv.ParseInt(trade.Timestamp, 10, 64); err == nil && timestamp > 0 {
-			tradeAt := time.Unix(timestamp, 0)
-			if local.CreatedAt.Sub(tradeAt) > 5*time.Minute || tradeAt.Sub(local.CreatedAt) > 5*time.Minute {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func sameDecimal(left, right string) bool {
-	leftFloat, leftErr := strconv.ParseFloat(left, 64)
-	rightFloat, rightErr := strconv.ParseFloat(right, 64)
-	if leftErr != nil || rightErr != nil {
-		return left == right
-	}
-	const epsilon = 1e-9
-	return leftFloat-rightFloat < epsilon && rightFloat-leftFloat < epsilon
-}
-
-func withExchangeOrderID(order store.SignedOrderRecord, exchangeOrderID string) store.SignedOrderRecord {
-	order.ExchangeOrderID = exchangeOrderID
-	return order
+	return r.apply(ctx, order, event, remote.SizeMatched, reason)
 }
 
 func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, reason string) error {

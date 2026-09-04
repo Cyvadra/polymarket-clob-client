@@ -74,7 +74,7 @@ func TestSubmitOrderUsesV2PayloadAndCanonicalAuthPath(t *testing.T) {
 			t.Errorf("missing V2 field %s", field)
 		}
 	}
-	for _, field := range []string{"nonce", "taker", "feeRateBps"} {
+	for _, field := range []string{"nonce", "taker", "feeRateBps", "orderID"} {
 		if _, ok := order[field]; ok {
 			t.Errorf("legacy field %s found in V2 payload", field)
 		}
@@ -111,6 +111,9 @@ func TestSubmitSignedOrderAvoidsResigning(t *testing.T) {
 	if _, err := client.SubmitSignedOrder(context.Background(), signed, OrderTypeGTC, false); err != nil {
 		t.Fatal(err)
 	}
+	if signed.OrderID == "" {
+		t.Fatal("expected signed order ID")
+	}
 	if received.Signature != signed.Signature || received.Salt != signed.Salt {
 		t.Fatalf("submitted order was changed: got=%+v want=%+v", received, signed)
 	}
@@ -130,10 +133,10 @@ func TestAllOpenOrdersAndTradesFollowCursors(t *testing.T) {
 		case "/data/trades":
 			tradeCalls++
 			if r.URL.Query().Get("next_cursor") == "next-trades" {
-				_, _ = io.WriteString(w, `{"data":[{"id":"t-2"}],"next_cursor":""}`)
+				_, _ = io.WriteString(w, `{"data":[{"id":"t-2","taker_order_id":"o-2","outcome":"Down","trader_side":"TAKER"}],"next_cursor":""}`)
 				return
 			}
-			_, _ = io.WriteString(w, `{"data":[{"id":"t-1"}],"next_cursor":"next-trades"}`)
+			_, _ = io.WriteString(w, `{"data":[{"id":"t-1","taker_order_id":"o-1","outcome":"Up","trader_side":"MAKER","maker_orders":[{"order_id":"m-1","owner":"key","matched_amount":"1","asset_id":"token","outcome":"Up","side":"SELL"}]}],"next_cursor":"next-trades"}`)
 		default:
 			t.Fatalf("unexpected endpoint %s", r.URL.Path)
 		}
@@ -145,7 +148,7 @@ func TestAllOpenOrdersAndTradesFollowCursors(t *testing.T) {
 		t.Fatalf("open-order pagination: orders=%+v calls=%d err=%v", orders, orderCalls, err)
 	}
 	trades, err := client.AllTrades(context.Background())
-	if err != nil || len(trades) != 2 || tradeCalls != 2 {
+	if err != nil || len(trades) != 2 || tradeCalls != 2 || trades[0].MakerOrders[0].OrderID != "m-1" || trades[1].TakerOrderID != "o-2" {
 		t.Fatalf("trade pagination: trades=%+v calls=%d err=%v", trades, tradeCalls, err)
 	}
 }
