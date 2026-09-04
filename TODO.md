@@ -6,9 +6,9 @@
 
 - 实现一个按意图、多 child-order 的 worker，用于 post-only 被穿越重试、taker 重报价、价格漂移拒绝，以及从 soft-close 升级到 force-close。
 - 将每个 child 以递增的 `child_sequence` 持久化，包括其价格、撤单原因与替换关系。
-- 已消费 `pmm.market.quotes`：以 `market_id` 为键、带时间戳的 up/down bid/ask/mid 快照进入运行时 cache。不要让执行器去拉取或订阅 pmm 的特征。
+- 已定义 `marketquotes.Snapshot`：以 `condition_id` 为键、带时间戳与 outcome `asset_id` 的 up/down bid/ask/mid 快照可供未来 tactics worker 缓存。当前 `executiond` 不订阅 `pmm.market.quotes`，因为没有任何订单决策会读取它。
 
-为何现在未实现：当前契约已携带 `style`、`max_reprices`、`reprice_step`、`max_price_drift` 与重报价延迟，且 `executiond` 已消费有序的 PMM quotes。仍需实现每个 intent 的多 child-order worker，并在下单前对 quote 新鲜度、market_id 与 intent 的 condition_id、以及价格漂移做原子校验；不能在 NATS 行情回调中直接下单。
+为何现在未实现：当前 NATS 契约仅接受已实现的 `LIMIT` style，避免策略误以为重报价已经生效。实现每个 intent 的多 child-order worker 时，再引入相应的策略字段，并在下单前对 quote 新鲜度、condition_id 与 intent、up/down asset_id 与 token_id、以及价格漂移做原子校验；不能在 NATS 行情回调中直接下单。
 
 ## 风险控制
 

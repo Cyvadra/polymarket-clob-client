@@ -9,7 +9,7 @@
 - 签名前的 tick size、手续费率与负风险（neg-risk）解析
 - 公共市场、订单簿、定价、历史与批量订单簿查询
 - 已认证的订单、余额、成交、通知、评分与撤单
-- 可自动重连的市场/用户 WebSocket 数据流
+- 可自动重连的已认证用户 WebSocket 数据流
 - 持久化的执行意图、已签名订单恢复、到期撤单与订单状态对账
 - 已认证用户流的订单与成交处理，以及持久化的仓位记账
 - 面向策略的仓位特征：持仓、可用与预留份额、入场价与入场时间
@@ -27,11 +27,11 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 `pmm` 负责市场特征产出；`executiond` 不消费 pmm 的特征。策略负责解析市场标识符并发布完整的执行意图。`executiond` 负责签名、提交、撤单、已认证账户事件、持久化订单状态与仓位记账。
 
-服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。意图投递刻意采用 at-most-once 语义：过期或丢失的意图不会被重放。每个收到的意图都会在执行确认主题上得到确认，因此策略可以安全地把缺失的确认视为“未开仓”。
+服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。意图投递刻意采用 at-most-once 语义：过期或丢失的意图不会被重放。可解码且具有 `intent_id` 的非法意图会收到拒绝确认；无效 JSON 无法确认。策略必须把缺失确认视为不确定结果，而不是“未开仓”。每个钱包只能运行一个 `executiond` 实例。
 
 ### NATS 契约
 
-所有负载均使用 `schema_version: "execution.v1"`。
+完整、版本化的字段约束、示例、交付语义与兼容性规则见 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md)。策略集成应以该文档为准，而不是 import runtime Go package。
 
 | 主题 | 方向 | 负载 | 用途 |
 | --- | --- | --- | --- |
@@ -40,7 +40,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | 持久化的订单生命周期迁移。 |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
 
-`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。
+`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。当前仅支持单 child 的 `LIMIT` 执行；未实现的 post-only 重试和 taker 重报价风格会显式拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 
@@ -50,9 +50,20 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 发布的仓位状态是执行视图，而非结算或赎回引擎。其余的对账与结算工作请参见 [TODO.md](TODO.md)。
 
+### 包边界
+
+- 仓库根目录：公共 CLOB SDK。
+- `gamma` 与 `data`：独立的 Gamma 和 Data API 客户端。
+- `polymarket`：聚合 SDK facade。
+- `cmd/executiond`：执行服务的 composition root。
+- `internal/execution/protocol`：`executiond` 私有的 Go wire types；外部协议见 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md)。
+- `pkg/accountfeed`、`pkg/executor`、`pkg/reconciler`、`pkg/store`：执行服务实现；它们不是策略集成 API。
+
 ### 运行 `executiond`
 
 `executiond` 需要常规的已认证 CLOB 环境变量（`POLYMARKET_PRIVATE_KEY`、`POLYMARKET_API_KEY`、`POLYMARKET_API_SECRET` 与 `POLYMARKET_API_PASSPHRASE`），另外还需要：
+
+完整的环境变量说明和安全配置方式见 [docs/configuration.md](docs/configuration.md)；可使用 [.env.example](.env.example) 作为无秘密的变量名参考。
 
 | 变量 | 必填 | 默认值 |
 | --- | --- | --- |
