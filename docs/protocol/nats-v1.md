@@ -23,6 +23,7 @@ authenticated CLOB user-stream adapter, never as a strategy integration rule.
 | Subject | Direction | Payload | Meaning |
 | --- | --- | --- | --- |
 | `strategy.execution.intent` | strategy -> executiond | `ExecutionIntent` | Submit one order intent. |
+| `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Latest condition quote snapshot cached for execution tactics. |
 | `execution.intent.ack` | executiond -> strategy | `ExecutionIntentAck` | Validation, submission, or terminal outcome. |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition observed by executiond. |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest best-effort position snapshot. |
@@ -44,15 +45,29 @@ either a future `expires_at` or a positive `policy.complete_within_ms`.
 | `limit_price` | Decimal string strictly between `0` and `1`. |
 | `time_in_force` | `GTC`, `FOK`, `FAK`, or `GTD`. |
 | `post_only` | Boolean passed to the CLOB order. |
-| `policy.style` | Omitted or `LIMIT`. Other styles are rejected with `UNSUPPORTED_EXECUTION_STYLE`. |
+| `policy.style` | Omitted, `LIMIT`, `MAKER_POST_ONLY`, `TAKER_AGGRESSIVE`, or `AUTO`. Omitted is treated as `LIMIT`. |
 | `policy.complete_within_ms` | Optional positive execution deadline. |
 | `policy.cancel_timeout_ms` | Optional cancellation timeout. |
 | `policy.max_feature_age_ms` | Optional maximum age of `feature_completed_at`. |
+| `policy.initial_price` | Optional decimal string used by tactic planning; defaults to `limit_price`. |
+| `policy.max_price` | Required for advanced `BUY` tactics; hard ceiling for automatic repricing. |
+| `policy.min_price` | Required for advanced `SELL` tactics; hard floor for automatic repricing. |
+| `policy.price_step` | Optional decimal string for tactic price increments. |
+| `policy.quote_offset` | Optional decimal string offset from best bid/ask for maker planning. |
+| `policy.reprice_interval_ms` | Optional minimum interval between active-child reprice decisions. |
+| `policy.max_reprices` | Optional maximum replacement count. |
+| `policy.quote_max_age_ms` | Optional maximum age for quote snapshots used by tactics. |
+| `policy.post_only_cross_retry` | Optional marker for post-only cross retry behavior. |
+| `policy.soft_close_after_ms` | Optional elapsed-time threshold for soft close planning. |
+| `policy.force_close_after_ms` | Optional elapsed-time threshold for force/aggressive close planning. |
+| `policy.cancel_replace_timeout_ms` | Optional timeout budget for cancel-before-replace flow. |
 
 `intent_id` is the durable idempotency identity. Reusing it resumes a signed
-order if necessary and does not create a second child order. The current
-runtime creates one child order only. It does not implement post-only retry,
-taker repricing, price drift controls, or soft/force-close tactics.
+order if necessary and does not create a second child order in the current
+runtime. Advanced tactic fields are accepted and validated, and quote snapshots
+are cached for the tactic planner, but the live executor still creates one child
+order only. It does not yet perform cancel-replace, post-only retry, taker
+repricing, price drift controls, or soft/force-close lifecycle execution.
 
 Example:
 
@@ -72,6 +87,38 @@ Example:
   "time_in_force": "GTC",
   "expires_at": "2026-09-04T12:05:00Z",
   "policy": { "style": "LIMIT", "complete_within_ms": 30000 }
+}
+```
+
+Maker post-only policy example accepted by validation and the tactic planner:
+
+```json
+{
+  "schema_version": "execution.v1",
+  "intent_id": "late-gap:condition:up:43",
+  "idempotency_key": "late-gap:condition:up:43",
+  "strategy": "late-gap",
+  "kind": "OPEN",
+  "condition_id": "0xcondition",
+  "token_id": "12345",
+  "outcome": "Up",
+  "side": "BUY",
+  "target_shares": "12.5",
+  "limit_price": "0.42",
+  "time_in_force": "GTC",
+  "post_only": true,
+  "expires_at": "2026-09-04T12:05:00Z",
+  "policy": {
+    "style": "MAKER_POST_ONLY",
+    "initial_price": "0.42",
+    "max_price": "0.48",
+    "price_step": "0.01",
+    "quote_offset": "0.01",
+    "reprice_interval_ms": 250,
+    "max_reprices": 3,
+    "quote_max_age_ms": 500,
+    "post_only_cross_retry": true
+  }
 }
 ```
 

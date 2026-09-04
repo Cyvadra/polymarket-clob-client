@@ -309,6 +309,42 @@ func TestExecuteRejectsDuplicateReservationWithoutActiveRecord(t *testing.T) {
 	}
 }
 
+func TestValidateIntentAcceptsMakerPostOnlyBuyWithinMaxPrice(t *testing.T) {
+	intent := testIntent()
+	intent.PostOnly = true
+	intent.Policy.Style = protocol.ExecutionStyleMakerPostOnly
+	intent.Policy.InitialPrice = "0.50"
+	intent.Policy.MaxPrice = "0.55"
+	intent.Policy.PriceStep = "0.01"
+	intent.Policy.RepriceIntervalMillis = 250
+	intent.Policy.MaxReprices = 2
+	intent.Policy.QuoteMaxAgeMillis = 500
+	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err != nil {
+		t.Fatalf("validate maker policy: %v", err)
+	}
+}
+
+func TestValidateIntentRejectsBuyPolicyAboveMaxPrice(t *testing.T) {
+	intent := testIntent()
+	intent.Policy.Style = protocol.ExecutionStyleTakerAggressive
+	intent.Policy.InitialPrice = "0.60"
+	intent.Policy.MaxPrice = "0.55"
+	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
+		t.Fatal("expected invalid buy policy")
+	}
+}
+
+func TestValidateIntentRejectsSellPolicyBelowMinPrice(t *testing.T) {
+	intent := testIntent()
+	intent.Side = protocol.SideSell
+	intent.Policy.Style = protocol.ExecutionStyleMakerPostOnly
+	intent.Policy.InitialPrice = "0.40"
+	intent.Policy.MinPrice = "0.45"
+	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
+		t.Fatal("expected invalid sell policy")
+	}
+}
+
 func testIntent() protocol.ExecutionIntent {
 	return protocol.ExecutionIntent{IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
 }

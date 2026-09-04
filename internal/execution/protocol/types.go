@@ -18,6 +18,7 @@ const (
 	SubjectStrategyExecutionIntent = "strategy.execution.intent"
 	SubjectExecutionIntentAck      = "execution.intent.ack"
 	SubjectExecutionOrderEvent     = "execution.order.event"
+	SubjectMarketQuotes            = "pmm.market.quotes"
 	SubjectPositionFeaturesPrefix  = "position.features"
 )
 
@@ -46,13 +47,30 @@ const (
 
 type ExecutionStyle string
 
-const ExecutionStyleLimit ExecutionStyle = "LIMIT"
+const (
+	ExecutionStyleLimit           ExecutionStyle = "LIMIT"
+	ExecutionStyleMakerPostOnly   ExecutionStyle = "MAKER_POST_ONLY"
+	ExecutionStyleTakerAggressive ExecutionStyle = "TAKER_AGGRESSIVE"
+	ExecutionStyleAuto            ExecutionStyle = "AUTO"
+)
 
 type ExecutionPolicy struct {
-	CompleteWithinMillis int64          `json:"complete_within_ms,omitempty"`
-	CancelTimeoutMillis  int64          `json:"cancel_timeout_ms,omitempty"`
-	MaxFeatureAgeMillis  int64          `json:"max_feature_age_ms,omitempty"`
-	Style                ExecutionStyle `json:"style,omitempty"`
+	CompleteWithinMillis       int64          `json:"complete_within_ms,omitempty"`
+	CancelTimeoutMillis        int64          `json:"cancel_timeout_ms,omitempty"`
+	MaxFeatureAgeMillis        int64          `json:"max_feature_age_ms,omitempty"`
+	Style                      ExecutionStyle `json:"style,omitempty"`
+	InitialPrice               string         `json:"initial_price,omitempty"`
+	MaxPrice                   string         `json:"max_price,omitempty"`
+	MinPrice                   string         `json:"min_price,omitempty"`
+	PriceStep                  string         `json:"price_step,omitempty"`
+	QuoteOffset                string         `json:"quote_offset,omitempty"`
+	RepriceIntervalMillis      int64          `json:"reprice_interval_ms,omitempty"`
+	MaxReprices                int            `json:"max_reprices,omitempty"`
+	QuoteMaxAgeMillis          int64          `json:"quote_max_age_ms,omitempty"`
+	PostOnlyCrossRetry         bool           `json:"post_only_cross_retry,omitempty"`
+	SoftCloseAfterMillis       int64          `json:"soft_close_after_ms,omitempty"`
+	ForceCloseAfterMillis      int64          `json:"force_close_after_ms,omitempty"`
+	CancelReplaceTimeoutMillis int64          `json:"cancel_replace_timeout_ms,omitempty"`
 }
 
 type ExecutionIntent struct {

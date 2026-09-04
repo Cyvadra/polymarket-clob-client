@@ -44,8 +44,11 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.ExpiresAt.IsZero() && intent.Policy.CompleteWithinMillis == 0 {
 		return fmt.Errorf("execution intent requires expires_at or complete_within_ms")
 	}
-	if intent.Policy.CompleteWithinMillis < 0 || intent.Policy.CancelTimeoutMillis < 0 || intent.Policy.MaxFeatureAgeMillis < 0 {
+	if intent.Policy.CompleteWithinMillis < 0 || intent.Policy.CancelTimeoutMillis < 0 || intent.Policy.MaxFeatureAgeMillis < 0 || intent.Policy.RepriceIntervalMillis < 0 || intent.Policy.QuoteMaxAgeMillis < 0 || intent.Policy.SoftCloseAfterMillis < 0 || intent.Policy.ForceCloseAfterMillis < 0 || intent.Policy.CancelReplaceTimeoutMillis < 0 {
 		return fmt.Errorf("execution policy durations must not be negative")
+	}
+	if intent.Policy.MaxReprices < 0 {
+		return fmt.Errorf("execution policy max_reprices must not be negative")
 	}
 	if intent.Kind != protocol.IntentOpen && intent.Kind != protocol.IntentClose {
 		return fmt.Errorf("invalid intent kind %q", intent.Kind)
@@ -56,10 +59,82 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.Policy.MaxFeatureAgeMillis > 0 && (intent.FeatureCompletedAt.IsZero() || now.Sub(intent.FeatureCompletedAt) > time.Duration(intent.Policy.MaxFeatureAgeMillis)*time.Millisecond) {
 		return fmt.Errorf("execution intent feature is stale")
 	}
-	if intent.Policy.Style != "" && intent.Policy.Style != protocol.ExecutionStyleLimit {
-		return fmt.Errorf("unsupported execution style %q", intent.Policy.Style)
+	if err := validatePolicyTactics(intent, price); err != nil {
+		return err
 	}
 	return nil
+}
+
+func validatePolicyTactics(intent protocol.ExecutionIntent, limitPrice float64) error {
+	policy := intent.Policy
+	switch policy.Style {
+	case "", protocol.ExecutionStyleLimit:
+		return nil
+	case protocol.ExecutionStyleMakerPostOnly, protocol.ExecutionStyleTakerAggressive, protocol.ExecutionStyleAuto:
+	default:
+		return fmt.Errorf("unsupported execution style %q", intent.Policy.Style)
+	}
+	initialPrice, err := optionalPolicyPrice("initial_price", policy.InitialPrice, limitPrice)
+	if err != nil {
+		return err
+	}
+	maxPrice, hasMaxPrice, err := optionalPolicyBound("max_price", policy.MaxPrice)
+	if err != nil {
+		return err
+	}
+	minPrice, hasMinPrice, err := optionalPolicyBound("min_price", policy.MinPrice)
+	if err != nil {
+		return err
+	}
+	if policy.PriceStep != "" {
+		if step, err := strconv.ParseFloat(policy.PriceStep, 64); err != nil || step <= 0 || step >= 1 {
+			return fmt.Errorf("invalid execution policy price_step %q", policy.PriceStep)
+		}
+	}
+	if policy.QuoteOffset != "" {
+		if offset, err := strconv.ParseFloat(policy.QuoteOffset, 64); err != nil || offset < 0 || offset >= 1 {
+			return fmt.Errorf("invalid execution policy quote_offset %q", policy.QuoteOffset)
+		}
+	}
+	if intent.Side == protocol.SideBuy {
+		if !hasMaxPrice {
+			return fmt.Errorf("buy execution policy requires max_price")
+		}
+		if initialPrice > maxPrice {
+			return fmt.Errorf("buy execution policy initial_price exceeds max_price")
+		}
+	}
+	if intent.Side == protocol.SideSell {
+		if !hasMinPrice {
+			return fmt.Errorf("sell execution policy requires min_price")
+		}
+		if initialPrice < minPrice {
+			return fmt.Errorf("sell execution policy initial_price is below min_price")
+		}
+	}
+	return nil
+}
+
+func optionalPolicyPrice(name, value string, fallback float64) (float64, error) {
+	if value == "" {
+		return fallback, nil
+	}
+	price, err := strconv.ParseFloat(value, 64)
+	if err != nil || price <= 0 || price >= 1 {
+		return 0, fmt.Errorf("invalid execution policy %s %q", name, value)
+	}
+	return price, nil
+}
+
+func optionalPolicyBound(name, value string) (float64, bool, error) {
+	if value == "" {
+		return 0, false, nil
+	}
+	price, err := optionalPolicyPrice(name, value, 0)
+	if err != nil {
+		return 0, false, err
+	}
+	return price, true, nil
 }
 
 func validationReasonCode(err error) string {
