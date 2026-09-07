@@ -40,6 +40,25 @@ func PositiveFloat(value string) (float64, error) {
 	return parsed, nil
 }
 
+// Float parses a decimal string into a float64 and rejects values that cannot
+// be represented exactly, preventing silent precision loss when a decimal
+// string is later converted into exchange order amounts.
+func Float(value string) (float64, error) {
+	value = strings.TrimSpace(value)
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("invalid decimal %q", value)
+	}
+	exact, ok := new(big.Rat).SetString(value)
+	if !ok {
+		return 0, fmt.Errorf("invalid decimal %q", value)
+	}
+	if new(big.Rat).SetFloat64(parsed).Cmp(exact) != 0 {
+		return 0, fmt.Errorf("decimal %q cannot be represented exactly as float64", value)
+	}
+	return parsed, nil
+}
+
 func NonNegativeFloat(value string) (float64, error) {
 	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {

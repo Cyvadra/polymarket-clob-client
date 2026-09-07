@@ -9,7 +9,6 @@ import (
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
@@ -153,51 +152,12 @@ func validationReasonCode(err error) string {
 	return "INVALID_INTENT"
 }
 
-func intentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderIntentRecord {
-	return store.OrderIntentRecord{
-		IntentID: intent.IntentID, IdempotencyKey: intent.IdempotencyKey, Strategy: intent.Strategy, MarketID: intent.MarketID,
-		Kind: intent.Kind, EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
-		Side: intent.Side, TargetShares: intent.TargetShares, LimitPrice: intent.LimitPrice, TimeInForce: intent.TimeInForce,
-		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
-		Status: statemachine.StateIntentReceived, Policy: intent.Policy, CreatedAt: now, UpdatedAt: now,
-	}
-}
-
-func executionIntent(record store.OrderIntentRecord) protocol.ExecutionIntent {
-	return protocol.ExecutionIntent{
-		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, IdempotencyKey: record.IdempotencyKey, Strategy: record.Strategy,
-		Kind: protocol.IntentKind(record.Kind), MarketID: record.MarketID, EventSlug: record.EventSlug,
-		ConditionID: record.ConditionID, TokenID: record.TokenID, Outcome: record.Outcome, Side: record.Side,
-		TargetShares: record.TargetShares, LimitPrice: record.LimitPrice, TimeInForce: record.TimeInForce,
-		PostOnly: record.PostOnly, FeatureSeq: record.FeatureSeq, FeatureCompletedAt: record.FeatureCompletedAt,
-		ExpiresAt: record.ExpiresAt, Policy: record.Policy,
-	}
-}
-
-func sameIntent(intent protocol.ExecutionIntent, record store.OrderIntentRecord) bool {
-	return intent.IntentID == record.IntentID && intent.IdempotencyKey == record.IdempotencyKey && intent.Strategy == record.Strategy &&
-		intent.Kind == record.Kind && intent.MarketID == record.MarketID && intent.EventSlug == record.EventSlug &&
-		intent.ConditionID == record.ConditionID && intent.TokenID == record.TokenID && intent.Outcome == record.Outcome &&
-		intent.Side == record.Side && sameDecimal(intent.TargetShares, record.TargetShares) && sameDecimal(intent.LimitPrice, record.LimitPrice) &&
-		intent.TimeInForce == record.TimeInForce && intent.PostOnly == record.PostOnly && intent.FeatureSeq == record.FeatureSeq &&
-		intent.FeatureCompletedAt.Equal(record.FeatureCompletedAt) && intent.ExpiresAt.Equal(record.ExpiresAt) && intent.Policy == record.Policy
-}
-
-func sameDecimal(left, right string) bool {
-	leftRat, leftOK := decimal.Rat(left)
-	rightRat, rightOK := decimal.Rat(right)
-	if !leftOK || !rightOK {
-		return strings.TrimSpace(left) == strings.TrimSpace(right)
-	}
-	return leftRat.Cmp(rightRat) == 0
-}
-
 func reservationRecord(intent protocol.ExecutionIntent, child plannedChild, reservationID string, now time.Time) store.ReservationRecord {
 	notional := "0"
 	if product, ok := decimal.MulString(child.Shares, child.Price); ok {
 		notional = product
 	}
-	return store.ReservationRecord{ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: child.Sequence, MarketID: intent.MarketID, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side, Shares: child.Shares, Notional: notional, State: "active", Reason: "execution intent accepted", CreatedAt: now, UpdatedAt: now}
+	return store.ReservationRecord{ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: child.Sequence, MarketID: intent.MarketID, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: store.Side(intent.Side), Shares: child.Shares, Notional: notional, State: "active", Reason: "execution intent accepted", CreatedAt: now, UpdatedAt: now}
 }
 
 func reservationID(intentID string, childSequence int) string {
@@ -205,7 +165,7 @@ func reservationID(intentID string, childSequence int) string {
 }
 
 func userOrder(intent protocol.ExecutionIntent, child plannedChild) (clobclient.UserOrder, error) {
-	shares, err := strconv.ParseFloat(child.Shares, 64)
+	shares, err := decimal.Float(child.Shares)
 	if err != nil || shares <= 0 {
 		return clobclient.UserOrder{}, fmt.Errorf("invalid planned shares %q", child.Shares)
 	}

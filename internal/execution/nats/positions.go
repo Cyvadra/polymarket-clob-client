@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -64,7 +65,7 @@ func SubscribePositionQuery(bus ReplyConnector, positions PositionStore, now fun
 			if !decimal.Positive(record.PositionSize) {
 				continue
 			}
-			response.Positions = append(response.Positions, store.BuildPositionFeature(record, 0, publishedAt))
+			response.Positions = append(response.Positions, mapping.PositionFeature(record, 0, publishedAt))
 		}
 		return bus.PublishJSON(reply, response)
 	})

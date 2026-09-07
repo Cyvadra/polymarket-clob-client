@@ -12,8 +12,9 @@ import (
 )
 
 type FillConsumer struct {
-	store store.AccountFillStore
-	now   func() time.Time
+	store   store.AccountFillStore
+	now     func() time.Time
+	onError func(error)
 }
 
 func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*FillConsumer, error) {
@@ -24,6 +25,12 @@ func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*
 		now = time.Now
 	}
 	return &FillConsumer{store: repository, now: now}, nil
+}
+
+// SetErrorHandler receives non-fatal observations the consumer cannot recover
+// from, such as a fill whose exchange order is unknown to the store.
+func (c *FillConsumer) SetErrorHandler(handler func(error)) {
+	c.onError = handler
 }
 
 // Consume stores a fill exactly once. The caller may safely retry a delivery
@@ -37,6 +44,12 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	}
 	order, err := c.store.OrderByExchangeID(ctx, fill.ExchangeOrderID)
 	if err == store.ErrNotFound {
+		// A fill for an order this executiond never signed means the wallet was
+		// traded outside the runtime, or a fill raced ahead of order
+		// persistence. The position accounting cannot safely absorb it, so it
+		// is dropped, but never silently: surface it so operators can
+		// investigate the divergence.
+		c.reportUnknownFill(fill)
 		return false, nil
 	}
 	if err != nil {
@@ -49,10 +62,18 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	return c.store.ApplyFill(ctx, store.FillRecord{
 		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: order.IntentID,
 		MarketID: fill.MarketID, ConditionID: fill.ConditionID, TokenID: fill.TokenID,
-		Outcome: fill.Outcome, Side: fill.Side, Shares: fill.Shares, Price: fill.Price,
+		Outcome: fill.Outcome, Side: store.Side(fill.Side), Shares: fill.Shares, Price: fill.Price,
 		Fee: fill.Fee, FeeRateBps: fill.FeeRateBps, TradeStatus: fill.TradeStatus,
 		TraderSide: fill.TraderSide, ExchangeTime: fill.ExchangeTime, ReceivedAt: receivedAt,
 	})
+}
+
+func (c *FillConsumer) reportUnknownFill(fill AccountFill) {
+	if c.onError == nil {
+		return
+	}
+	c.onError(fmt.Errorf("dropping fill %s: exchange order %s is not known to executiond (condition=%s token=%s outcome=%s side=%s shares=%s)",
+		fill.FillID, fill.ExchangeOrderID, fill.ConditionID, fill.TokenID, fill.Outcome, fill.Side, fill.Shares))
 }
 
 func validateFill(fill AccountFill) error {

@@ -9,11 +9,18 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
+
+// intentRecord is a test-only shorthand for the mapping helper so call sites
+// stay readable now that wire<->store conversion lives in the mapping package.
+func intentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderIntentRecord {
+	return mapping.IntentRecord(intent, now)
+}
 
 type fakeStore struct {
 	inserted            bool
@@ -368,7 +375,8 @@ func TestCancelExpiredRequestsAndSubmitsCancellation(t *testing.T) {
 	storer.order.IntentID = "intent-1"
 	storer.order.State = statemachine.StateLive
 	storer.order.Revision = 3
-	storer.intent = store.OrderIntentRecord{IntentID: "intent-1", CreatedAt: now.Add(-time.Second), Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
+	policyJSON, _ := json.Marshal(protocol.ExecutionPolicy{CompleteWithinMillis: 1})
+	storer.intent = store.OrderIntentRecord{IntentID: "intent-1", CreatedAt: now.Add(-time.Second), Policy: policyJSON}
 	if err := executor.cancelExpired(context.Background()); err != nil {
 		t.Fatalf("cancel elapsed order: %v", err)
 	}

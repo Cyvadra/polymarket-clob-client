@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -113,9 +112,9 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 	if record.IntentID == "" || record.IdempotencyKey == "" {
 		return false, fmt.Errorf("intent ID and idempotency key are required")
 	}
-	policy, err := json.Marshal(record.Policy)
-	if err != nil {
-		return false, fmt.Errorf("marshal execution policy: %w", err)
+	policy := record.Policy
+	if len(policy) == 0 {
+		policy = []byte("{}")
 	}
 	createdAt := record.CreatedAt
 	if createdAt.IsZero() {
@@ -285,6 +284,9 @@ func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderReco
 		if err := releaseReservationTx(ctx, tx, fmt.Sprintf("%s:%d", order.IntentID, order.ChildSequence), "order reached "+string(transition.To)); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return store.SignedOrderRecord{}, err
 		}
+	}
+	if err := updateIntentStatus(ctx, tx, order.IntentID, transition.To); err != nil {
+		return store.SignedOrderRecord{}, err
 	}
 	if err := insertOrderEvent(ctx, tx, store.OrderEventRecord{
 		EventID: eventID(order.IntentID, order.ChildSequence, newRevision, event), IntentID: order.IntentID,
@@ -466,6 +468,25 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 	return true, nil
 }
 
+func oppositeSide(side string) string {
+	if side == "BUY" {
+		return "SELL"
+	}
+	return "BUY"
+}
+
+// updateIntentStatus mirrors the child order lifecycle onto the parent intent
+// so order_intents.status reflects the latest observed state instead of the
+// write-once INTENT_RECEIVED sentinel.
+func updateIntentStatus(ctx context.Context, tx pgx.Tx, intentID string, state statemachine.State) error {
+	if _, err := tx.Exec(ctx, `
+		UPDATE order_intents SET status = $1, updated_at = now() WHERE intent_id = $2
+	`, string(state), intentID); err != nil {
+		return fmt.Errorf("update intent status: %w", err)
+	}
+	return nil
+}
+
 func setPositionSettlementState(ctx context.Context, tx pgx.Tx, conditionID, tokenID, tradeStatus string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE positions SET state = CASE WHEN $1 = 'CONFIRMED' THEN CASE WHEN position_size = 0 THEN 'empty' ELSE 'open' END ELSE 'unsettled' END
@@ -481,12 +502,10 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, ma
 	if err != nil {
 		return err
 	}
-	direction := "BUY"
-	if side == "BUY" {
-		direction = "SELL"
-	}
+	// Reversing a fill means applying the opposite side: a reversed BUY
+	// reduces the position, a reversed SELL adds it back.
 	if reverse {
-		side = direction
+		side = oppositeSide(side)
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO positions (
@@ -647,24 +666,9 @@ func (s *Store) Release(ctx context.Context, reservationID, reason string) error
 		return fmt.Errorf("begin release reservation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var record store.ReservationRecord
-	var childSequence *int
-	err = tx.QueryRow(ctx, `
-		DELETE FROM reservations
-		WHERE reservation_id = $1 AND state = 'active'
-		RETURNING intent_id, child_sequence, market_id, condition_id, token_id, outcome,
-			side, shares::text, notional::text, state, reason, created_at, updated_at
-	`, reservationID).Scan(&record.IntentID, &childSequence, &record.MarketID, &record.ConditionID,
-		&record.TokenID, &record.Outcome, &record.Side, &record.Shares, &record.Notional, &record.State,
-		&record.Reason, &record.CreatedAt, &record.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return store.ErrNotFound
-	}
+	record, err := deleteActiveReservation(ctx, tx, reservationID)
 	if err != nil {
-		return fmt.Errorf("release reservation: %w", err)
-	}
-	if childSequence != nil {
-		record.ChildSequence = *childSequence
+		return err
 	}
 	if err := restoreReservationPosition(ctx, tx, record); err != nil {
 		return err
@@ -676,6 +680,18 @@ func (s *Store) Release(ctx context.Context, reservationID, reason string) error
 }
 
 func releaseReservationTx(ctx context.Context, tx pgx.Tx, reservationID, reason string) error {
+	record, err := deleteActiveReservation(ctx, tx, reservationID)
+	if err != nil {
+		return err
+	}
+	return restoreReservationPosition(ctx, tx, record)
+}
+
+// deleteActiveReservation atomically removes the still-active reservation row
+// and returns it, so a subsequent position restore uses the exact persisted
+// values. It is shared by the public Release and the in-transaction release
+// used when an order reaches a terminal state.
+func deleteActiveReservation(ctx context.Context, tx pgx.Tx, reservationID string) (store.ReservationRecord, error) {
 	var record store.ReservationRecord
 	var childSequence *int
 	err := tx.QueryRow(ctx, `
@@ -687,15 +703,15 @@ func releaseReservationTx(ctx context.Context, tx pgx.Tx, reservationID, reason 
 		&record.TokenID, &record.Outcome, &record.Side, &record.Shares, &record.Notional, &record.State,
 		&record.Reason, &record.CreatedAt, &record.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return store.ErrNotFound
+		return store.ReservationRecord{}, store.ErrNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("release reservation: %w", err)
+		return store.ReservationRecord{}, fmt.Errorf("release reservation: %w", err)
 	}
 	if childSequence != nil {
 		record.ChildSequence = *childSequence
 	}
-	return restoreReservationPosition(ctx, tx, record)
+	return record, nil
 }
 
 func restoreReservationPosition(ctx context.Context, tx pgx.Tx, record store.ReservationRecord) error {
@@ -788,9 +804,7 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 		return store.OrderIntentRecord{}, fmt.Errorf("scan intent: %w", err)
 	}
 	if len(policy) > 0 {
-		if err := json.Unmarshal(policy, &record.Policy); err != nil {
-			return store.OrderIntentRecord{}, fmt.Errorf("unmarshal execution policy: %w", err)
-		}
+		record.Policy = policy
 	}
 	return record, nil
 }

@@ -140,7 +140,11 @@ func (c *Client) MarketBuyOrder(ctx context.Context, tokenID string, maxNotional
 		return UserOrder{}, fmt.Errorf("insufficient ask liquidity: need %.4f USDC, available %.4f", maxNotional, available)
 	}
 	price = math.Ceil(price/tickSize) * tickSize
-	shares := math.Floor((maxNotional/price)*10_000) / 10_000
+	// marketBuyShareScale floors the derived share count to four decimal places
+	// so the resulting order stays within the exchange's minimum size and
+	// rounding conventions.
+	const marketBuyShareScale = 10_000
+	shares := math.Floor((maxNotional/price)*marketBuyShareScale) / marketBuyShareScale
 	if price <= 0 || price >= 1 || shares <= 0 {
 		return UserOrder{}, fmt.Errorf("derived invalid buy order price %.8f shares %.8f", price, shares)
 	}

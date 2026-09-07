@@ -116,21 +116,13 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 		return fmt.Errorf("load account trades for reconciliation: %w", err)
 	}
 	for _, trade := range trades {
-		for _, fill := range accountfeed.OwnedFillsFromTrade(accountTrade(trade), r.apiKey, r.now().UTC()) {
+		for _, fill := range accountfeed.OwnedFillsFromTrade(trade, r.apiKey, r.now().UTC()) {
 			if _, err := r.fills.Consume(ctx, fill); err != nil {
 				return fmt.Errorf("replay account trade %s: %w", trade.ID, err)
 			}
 		}
 	}
 	return nil
-}
-
-func accountTrade(trade clobclient.Trade) accountfeed.AccountTrade {
-	makerOrders := make([]accountfeed.AccountMakerFill, 0, len(trade.MakerOrders))
-	for _, maker := range trade.MakerOrders {
-		makerOrders = append(makerOrders, accountfeed.AccountMakerFill{OrderID: maker.OrderID, Owner: maker.Owner, MatchedAmount: maker.MatchedAmount, Price: maker.Price, AssetID: maker.AssetID, Outcome: maker.Outcome, Side: protocol.Side(maker.Side)})
-	}
-	return accountfeed.AccountTrade{ID: trade.ID, TakerOrderID: trade.TakerOrderID, Market: trade.Market, AssetID: trade.AssetID, Side: protocol.Side(trade.Side), Size: trade.Size, Price: trade.Price, Outcome: trade.Outcome, Status: trade.Status, FeeRateBps: trade.FeeRateBps, TraderSide: trade.TraderSide, Owner: trade.Owner, TradeOwner: trade.TradeOwner, Timestamp: trade.Timestamp, MakerOrders: makerOrders}
 }
 
 func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord) error {
@@ -150,7 +142,7 @@ func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrder
 			if r.missingOrderExpired(order) {
 				return r.apply(ctx, order, statemachine.EventFailedObserved, order.MatchedShares, "REST order lookup still returned 404 after reconciliation grace period")
 			}
-			if order.State == statemachine.StateSubmitUnknown {
+			if order.State == statemachine.StateSubmitUnknown || order.State == statemachine.StateSubmitting {
 				return r.apply(ctx, order, statemachine.EventReconcileInconclusive, order.MatchedShares, "REST order lookup returned 404 during unresolved submission")
 			}
 			return nil
@@ -169,7 +161,7 @@ func isMissingOrder(err error) bool {
 }
 
 func isUnresolvedSubmission(state statemachine.State) bool {
-	return state == statemachine.StateSubmitUnknown || state == statemachine.StateUnknownReconcile
+	return state == statemachine.StateSubmitUnknown || state == statemachine.StateUnknownReconcile || state == statemachine.StateSubmitting
 }
 
 func (r *Reconciler) missingOrderExpired(order store.SignedOrderRecord) bool {

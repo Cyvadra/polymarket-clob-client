@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -80,7 +81,7 @@ func (p *PublisherModule) Publish(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("build position feature subject: %w", err)
 		}
-		feature := store.BuildPositionFeature(position, p.nextSequence(), publishedAt)
+		feature := mapping.PositionFeature(position, p.nextSequence(), publishedAt)
 		if err := p.publisher.PublishJSON(subject, feature); err != nil {
 			return fmt.Errorf("publish position feature %s: %w", subject, err)
 		}

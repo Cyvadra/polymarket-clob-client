@@ -146,7 +146,7 @@ func (s *UserStream) consume(ctx context.Context, payload []byte) error {
 		}
 		return s.orders.Consume(ctx, AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: event.ID + ":" + event.Status + ":" + event.SizeMatched, ExchangeOrderID: event.ID, ConditionID: event.Market, TokenID: event.AssetID, Status: event.Status, MatchedShares: event.SizeMatched, ReceivedAt: time.Now().UTC(), ExchangeTime: streamTime(event.Timestamp)})
 	case "trade":
-		var event AccountTrade
+		var event clobclient.Trade
 		if err := json.Unmarshal(payload, &event); err != nil {
 			return err
 		}

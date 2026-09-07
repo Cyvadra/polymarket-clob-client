@@ -8,6 +8,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
@@ -90,7 +91,7 @@ func (e *Executor) resumeSigned(ctx context.Context) error {
 			continue
 		}
 		if err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-			return e.submitSignedOrder(ctx, executionIntent(intent), order)
+			return e.submitSignedOrder(ctx, mapping.ExecutionIntent(intent), order)
 		}); err != nil {
 			resumeErr = errors.Join(resumeErr, fmt.Errorf("resume signed order %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
@@ -177,12 +178,14 @@ func deadlinePassed(intent store.OrderIntentRecord, now time.Time) bool {
 	if !intent.ExpiresAt.IsZero() && !intent.ExpiresAt.After(now) {
 		return true
 	}
-	return intent.Policy.CompleteWithinMillis > 0 && !intent.CreatedAt.IsZero() && !intent.CreatedAt.Add(time.Duration(intent.Policy.CompleteWithinMillis)*time.Millisecond).After(now)
+	policy := mapping.ExecutionIntent(intent).Policy
+	return policy.CompleteWithinMillis > 0 && !intent.CreatedAt.IsZero() && !intent.CreatedAt.Add(time.Duration(policy.CompleteWithinMillis)*time.Millisecond).After(now)
 }
 
 func cancelTimeout(intent store.OrderIntentRecord) time.Duration {
-	if intent.Policy.CancelTimeoutMillis > 0 {
-		return time.Duration(intent.Policy.CancelTimeoutMillis) * time.Millisecond
+	policy := mapping.ExecutionIntent(intent).Policy
+	if policy.CancelTimeoutMillis > 0 {
+		return time.Duration(policy.CancelTimeoutMillis) * time.Millisecond
 	}
 	return 5 * time.Second
 }

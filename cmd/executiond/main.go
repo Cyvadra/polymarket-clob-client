@@ -118,6 +118,7 @@ func run() error {
 	}
 	positions.SetErrorHandler(func(err error) { log.Printf("position feature publish error: %v", err) })
 	accountStream.SetErrorHandler(func(err error) { log.Printf("account stream error: %v", err) })
+	fills.SetErrorHandler(func(err error) { log.Printf("account fill error: %v", err) })
 	execution.SetErrorHandler(func(err error) { log.Printf("execution lifecycle error: %v", err) })
 	repair.SetErrorHandler(func(err error) { log.Printf("reconciliation error: %v", err) })
 	execution.SetEventPublisher(bus)

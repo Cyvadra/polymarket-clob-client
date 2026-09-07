@@ -12,6 +12,7 @@ import (
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -191,7 +192,7 @@ func (e *Executor) forceClosePosition(ctx context.Context, intent store.OrderInt
 	if err := e.store.PersistSignedOrder(ctx, store.SignedOrderRecord{
 		IntentID: intent.IntentID, ChildSequence: forceCloseChildSequence, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
 		Salt: strconv.FormatInt(signed.Salt, 10), ExchangeOrderID: signed.OrderID, RequestedShares: position.AvailableSize, Price: forceClosePrice,
-		OrderType: userOrder.OrderType, PostOnly: false, State: statemachine.StateSigned, Revision: 1,
+		OrderType: store.TimeInForce(userOrder.OrderType), PostOnly: false, State: statemachine.StateSigned, Revision: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		return "", "", fmt.Errorf("persist force close order: %w", err)
@@ -201,7 +202,7 @@ func (e *Executor) forceClosePosition(ctx context.Context, intent store.OrderInt
 	// Submit without an intent acknowledgement: this is an internal child, not a
 	// new strategy intent. A rejected or unknown submission is terminal here and
 	// is reported as a failure on execution.cancel.ack; no retry is scheduled.
-	if err := e.submitOrder(ctx, executionIntent(intent), signed, forceCloseChildSequence, 1, userOrder.OrderType, false, false); err != nil {
+	if err := e.submitOrder(ctx, mapping.ExecutionIntent(intent), signed, forceCloseChildSequence, 1, userOrder.OrderType, false, false); err != nil {
 		return "", "", err
 	}
 	return protocol.CancelCompleted, "open orders canceled and position force close submitted at 0.01 FAK", nil
@@ -240,13 +241,13 @@ func forceCloseReservation(intent store.OrderIntentRecord, shares, reservationID
 	return store.ReservationRecord{
 		ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: forceCloseChildSequence,
 		MarketID: intent.MarketID, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
-		Side: protocol.SideSell, Shares: shares, Notional: notional, State: "active",
+		Side: store.SideSell, Shares: shares, Notional: notional, State: "active",
 		Reason: "cancel command force close", CreatedAt: now, UpdatedAt: now,
 	}
 }
 
 func forceCloseUserOrder(intent store.OrderIntentRecord, shares string) (clobclient.UserOrder, error) {
-	sharesValue, err := strconv.ParseFloat(strings.TrimSpace(shares), 64)
+	sharesValue, err := decimal.Float(shares)
 	if err != nil || sharesValue <= 0 {
 		return clobclient.UserOrder{}, fmt.Errorf("invalid available shares %q for force close", shares)
 	}

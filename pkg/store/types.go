@@ -3,11 +3,10 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
-	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 )
 
@@ -19,26 +18,54 @@ var (
 	ErrActiveSellReservation = errors.New("active sell reservation already exists")
 )
 
+// Side is the store-local order side. It is deliberately independent of the
+// NATS wire types so the persistence layer does not change when the wire
+// protocol evolves.
+type Side string
+
+const (
+	SideBuy  Side = "BUY"
+	SideSell Side = "SELL"
+)
+
+// TimeInForce is the store-local order time-in-force.
+type TimeInForce string
+
+const (
+	TimeInForceGTC TimeInForce = "GTC"
+	TimeInForceFOK TimeInForce = "FOK"
+	TimeInForceFAK TimeInForce = "FAK"
+	TimeInForceGTD TimeInForce = "GTD"
+)
+
+// IntentKind is the store-local execution intent kind.
+type IntentKind string
+
+const (
+	IntentOpen  IntentKind = "OPEN"
+	IntentClose IntentKind = "CLOSE"
+)
+
 type OrderIntentRecord struct {
 	IntentID           string
 	IdempotencyKey     string
 	Strategy           string
-	Kind               protocol.IntentKind
+	Kind               IntentKind
 	MarketID           string
 	EventSlug          string
 	ConditionID        string
 	TokenID            string
 	Outcome            string
-	Side               protocol.Side
+	Side               Side
 	TargetShares       string
 	LimitPrice         string
-	TimeInForce        protocol.TimeInForce
+	TimeInForce        TimeInForce
 	PostOnly           bool
 	FeatureSeq         int64
 	FeatureCompletedAt time.Time
 	ExpiresAt          time.Time
 	Status             statemachine.State
-	Policy             protocol.ExecutionPolicy
+	Policy             json.RawMessage
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -53,7 +80,7 @@ type SignedOrderRecord struct {
 	RequestedShares string
 	MatchedShares   string
 	Price           string
-	OrderType       protocol.TimeInForce
+	OrderType       TimeInForce
 	PostOnly        bool
 	State           statemachine.State
 	Revision        int64
@@ -84,7 +111,7 @@ type FillRecord struct {
 	ConditionID     string
 	TokenID         string
 	Outcome         string
-	Side            protocol.Side
+	Side            Side
 	Shares          string
 	Price           string
 	Fee             string
@@ -118,7 +145,7 @@ type ReservationRecord struct {
 	ConditionID   string
 	TokenID       string
 	Outcome       string
-	Side          protocol.Side
+	Side          Side
 	Shares        string
 	Notional      string
 	State         string
@@ -180,32 +207,4 @@ type Store interface {
 	ExecutionStore
 	FillStore
 	PositionStore
-}
-
-func TerminalAckForOrder(order SignedOrderRecord, reason string, occurredAt time.Time) (protocol.ExecutionIntentAck, bool) {
-	ack := protocol.ExecutionIntentAck{IntentID: order.IntentID, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt}
-	switch order.State {
-	case statemachine.StateFilled:
-		ack.Status = protocol.IntentCompleted
-	case statemachine.StateCanceled:
-		ack.Status = protocol.IntentExpired
-		if hasMatchedShares(order.MatchedShares) {
-			ack.Status = protocol.IntentPartial
-		}
-	case statemachine.StateRejected:
-		ack.Status = protocol.IntentRejected
-		ack.ReasonCode = "ORDER_REJECTED"
-	case statemachine.StateExpired:
-		ack.Status = protocol.IntentExpired
-	case statemachine.StateFailed:
-		ack.Status = protocol.IntentFailed
-		ack.ReasonCode = "EXECUTION_FAILED"
-	default:
-		return protocol.ExecutionIntentAck{}, false
-	}
-	return ack, true
-}
-
-func hasMatchedShares(value string) bool {
-	return decimal.Positive(value)
 }

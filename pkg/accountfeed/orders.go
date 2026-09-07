@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -69,7 +70,7 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 }
 
 func PublishTerminalAck(publisher protocol.ExecutionEventPublisher, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
-	ack, ok := store.TerminalAckForOrder(order, reason, occurredAt)
+	ack, ok := mapping.TerminalAck(order, reason, occurredAt)
 	if !ok {
 		return nil
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor/tactics"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
@@ -42,7 +43,7 @@ func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent)
 		return err
 	}
 	err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-		inserted, err := e.store.InsertIntent(ctx, intentRecord(intent, e.now().UTC()))
+		inserted, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC()))
 		if err != nil {
 			if errors.Is(err, store.ErrIdempotencyConflict) {
 				return executionRejection{code: "DUPLICATE_INTENT", reason: "idempotency key already belongs to another intent", cause: err}
@@ -54,10 +55,10 @@ func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent)
 			if err != nil {
 				return fmt.Errorf("load duplicate intent: %w", err)
 			}
-			if !sameIntent(intent, existing) {
+			if !mapping.SameIntent(intent, existing) {
 				return executionRejection{code: "DUPLICATE_INTENT", reason: "intent ID already belongs to a different intent", cause: store.ErrIdempotencyConflict}
 			}
-			return e.resumeIntent(ctx, executionIntent(existing))
+			return e.resumeIntent(ctx, mapping.ExecutionIntent(existing))
 		}
 		return e.prepareAndSubmit(ctx, intent)
 	})
@@ -127,7 +128,7 @@ func (e *Executor) submitSignedOrder(ctx context.Context, intent protocol.Execut
 	if err := json.Unmarshal(order.SignedPayload, &signed); err != nil {
 		return fmt.Errorf("decode persisted signed order: %w", err)
 	}
-	return e.submitOrder(ctx, intent, signed, order.ChildSequence, order.Revision, order.OrderType, order.PostOnly, order.ChildSequence == 1)
+	return e.submitOrder(ctx, intent, signed, order.ChildSequence, order.Revision, protocol.TimeInForce(order.OrderType), order.PostOnly, order.ChildSequence == 1)
 }
 
 func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
@@ -177,7 +178,7 @@ func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.Executi
 	if err := e.store.PersistSignedOrder(ctx, store.SignedOrderRecord{
 		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
 		Salt: strconv.FormatInt(signed.Salt, 10), ExchangeOrderID: signed.OrderID, RequestedShares: child.Shares, Price: child.Price,
-		OrderType: child.TimeInForce, PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
+		OrderType: store.TimeInForce(child.TimeInForce), PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
 		CreatedAt: e.now().UTC(), UpdatedAt: e.now().UTC(),
 	}); err != nil {
 		return fmt.Errorf("persist signed order: %w", err)
@@ -293,7 +294,7 @@ func publicReason(err error) string {
 }
 
 func (e *Executor) publishAckForOrder(order store.SignedOrderRecord, reason string) {
-	ack, ok := store.TerminalAckForOrder(order, reason, e.now())
+	ack, ok := mapping.TerminalAck(order, reason, e.now())
 	if !ok {
 		e.publishAck(order.IntentID, protocol.IntentAccepted, "", reason, order.MatchedShares, "")
 		return

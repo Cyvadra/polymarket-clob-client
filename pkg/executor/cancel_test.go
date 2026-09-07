@@ -93,7 +93,7 @@ func TestCancelForceClosesOpenedPosition(t *testing.T) {
 	if client.cancels != 1 {
 		t.Fatalf("expected open entry order to be canceled, got %d", client.cancels)
 	}
-	if len(storer.reservations) != 1 || storer.reservations[0].ReservationID != "intent-1:2" || storer.reservations[0].Side != protocol.SideSell {
+	if len(storer.reservations) != 1 || storer.reservations[0].ReservationID != "intent-1:2" || storer.reservations[0].Side != store.SideSell {
 		t.Fatalf("expected one force close sell reservation, got %+v", storer.reservations)
 	}
 	if client.created.Side != protocol.SideSell || client.created.OrderType != protocol.TimeInForceFAK || client.created.PostOnly || client.created.Shares != 2 || client.created.Price != 0.01 {

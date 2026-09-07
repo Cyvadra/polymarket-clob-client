@@ -4,10 +4,16 @@ import (
 	"strings"
 	"time"
 
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 )
 
-func OwnedFillsFromTrade(trade AccountTrade, apiKey string, receivedAt time.Time) []AccountFill {
+// OwnedFillsFromTrade normalizes a single account trade (from the user stream
+// or the REST reconciliation replay) into the fills that belong to this
+// executiond instance. Taker fills are attributed when the trade's trader_side
+// is TAKER; maker fills are attributed per maker order whose owner matches the
+// API key.
+func OwnedFillsFromTrade(trade clobclient.Trade, apiKey string, receivedAt time.Time) []AccountFill {
 	status := strings.TrimPrefix(strings.ToUpper(trade.Status), "TRADE_STATUS_")
 	if (status != "MATCHED" && status != "MINED" && status != "CONFIRMED" && status != "FAILED") || trade.Outcome == "" {
 		return nil

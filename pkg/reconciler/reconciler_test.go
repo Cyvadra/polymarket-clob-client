@@ -8,7 +8,6 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
-	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -199,7 +198,30 @@ func TestReconcileReplaysOwnedTradesBeforeOrders(t *testing.T) {
 	if err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "order-1" || repository.fills[0].IntentID != "intent-1" || repository.fills[0].Side != protocol.SideSell {
+	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "order-1" || repository.fills[0].IntentID != "intent-1" || repository.fills[0].Side != store.SideSell {
 		t.Fatalf("expected owned maker fill replay, got %+v", repository.fills)
+	}
+}
+
+func TestReconcileMarksSubmittingMissingOrderInconclusive(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateSubmitting, Revision: 2, UpdatedAt: time.Unix(100, 0).UTC()}}}
+	reconciler, _ := New(repository, &fakeCLOB{err: &clobclient.APIError{StatusCode: http.StatusNotFound}}, nil, "", func() time.Time { return time.Unix(101, 0).UTC() }, time.Second)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StateUnknownReconcile || repository.updates[0].event != statemachine.EventReconcileInconclusive {
+		t.Fatalf("expected submitting order to become inconclusive, got %#v", repository.updates)
+	}
+}
+
+func TestReconcileFailsSubmittingMissingOrderAfterGrace(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateSubmitting, Revision: 2, UpdatedAt: time.Unix(100, 0).UTC()}}}
+	reconciler, _ := New(repository, &fakeCLOB{err: &clobclient.APIError{StatusCode: http.StatusNotFound}}, nil, "", func() time.Time { return time.Unix(200, 0).UTC() }, time.Second)
+	reconciler.SetMissingOrderGrace(time.Minute)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StateFailed || repository.updates[0].event != statemachine.EventFailedObserved {
+		t.Fatalf("expected submitting order to fail after grace, got %#v", repository.updates)
 	}
 }
