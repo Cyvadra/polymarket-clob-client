@@ -44,7 +44,7 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	if err != nil {
 		return fmt.Errorf("lookup observed order: %w", err)
 	}
-	event, ok := statemachine.EventForOrderObservation(observation.Status, observation.MatchedShares, order.RequestedShares)
+	event, ok := statemachine.EventForOrderObservation(observation.Status, observation.MatchedShares, order.RequestedShares, statemachine.Immediate(string(order.OrderType)))
 	if !ok {
 		return fmt.Errorf("unsupported account order status %q", observation.Status)
 	}

@@ -83,7 +83,7 @@ func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 func TestPublishTerminalAckCanceledWithoutFillIsExpired(t *testing.T) {
 	for _, matchedShares := range []string{"0", "0.000000000000000000"} {
 		publisher := &recordedPublisher{}
-		order := store.SignedOrderRecord{IntentID: "intent-1", State: statemachine.StateCanceled, MatchedShares: matchedShares}
+		order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: matchedShares}
 		if err := PublishTerminalAck(publisher, order, "canceled", time.Unix(1, 0)); err != nil {
 			t.Fatalf("publish ack: %v", err)
 		}
@@ -95,12 +95,62 @@ func TestPublishTerminalAckCanceledWithoutFillIsExpired(t *testing.T) {
 
 func TestPublishTerminalAckCanceledWithFillIsPartial(t *testing.T) {
 	publisher := &recordedPublisher{}
-	order := store.SignedOrderRecord{IntentID: "intent-1", State: statemachine.StateCanceled, MatchedShares: "1.25"}
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "1.25"}
 	if err := PublishTerminalAck(publisher, order, "canceled", time.Unix(1, 0)); err != nil {
 		t.Fatalf("publish ack: %v", err)
 	}
 	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentPartial {
 		t.Fatalf("expected partial ack, got %+v", publisher.acks)
+	}
+}
+
+// The strategy never asked for an internal child such as a force-close exit,
+// so its outcome must not be reported as the intent's outcome.
+func TestPublishTerminalAckSkipsInternalChildren(t *testing.T) {
+	publisher := &recordedPublisher{}
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}
+	if err := PublishTerminalAck(publisher, order, "filled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish ack: %v", err)
+	}
+	if len(publisher.acks) != 0 {
+		t.Fatalf("expected no intent ack for an internal child, got %+v", publisher.acks)
+	}
+}
+
+// A FAK cannot rest, so a partial match ends it. Leaving it partially filled
+// would hold its sell reservation open and block every later sell on the token.
+func TestOrderConsumerClosesPartiallyMatchedImmediateOrder(t *testing.T) {
+	repository := &fakeOrderStore{order: store.SignedOrderRecord{
+		IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1",
+		State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceFAK,
+	}}
+	consumer, err := NewOrderConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new order consumer: %v", err)
+	}
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "MATCHED", MatchedShares: "2"}); err != nil {
+		t.Fatalf("consume order event: %v", err)
+	}
+	if repository.updated != statemachine.StateCanceled {
+		t.Fatalf("expected the unmatched remainder to close the order, got %s", repository.updated)
+	}
+}
+
+// A resting order with the same observation is still working.
+func TestOrderConsumerKeepsPartiallyMatchedRestingOrderOpen(t *testing.T) {
+	repository := &fakeOrderStore{order: store.SignedOrderRecord{
+		IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1",
+		State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceGTC,
+	}}
+	consumer, err := NewOrderConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new order consumer: %v", err)
+	}
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "MATCHED", MatchedShares: "2"}); err != nil {
+		t.Fatalf("consume order event: %v", err)
+	}
+	if repository.updated != statemachine.StatePartiallyFilled {
+		t.Fatalf("expected a resting order to stay open, got %s", repository.updated)
 	}
 }
 

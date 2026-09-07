@@ -76,8 +76,13 @@ func SameDecimal(left, right string) bool {
 }
 
 // TerminalAck derives the strategy-facing terminal intent acknowledgement for
-// an order that reached a terminal state.
+// an order that reached a terminal state. Internal children (a force-close
+// exit, for example) were never acknowledged to the strategy and must not
+// produce one, or a canceled intent would report itself completed.
 func TerminalAck(order store.SignedOrderRecord, reason string, occurredAt time.Time) (protocol.ExecutionIntentAck, bool) {
+	if order.ChildSequence != store.StrategyChildSequence {
+		return protocol.ExecutionIntentAck{}, false
+	}
 	ack := protocol.ExecutionIntentAck{IntentID: order.IntentID, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt}
 	switch order.State {
 	case statemachine.StateFilled:
@@ -89,12 +94,12 @@ func TerminalAck(order store.SignedOrderRecord, reason string, occurredAt time.T
 		}
 	case statemachine.StateRejected:
 		ack.Status = protocol.IntentRejected
-		ack.ReasonCode = "ORDER_REJECTED"
+		ack.ReasonCode = protocol.ReasonOrderRejected
 	case statemachine.StateExpired:
 		ack.Status = protocol.IntentExpired
 	case statemachine.StateFailed:
 		ack.Status = protocol.IntentFailed
-		ack.ReasonCode = "EXECUTION_FAILED"
+		ack.ReasonCode = protocol.ReasonExecutionFailed
 	default:
 		return protocol.ExecutionIntentAck{}, false
 	}
@@ -131,6 +136,7 @@ func PositionFeature(position store.PositionRecord, sequence int64, publishedAt 
 		EntryTime:         entryTime,
 		SecondsSinceEntry: secondsSinceEntry,
 		PositionSize:      position.PositionSize,
+		ActualShares:      position.ActualShares,
 		AvailableSize:     position.AvailableSize,
 		ReservedSize:      position.ReservedSize,
 		State:             position.State,

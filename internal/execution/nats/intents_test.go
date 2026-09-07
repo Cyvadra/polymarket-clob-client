@@ -69,6 +69,8 @@ func (fakeCLOB) SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clo
 }
 func (fakeCLOB) CancelOrder(context.Context, string) error { return nil }
 
+func (fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
+
 type recordedPublisher struct {
 	subject string
 	ack     protocol.ExecutionIntentAck

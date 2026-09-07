@@ -118,7 +118,7 @@ func TestTerminalAckMapsStates(t *testing.T) {
 		{statemachine.StateLive, "", false},
 	}
 	for _, tc := range cases {
-		ack, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", State: tc.state, MatchedShares: "0"}, "reason", at)
+		ack, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: tc.state, MatchedShares: "0"}, "reason", at)
 		if ok != tc.hasMatch {
 			t.Fatalf("state %s ok=%v want %v", tc.state, ok, tc.hasMatch)
 		}
@@ -132,8 +132,15 @@ func TestTerminalAckMapsStates(t *testing.T) {
 }
 
 func TestTerminalAckPartialCancel(t *testing.T) {
-	ack, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", State: statemachine.StateCanceled, MatchedShares: "0.5"}, "reason", time.Unix(100, 0).UTC())
+	ack, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "0.5"}, "reason", time.Unix(100, 0).UTC())
 	if !ok || ack.Status != protocol.IntentPartial {
 		t.Fatalf("expected partial ack, got ok=%v ack=%+v", ok, ack)
+	}
+}
+
+// A force-close exit reaching a terminal state is not the intent's outcome.
+func TestTerminalAckIgnoresInternalChildren(t *testing.T) {
+	if _, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}, "reason", time.Unix(100, 0).UTC()); ok {
+		t.Fatal("expected no terminal ack for an internal child order")
 	}
 }

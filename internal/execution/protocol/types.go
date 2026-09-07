@@ -88,7 +88,7 @@ type ExecutionIntent struct {
 	TokenID            string          `json:"token_id"`
 	Outcome            string          `json:"outcome"`
 	Side               Side            `json:"side"`
-	TargetUSD          string          `json:"target_usd"`
+	TargetUSD          string          `json:"target_usd,omitempty"`
 	LimitPrice         string          `json:"limit_price"`
 	TimeInForce        TimeInForce     `json:"time_in_force"`
 	PostOnly           bool            `json:"post_only"`
@@ -98,6 +98,22 @@ type ExecutionIntent struct {
 	ExpiresAt          time.Time       `json:"expires_at"`
 	Policy             ExecutionPolicy `json:"policy,omitempty"`
 }
+
+// Reason codes carried by ExecutionIntentAck.ReasonCode. They are part of the
+// wire contract, so they are declared once here rather than derived from
+// error text.
+const (
+	ReasonInvalidIntent         = "INVALID_INTENT"
+	ReasonUnsupportedStyle      = "UNSUPPORTED_EXECUTION_STYLE"
+	ReasonUnimplementedPolicy   = "UNIMPLEMENTED_POLICY"
+	ReasonDuplicateIntent       = "DUPLICATE_INTENT"
+	ReasonNoPosition            = "NO_POSITION"
+	ReasonActiveSellReservation = "ACTIVE_SELL_RESERVATION"
+	ReasonExposureLimit         = "EXPOSURE_LIMIT"
+	ReasonUnplannable           = "UNPLANNABLE"
+	ReasonOrderRejected         = "ORDER_REJECTED"
+	ReasonExecutionFailed       = "EXECUTION_FAILED"
+)
 
 type IntentAckStatus string
 
@@ -201,6 +217,7 @@ type PositionQueryRequest struct {
 type PositionQueryResponse struct {
 	SchemaVersion string            `json:"schema_version"`
 	Positions     []PositionFeature `json:"positions"`
+	Error         string            `json:"error,omitempty"`
 }
 
 type PositionFeature struct {
@@ -215,6 +232,7 @@ type PositionFeature struct {
 	EntryTime         *time.Time `json:"entry_time"`
 	SecondsSinceEntry float64    `json:"seconds_since_entry"`
 	PositionSize      string     `json:"position_size,omitempty"`
+	ActualShares      string     `json:"actual_shares,omitempty"`
 	AvailableSize     string     `json:"available_size,omitempty"`
 	ReservedSize      string     `json:"reserved_size,omitempty"`
 	State             string     `json:"state,omitempty"`

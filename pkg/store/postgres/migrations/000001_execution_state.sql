@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS positions (
     market_id TEXT NOT NULL DEFAULT '',
     outcome TEXT NOT NULL,
     position_size NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (position_size >= 0),
+    actual_shares NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (actual_shares >= 0),
     available_size NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (available_size >= 0),
     reserved_size NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (reserved_size >= 0),
     entry_price NUMERIC(38, 18),

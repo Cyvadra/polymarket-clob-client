@@ -19,6 +19,7 @@ type CLOB interface {
 	CreateOrder(context.Context, clobclient.UserOrder) (clobclient.SignedOrderV2, error)
 	SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error)
 	CancelOrder(context.Context, string) error
+	TickSize(context.Context, string) (float64, error)
 }
 
 type QuoteProvider interface {

@@ -103,23 +103,36 @@ func (b *Bus) Run(ctx context.Context) error {
 	}
 }
 
-func (b *Bus) Close(context.Context) error {
+// Close stops delivery and drains the connection. Draining happens outside the
+// bus mutex because an in-flight handler may still be publishing, and that
+// publish needs the same mutex.
+func (b *Bus) Close(ctx context.Context) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, subscription := range b.subs {
+	subs := b.subs
+	conn := b.conn
+	b.subs, b.conn, b.ctx, b.done = nil, nil, nil, nil
+	b.mu.Unlock()
+
+	var closeErr error
+	for _, subscription := range subs {
 		if err := subscription.Unsubscribe(); err != nil {
-			return fmt.Errorf("unsubscribe NATS: %w", err)
+			closeErr = fmt.Errorf("unsubscribe NATS: %w", err)
 		}
 	}
-	b.subs = nil
-	if b.conn != nil {
-		b.conn.Drain()
-		b.conn.Close()
-		b.conn = nil
+	if conn == nil {
+		return closeErr
 	}
-	b.ctx = nil
-	b.done = nil
-	return nil
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_ = conn.Drain()
+	}()
+	select {
+	case <-drained:
+	case <-ctx.Done():
+	}
+	conn.Close()
+	return closeErr
 }
 
 func (b *Bus) PublishJSON(subject string, value any) error {
@@ -131,11 +144,12 @@ func (b *Bus) PublishJSON(subject string, value any) error {
 		return fmt.Errorf("marshal NATS payload: %w", err)
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.conn == nil {
+	conn := b.conn
+	b.mu.Unlock()
+	if conn == nil {
 		return fmt.Errorf("NATS bus is not initialized")
 	}
-	if err := b.conn.Publish(subject, payload); err != nil {
+	if err := conn.Publish(subject, payload); err != nil {
 		return fmt.Errorf("publish NATS payload: %w", err)
 	}
 	return nil

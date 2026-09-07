@@ -64,8 +64,11 @@ func Apply(current State, event Event) (Transition, bool, error) {
 }
 
 // EventForOrderObservation uses matched size to preserve partial fills when
-// the exchange reports a generic LIVE or MATCHED status.
-func EventForOrderObservation(status, matchedShares, requestedShares string) (Event, bool) {
+// the exchange reports a generic LIVE or MATCHED status. immediate marks an
+// order that cannot rest on the book (FOK or FAK): its unmatched remainder is
+// gone the moment the exchange reports a match, so a partial match is terminal
+// rather than an order still working.
+func EventForOrderObservation(status, matchedShares, requestedShares string, immediate bool) (Event, bool) {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
 	case "LIVE", "OPEN", "DELAYED":
 		if positiveMatched(matchedShares) {
@@ -73,12 +76,18 @@ func EventForOrderObservation(status, matchedShares, requestedShares string) (Ev
 		}
 		return EventOrderLiveObserved, true
 	case "PARTIALLY_FILLED", "PARTIAL":
+		if immediate {
+			return EventCancelObserved, true
+		}
 		return EventPartialFillObserved, true
 	case "FILLED", "MATCHED":
-		if !fullyMatched(matchedShares, requestedShares) {
-			return EventPartialFillObserved, true
+		if fullyMatched(matchedShares, requestedShares) {
+			return EventFillObserved, true
 		}
-		return EventFillObserved, true
+		if immediate {
+			return EventCancelObserved, true
+		}
+		return EventPartialFillObserved, true
 	case "CANCELED", "CANCELLED", "UNMATCHED":
 		return EventCancelObserved, true
 	case "REJECTED":
@@ -92,9 +101,18 @@ func EventForOrderObservation(status, matchedShares, requestedShares string) (Ev
 	}
 }
 
+// Immediate reports whether a time-in-force cannot rest on the book.
+func Immediate(timeInForce string) bool {
+	switch strings.ToUpper(strings.TrimSpace(timeInForce)) {
+	case "FOK", "FAK":
+		return true
+	default:
+		return false
+	}
+}
+
 func positiveMatched(value string) bool {
-	value = strings.TrimSpace(value)
-	return value != "" && value != "0" && value != "0.0" && value != "0.00"
+	return decimal.Positive(value)
 }
 
 func fullyMatched(matched, requested string) bool {

@@ -125,6 +125,16 @@ func (c *Client) signOrder(order UserOrder, tickSize float64, negRisk bool) (Sig
 	return SignedOrderV2{OrderID: digest.Hex(), Salt: salt, Maker: maker.Hex(), Signer: signer.Hex(), TokenID: order.TokenID, MakerAmount: makerAmt.String(), TakerAmount: takerAmt.String(), Expiration: expiration, Side: string(order.Side), SignatureType: int(c.cfg.SignatureType), Timestamp: strconv.FormatInt(timestamp, 10), Metadata: metadata, Builder: builder, Signature: signature}, nil
 }
 
+// SharePrecisionDigits reports the decimal places the exchange keeps for the
+// share amount of an order. Callers that size orders themselves must floor to
+// this precision, because signing silently truncates beyond it.
+func SharePrecisionDigits(side Side, kind OrderType) int {
+	if side == SideBuy && (kind == OrderTypeFOK || kind == OrderTypeFAK) {
+		return 4
+	}
+	return 2
+}
+
 func orderAmounts(side Side, price, shares float64, kind OrderType) (*big.Int, *big.Int) {
 	priceRat := decimalRat(price)
 	sharesRat := decimalRat(shares)

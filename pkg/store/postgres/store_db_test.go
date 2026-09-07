@@ -177,3 +177,29 @@ func TestReserveReleaseRestoresAvailableShares(t *testing.T) {
 		t.Fatalf("expected reserved 0 after release, got %+v", positions[0])
 	}
 }
+
+func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	s.maxOpenBuyNotionalUSD = "10"
+	t.Cleanup(func() { s.maxOpenBuyNotionalUSD = "" })
+
+	seedIntent(t, s, "intent-exposure")
+	within := store.ReservationRecord{
+		ReservationID: "intent-exposure:1", IntentID: "intent-exposure", ChildSequence: 1, MarketID: "market",
+		ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
+		Shares: "10", Notional: "8", State: "active",
+	}
+	if err := s.Reserve(ctx, within); err != nil {
+		t.Fatalf("reserve within limit: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Release(context.Background(), within.ReservationID, "cleanup") })
+
+	beyond := within
+	beyond.ReservationID = "intent-exposure:2"
+	beyond.ChildSequence = 2
+	beyond.Notional = "5"
+	if err := s.Reserve(ctx, beyond); err != store.ErrExposureLimit {
+		t.Fatalf("expected ErrExposureLimit, got %v", err)
+	}
+}

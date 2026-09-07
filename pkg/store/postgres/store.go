@@ -21,10 +21,15 @@ type Config struct {
 	MinConns          int32
 	ConnectTimeout    time.Duration
 	HealthCheckPeriod time.Duration
+	// MaxOpenBuyNotionalUSD caps the total notional of active BUY reservations.
+	// Empty disables the cap. It is checked inside the reservation transaction
+	// so concurrent intents cannot race past it.
+	MaxOpenBuyNotionalUSD string
 }
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool                  *pgxpool.Pool
+	maxOpenBuyNotionalUSD string
 }
 
 func New(ctx context.Context, cfg Config) (*Store, error) {
@@ -56,7 +61,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{pool: pool, maxOpenBuyNotionalUSD: cfg.MaxOpenBuyNotionalUSD}, nil
 }
 
 func (s *Store) Close() {
@@ -90,22 +95,28 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
+// WithIntentLock serializes work for one intent ID. The lock is transaction
+// scoped so it is always released with the transaction, even if the connection
+// is returned to the pool after an error.
 func (s *Store) WithIntentLock(ctx context.Context, intentID string, fn func(context.Context) error) error {
 	if intentID == "" || fn == nil {
 		return fmt.Errorf("intent ID and lock function are required")
 	}
-	conn, err := s.pool.Acquire(ctx)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("acquire intent lock connection: %w", err)
+		return fmt.Errorf("begin intent lock: %w", err)
 	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1, 0))`, intentID); err != nil {
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, intentID); err != nil {
 		return fmt.Errorf("acquire intent lock: %w", err)
 	}
-	defer func() {
-		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, intentID)
-	}()
-	return fn(ctx)
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("release intent lock: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord) (bool, error) {
@@ -137,7 +148,7 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 			status, policy, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12,
+			$8, $9, $10, NULLIF($11, '')::numeric, $12,
 			$13, $14, $15, $16, $17,
 			$18, $19, $20, $21
 		)
@@ -509,10 +520,11 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, ma
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO positions (
-			condition_id, token_id, market_id, outcome, position_size, available_size,
+			condition_id, token_id, market_id, outcome, position_size, actual_shares, available_size,
 			reserved_size, entry_price, entry_time, state, source_revision, updated_at
 		) VALUES (
 			$1, $2, $3, $4,
+			CASE WHEN $5 = 'BUY' THEN $6::numeric ELSE 0 END,
 			CASE WHEN $5 = 'BUY' THEN $6::numeric ELSE 0 END,
 			CASE WHEN $5 = 'BUY' THEN $6::numeric ELSE 0 END,
 			0,
@@ -527,6 +539,10 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, ma
 			position_size = CASE
 				WHEN $5 = 'BUY' THEN positions.position_size + $6::numeric
 				ELSE GREATEST(positions.position_size - $6::numeric, 0)
+			END,
+			actual_shares = CASE
+				WHEN $5 = 'BUY' THEN positions.actual_shares + $6::numeric
+				ELSE GREATEST(positions.actual_shares - $6::numeric, 0)
 			END,
 			available_size = CASE
 				WHEN $5 = 'BUY' THEN positions.available_size + $6::numeric
@@ -605,6 +621,8 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 		if commandTag.RowsAffected() != 1 {
 			return store.ErrConflict
 		}
+	} else if err := s.checkOpenBuyExposure(ctx, tx, record.Notional); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO reservations (
@@ -655,6 +673,25 @@ func (s *Store) Reservation(ctx context.Context, reservationID string) (store.Re
 		record.ChildSequence = *childSequence
 	}
 	return record, nil
+}
+
+// checkOpenBuyExposure rejects a BUY reservation that would push the total
+// active BUY notional past the configured cap.
+func (s *Store) checkOpenBuyExposure(ctx context.Context, tx pgx.Tx, notional string) error {
+	if s.maxOpenBuyNotionalUSD == "" {
+		return nil
+	}
+	var withinLimit bool
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(notional), 0) + $1::numeric <= $2::numeric
+		FROM reservations WHERE state = 'active' AND side = 'BUY'
+	`, notional, s.maxOpenBuyNotionalUSD).Scan(&withinLimit); err != nil {
+		return fmt.Errorf("check open buy exposure: %w", err)
+	}
+	if !withinLimit {
+		return store.ErrExposureLimit
+	}
+	return nil
 }
 
 func (s *Store) Release(ctx context.Context, reservationID, reason string) error {
@@ -791,9 +828,10 @@ type rowScanner interface {
 func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	var record store.OrderIntentRecord
 	var policy []byte
+	var targetUSD *string
 	err := row.Scan(
 		&record.IntentID, &record.IdempotencyKey, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
-		&record.TokenID, &record.Outcome, &record.Side, &record.TargetUSD, &record.LimitPrice,
+		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &record.FeatureCompletedAt, &record.ExpiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,
 	)
@@ -802,6 +840,9 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	}
 	if err != nil {
 		return store.OrderIntentRecord{}, fmt.Errorf("scan intent: %w", err)
+	}
+	if targetUSD != nil {
+		record.TargetUSD = *targetUSD
 	}
 	if len(policy) > 0 {
 		record.Policy = policy
@@ -815,7 +856,7 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 	var entryTime *time.Time
 	err := row.Scan(
 		&record.MarketID, &record.ConditionID, &record.TokenID, &record.Outcome,
-		&record.PositionSize, &record.AvailableSize, &record.ReservedSize,
+		&record.PositionSize, &record.ActualShares, &record.AvailableSize, &record.ReservedSize,
 		&entryPrice, &entryTime, &record.State, &record.SourceRevision, &record.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -836,7 +877,7 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 func positionSelectSQL() string {
 	return `
 		SELECT market_id, condition_id, token_id, outcome,
-			position_size::text, available_size::text, reserved_size::text,
+			position_size::text, actual_shares::text, available_size::text, reserved_size::text,
 			entry_price::text, entry_time, state, source_revision, updated_at
 		FROM positions
 	`

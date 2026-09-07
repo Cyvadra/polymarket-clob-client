@@ -93,17 +93,55 @@ func TestLiveObservationDuringCancelKeepsCancelState(t *testing.T) {
 }
 
 func TestOrderObservationTreatsMatchedLiveOrderAsPartial(t *testing.T) {
-	event, ok := EventForOrderObservation("LIVE", "2", "5")
+	event, ok := EventForOrderObservation("LIVE", "2", "5", false)
 	if !ok || event != EventPartialFillObserved {
 		t.Fatalf("expected partial fill event, got %q ok=%v", event, ok)
 	}
-	event, ok = EventForOrderObservation("UNMATCHED", "0", "5")
+	event, ok = EventForOrderObservation("UNMATCHED", "0", "5", false)
 	if !ok || event != EventCancelObserved {
 		t.Fatalf("expected cancel event, got %q ok=%v", event, ok)
 	}
-	event, ok = EventForOrderObservation("MATCHED", "2.0", "2")
+	event, ok = EventForOrderObservation("MATCHED", "2.0", "2", false)
 	if !ok || event != EventFillObserved {
 		t.Fatalf("expected filled event, got %q ok=%v", event, ok)
+	}
+}
+
+// A zero matched size may arrive with any number of decimal places.
+func TestOrderObservationComparesMatchedSizeNumerically(t *testing.T) {
+	event, ok := EventForOrderObservation("LIVE", "0.0000", "5", false)
+	if !ok || event != EventOrderLiveObserved {
+		t.Fatalf("expected a zero match to stay live, got %q ok=%v", event, ok)
+	}
+}
+
+// An immediate order cannot rest, so its unmatched remainder is gone. Leaving
+// it partially filled would keep the child open and its reservation locked.
+func TestImmediateOrderPartialMatchIsTerminal(t *testing.T) {
+	event, ok := EventForOrderObservation("MATCHED", "2", "5", true)
+	if !ok || event != EventCancelObserved {
+		t.Fatalf("expected an immediate partial match to be terminal, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderObservation("PARTIALLY_FILLED", "2", "5", true)
+	if !ok || event != EventCancelObserved {
+		t.Fatalf("expected an immediate partial fill to be terminal, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderObservation("MATCHED", "5", "5", true)
+	if !ok || event != EventFillObserved {
+		t.Fatalf("expected a fully matched immediate order to be filled, got %q ok=%v", event, ok)
+	}
+}
+
+func TestImmediateRecognizesNonRestingTimeInForce(t *testing.T) {
+	for _, timeInForce := range []string{"FOK", "FAK", "fak"} {
+		if !Immediate(timeInForce) {
+			t.Fatalf("expected %s to be immediate", timeInForce)
+		}
+	}
+	for _, timeInForce := range []string{"GTC", "GTD", ""} {
+		if Immediate(timeInForce) {
+			t.Fatalf("expected %s to rest on the book", timeInForce)
+		}
 	}
 }
 

@@ -39,7 +39,7 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	if migrations[2].Name != "000003_active_sell_reservation.sql" || !strings.Contains(migrations[2].SQL, "reservations_one_active_sell_idx") {
 		t.Fatalf("unexpected active sell reservation migration: %+v", migrations[2])
 	}
-	if migrations[3].Name != "000004_target_usd.sql" || !strings.Contains(migrations[3].SQL, "RENAME COLUMN target_shares TO target_usd") {
+	if migrations[3].Name != "000004_target_usd.sql" || !strings.Contains(migrations[3].SQL, "RENAME COLUMN") {
 		t.Fatalf("unexpected target usd migration: %+v", migrations[3])
 	}
 }

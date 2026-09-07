@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/nats"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
@@ -25,13 +27,14 @@ import (
 )
 
 type config struct {
-	NATSURL             string
-	PostgresURL         string
-	FeatureInterval     time.Duration
-	ReconcileInterval   time.Duration
-	MissingOrderGrace   time.Duration
-	ConnectTimeout      time.Duration
-	ShutdownGracePeriod time.Duration
+	NATSURL               string
+	PostgresURL           string
+	MaxOpenBuyNotionalUSD string
+	FeatureInterval       time.Duration
+	ReconcileInterval     time.Duration
+	MissingOrderGrace     time.Duration
+	ConnectTimeout        time.Duration
+	ShutdownGracePeriod   time.Duration
 }
 
 type module interface {
@@ -59,7 +62,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store, err := postgres.New(ctx, postgres.Config{URL: cfg.PostgresURL, ConnectTimeout: cfg.ConnectTimeout})
+	store, err := postgres.New(ctx, postgres.Config{URL: cfg.PostgresURL, ConnectTimeout: cfg.ConnectTimeout, MaxOpenBuyNotionalUSD: cfg.MaxOpenBuyNotionalUSD})
 	if err != nil {
 		return err
 	}
@@ -219,16 +222,20 @@ func closeModules(ctx context.Context, modules []namedModule) error {
 
 func configFromEnv() (config, error) {
 	cfg := config{
-		NATSURL:             os.Getenv("EXECUTION_NATS_URL"),
-		PostgresURL:         os.Getenv("EXECUTION_POSTGRES_URL"),
-		FeatureInterval:     durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
-		ReconcileInterval:   durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
-		MissingOrderGrace:   durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
-		ConnectTimeout:      durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
-		ShutdownGracePeriod: durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
+		NATSURL:               os.Getenv("EXECUTION_NATS_URL"),
+		PostgresURL:           os.Getenv("EXECUTION_POSTGRES_URL"),
+		MaxOpenBuyNotionalUSD: strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD")),
+		FeatureInterval:       durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
+		ReconcileInterval:     durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
+		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
+		ConnectTimeout:        durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
+		ShutdownGracePeriod:   durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
 	if cfg.NATSURL == "" || cfg.PostgresURL == "" {
 		return config{}, fmt.Errorf("EXECUTION_NATS_URL and EXECUTION_POSTGRES_URL are required")
+	}
+	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
+		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
 	}
 	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")

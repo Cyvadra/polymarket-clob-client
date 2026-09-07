@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -33,6 +34,7 @@ type Reconciler struct {
 	now               func() time.Time
 	interval          time.Duration
 	missingOrderGrace time.Duration
+	replayedFills     map[string]struct{}
 	onError           func(error)
 	publish           protocol.ExecutionEventPublisher
 }
@@ -47,7 +49,7 @@ func New(repository store.ReconcileStore, clob CLOB, fills *accountfeed.FillCons
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	return &Reconciler{store: repository, clob: clob, fills: fills, apiKey: apiKey, now: now, interval: interval, missingOrderGrace: defaultMissingOrderGrace}, nil
+	return &Reconciler{store: repository, clob: clob, fills: fills, apiKey: apiKey, now: now, interval: interval, missingOrderGrace: defaultMissingOrderGrace, replayedFills: map[string]struct{}{}}, nil
 }
 
 func (r *Reconciler) SetMissingOrderGrace(grace time.Duration) {
@@ -117,12 +119,32 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 	}
 	for _, trade := range trades {
 		for _, fill := range accountfeed.OwnedFillsFromTrade(trade, r.apiKey, r.now().UTC()) {
+			// Applying a fill is idempotent in the store, but the round trip is
+			// not free and the trade history only grows. Each fill therefore
+			// reaches the store once per process, with a full replay on start.
+			if _, seen := r.replayedFills[fill.FillID]; seen {
+				continue
+			}
 			if _, err := r.fills.Consume(ctx, fill); err != nil {
 				return fmt.Errorf("replay account trade %s: %w", trade.ID, err)
+			}
+			if isSettled(fill.TradeStatus) {
+				r.replayedFills[fill.FillID] = struct{}{}
 			}
 		}
 	}
 	return nil
+}
+
+// isSettled reports whether a fill can no longer change, so replaying it again
+// could not teach the store anything new.
+func isSettled(tradeStatus string) bool {
+	switch strings.ToUpper(strings.TrimSpace(tradeStatus)) {
+	case "CONFIRMED", "FAILED":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord) error {
@@ -173,7 +195,7 @@ func (r *Reconciler) missingOrderExpired(order store.SignedOrderRecord) bool {
 }
 
 func (r *Reconciler) applyRemoteOrder(ctx context.Context, order store.SignedOrderRecord, remote clobclient.Order, reason string) error {
-	event, ok := statemachine.EventForOrderObservation(remote.Status, remote.SizeMatched, remote.OriginalSize)
+	event, ok := statemachine.EventForOrderObservation(remote.Status, remote.SizeMatched, remote.OriginalSize, statemachine.Immediate(string(order.OrderType)))
 	if !ok {
 		return fmt.Errorf("order %s has unsupported status %q", remote.ID, remote.Status)
 	}

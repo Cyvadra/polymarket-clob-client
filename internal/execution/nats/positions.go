@@ -41,32 +41,44 @@ func SubscribePositionQuery(bus ReplyConnector, positions PositionStore, now fun
 		if reply == "" {
 			return fmt.Errorf("position query is missing a reply subject")
 		}
-		request, err := natsbus.DecodeJSON[protocol.PositionQueryRequest](payload)
+		response, err := positionQueryResponse(ctx, positions, payload, now().UTC())
 		if err != nil {
-			return err
+			// Always answer: a requester with no reply can only time out, and
+			// the failure would be visible in this daemon's log alone.
+			response = protocol.PositionQueryResponse{SchemaVersion: protocol.SchemaVersionV1, Positions: []protocol.PositionFeature{}, Error: err.Error()}
 		}
-		if request.SchemaVersion != protocol.SchemaVersionV1 {
-			return fmt.Errorf("position query requires schema_version %q", protocol.SchemaVersionV1)
+		if publishErr := bus.PublishJSON(reply, response); publishErr != nil {
+			return publishErr
 		}
-		records, err := positions.PositionFeatures(ctx)
-		if err != nil {
-			return fmt.Errorf("load position features for query: %w", err)
-		}
-		publishedAt := now().UTC()
-		response := protocol.PositionQueryResponse{SchemaVersion: protocol.SchemaVersionV1, Positions: make([]protocol.PositionFeature, 0)}
-		for _, record := range records {
-			if request.ConditionID != "" && record.ConditionID != request.ConditionID {
-				continue
-			}
-			if request.MarketID != "" && record.MarketID != request.MarketID {
-				continue
-			}
-			// Empty rows (no current holding) are not positions.
-			if !decimal.Positive(record.PositionSize) {
-				continue
-			}
-			response.Positions = append(response.Positions, mapping.PositionFeature(record, 0, publishedAt))
-		}
-		return bus.PublishJSON(reply, response)
+		return err
 	})
+}
+
+func positionQueryResponse(ctx context.Context, positions PositionStore, payload []byte, publishedAt time.Time) (protocol.PositionQueryResponse, error) {
+	request, err := natsbus.DecodeJSON[protocol.PositionQueryRequest](payload)
+	if err != nil {
+		return protocol.PositionQueryResponse{}, err
+	}
+	if request.SchemaVersion != protocol.SchemaVersionV1 {
+		return protocol.PositionQueryResponse{}, fmt.Errorf("position query requires schema_version %q", protocol.SchemaVersionV1)
+	}
+	records, err := positions.PositionFeatures(ctx)
+	if err != nil {
+		return protocol.PositionQueryResponse{}, fmt.Errorf("load position features for query: %w", err)
+	}
+	response := protocol.PositionQueryResponse{SchemaVersion: protocol.SchemaVersionV1, Positions: make([]protocol.PositionFeature, 0)}
+	for _, record := range records {
+		if request.ConditionID != "" && record.ConditionID != request.ConditionID {
+			continue
+		}
+		if request.MarketID != "" && record.MarketID != request.MarketID {
+			continue
+		}
+		// Empty rows (no current holding) are not positions.
+		if !decimal.Positive(record.PositionSize) {
+			continue
+		}
+		response.Positions = append(response.Positions, mapping.PositionFeature(record, 0, publishedAt))
+	}
+	return response, nil
 }

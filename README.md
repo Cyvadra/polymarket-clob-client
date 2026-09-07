@@ -43,7 +43,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | `execution.cancel.ack` | executiond -> strategy | `ExecutionCancelAck` | cancel 命令的唯一终态信号。 |
 | `strategy.execution.position.query` | strategy -> executiond（request/reply） | `PositionQueryRequest` | 查询当前仓位，回复发往请求的 reply subject。 |
 
-`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）、明确的下单模式以及到期时间或完成期限。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用意图限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force。当前运行时仍只创建一个 child；持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期尚未实现，对应策略字段会被拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。同一个条件 ID 与 token ID 同时只允许一个活跃卖出预留。
+`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、限价、有效期限（time-in-force）、明确的下单模式以及到期时间或完成期限。`target_usd` 是唯一的意图计量字段；普通意图的份额会根据当前计划价格推导，而 `CLOSE` 会从当前仓位记录读取 `actual_shares` 并按该值平仓。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用意图限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force，超过 `policy.quote_max_age_ms` 的快照会被忽略。所有价格在签名前都会按被动方向（买单向下、卖单向上）对齐到市场 tick；份额会按交易所实际编码的精度向下取整。当前运行时仍只创建一个 child；持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期尚未实现，对应策略字段会被拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。同一个条件 ID 与 token ID 同时只允许一个活跃卖出预留。设置 `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` 后，超过未平仓买入名义总额上限的买单会以 `EXPOSURE_LIMIT` 拒绝。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
@@ -73,6 +73,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | --- | --- | --- |
 | `EXECUTION_NATS_URL` | 是 | - |
 | `EXECUTION_POSTGRES_URL` | 是 | - |
+| `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | 否 | 不限制 |
 | `EXECUTION_POSITION_FEATURE_INTERVAL` | 否 | `500ms` |
 | `EXECUTION_RECONCILE_INTERVAL` | 否 | `30s` |
 | `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | 否 | `2m` |

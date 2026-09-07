@@ -133,6 +133,7 @@ func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, e
 type fakeCLOB struct {
 	submitErr         error
 	cancelErr         error
+	tickSize          float64
 	response          *clobclient.OrderResponse
 	createdOrderID    string
 	submits           int
@@ -140,6 +141,13 @@ type fakeCLOB struct {
 	created           clobclient.UserOrder
 	submittedType     clobclient.OrderType
 	submittedPostOnly bool
+}
+
+func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) {
+	if c.tickSize > 0 {
+		return c.tickSize, nil
+	}
+	return 0.01, nil
 }
 
 type failingPublisher struct{}
@@ -317,7 +325,7 @@ func TestExecuteAcceptsConcurrentSubmitObservation(t *testing.T) {
 }
 
 func TestExecutePublishesSanitizedReserveRejection(t *testing.T) {
-	storer := &fakeStore{inserted: true, reserveErr: store.ErrConflict}
+	storer := &fakeStore{inserted: true, reserveErr: store.ErrConflict, positions: []store.PositionRecord{{ConditionID: "condition", TokenID: "token", Outcome: "Up", PositionSize: "5", ActualShares: "5", AvailableSize: "5"}}}
 	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
 	publisher := &recordedAckPublisher{}
 	executor, err := New(storer, client, time.Now)
@@ -328,10 +336,11 @@ func TestExecutePublishesSanitizedReserveRejection(t *testing.T) {
 	intent := testIntent()
 	intent.Kind = protocol.IntentClose
 	intent.Side = protocol.SideSell
+	intent.Policy.MinPrice = "0.1"
 	if err := executor.Execute(context.Background(), intent); err == nil {
 		t.Fatal("expected reserve rejection")
 	}
-	if client.submits != 0 || len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentRejected || publisher.acks[0].ReasonCode != "NO_POSITION" || publisher.acks[0].Reason != "no available position for close intent" {
+	if client.submits != 0 || len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentRejected || publisher.acks[0].ReasonCode != protocol.ReasonNoPosition {
 		t.Fatalf("unexpected reserve rejection: submits=%d acks=%+v", client.submits, publisher.acks)
 	}
 }
@@ -529,19 +538,19 @@ func TestValidateIntentAcceptsMakerPostOnlyBuyWithinMaxPrice(t *testing.T) {
 	}
 }
 
+func TestValidateIntentRejectsMissingExecutionStyle(t *testing.T) {
+	intent := testIntent()
+	intent.Policy.Style = ""
+	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
+		t.Fatal("expected missing execution style rejection")
+	}
+}
+
 func TestValidateIntentRejectsUnimplementedLifecyclePolicy(t *testing.T) {
 	intent := testIntent()
 	intent.Policy.RepriceIntervalMillis = 250
 	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
 		t.Fatal("expected unimplemented lifecycle policy rejection")
-	}
-}
-
-func TestValidateIntentRequiresExplicitExecutionStyle(t *testing.T) {
-	intent := testIntent()
-	intent.Policy.Style = ""
-	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
-		t.Fatal("expected missing execution style rejection")
 	}
 }
 
@@ -573,7 +582,7 @@ func TestExecuteUsesPlannerForMakerPostOnlyOrder(t *testing.T) {
 	if client.created.Price != 0.43 || !client.created.PostOnly || client.submittedType != protocol.TimeInForceGTC || !client.submittedPostOnly {
 		t.Fatalf("expected planned maker order, created=%+v submittedType=%s submittedPostOnly=%v", client.created, client.submittedType, client.submittedPostOnly)
 	}
-	if storer.order.Price != "0.43" || !storer.order.PostOnly || storer.reservations[0].Shares != "2.3255" || storer.reservations[0].Notional != "0.999965000000000000" {
+	if storer.order.Price != "0.43" || !storer.order.PostOnly || storer.reservations[0].Shares != "2.32" || storer.reservations[0].Notional != "0.997600000000000000" {
 		t.Fatalf("expected planned order persistence, order=%+v reservations=%+v", storer.order, storer.reservations)
 	}
 }

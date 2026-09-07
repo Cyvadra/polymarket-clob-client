@@ -20,7 +20,11 @@ authenticated CLOB user-stream adapter, never as a strategy integration rule.
 - On startup and each reconciliation tick, `executiond` replays account trades
   from CLOB REST through the same idempotent fill path as the user stream.
   This repairs fills missed during WebSocket disconnects when CLOB REST exposes
-  the trade.
+  the trade. A settled fill reaches the store once per process.
+- An order that cannot rest on the book (`FOK` or `FAK`) is terminal as soon as
+  the exchange reports a match: whatever was not matched is gone, so a partial
+  match closes the child and releases its reservation rather than leaving it
+  open forever.
 
 ## Subjects
 
@@ -41,14 +45,19 @@ Subject tokens must not be empty or include the NATS wildcards `*` or `>`.
 
 Required fields are `schema_version`, `intent_id`, `idempotency_key`,
 `strategy`, `kind`, `condition_id`, `token_id`, `outcome`, `side`,
-`target_usd`, `limit_price`, and `time_in_force`. An intent also needs
-either a future `expires_at` or a positive `policy.complete_within_ms`.
+`limit_price`, and `time_in_force`. An intent also needs either a future
+`expires_at` or a positive `policy.complete_within_ms`.
+
+`target_usd` is the only intent sizing field. A `SELL` or `CLOSE` resolves its
+share quantity from the current position record; a `CLOSE` uses the position's
+`actual_shares` and sells the whole available position. This keeps the intent
+contract independent from the accounting representation of a holding.
 
 | Field | Values and rules |
 | --- | --- |
 | `kind` | `OPEN` or `CLOSE`; `CLOSE` must use `SELL`. |
 | `side` | `BUY` or `SELL`. |
-| `target_usd` | Positive decimal string. The program calculates shares from this amount and the order price. |
+| `target_usd` | Positive decimal string. Shares are derived from it and the planned price for all ordinary intents; `CLOSE` uses the current position's actual shares. |
 | `limit_price` | Decimal string strictly between `0` and `1`. |
 | `time_in_force` | `GTC`, `FOK`, `FAK`, or `GTD`. |
 | `post_only` | Boolean passed to the CLOB order. |
@@ -56,18 +65,42 @@ either a future `expires_at` or a positive `policy.complete_within_ms`.
 | `policy.complete_within_ms` | Optional positive execution deadline. |
 | `policy.cancel_timeout_ms` | Optional cancellation timeout. |
 | `policy.max_feature_age_ms` | Optional maximum age of `feature_completed_at`. |
+| `policy.mid_price` | Optional decimal string used as the tactic signal price; takes priority over `initial_price`. |
 | `policy.initial_price` | Optional decimal string used by tactic planning; defaults to `limit_price`. |
 | `policy.max_price` | Required for advanced `BUY` tactics; hard ceiling for automatic repricing. |
 | `policy.min_price` | Required for advanced `SELL` tactics; hard floor for automatic repricing. |
-| `policy.price_step` | Optional decimal string for tactic price increments. |
+| `policy.price_step` | Optional decimal string for tactic price increments; defaults to the market tick size. |
 | `policy.quote_offset` | Optional decimal string offset from best bid/ask for maker planning. |
 | `policy.reprice_interval_ms` | Not implemented; non-zero values are rejected. |
 | `policy.max_reprices` | Not implemented; non-zero values are rejected. |
-| `policy.quote_max_age_ms` | Optional maximum age for quote snapshots used by tactics. |
+| `policy.quote_max_age_ms` | Optional maximum age for quote snapshots. A snapshot older than this is ignored and planning falls back to the signal price. |
 | `policy.post_only_cross_retry` | Not implemented; true is rejected. |
 | `policy.soft_close_after_ms` | Not implemented; non-zero values are rejected. |
 | `policy.force_close_after_ms` | Not implemented; non-zero values are rejected. |
 | `policy.cancel_replace_timeout_ms` | Not implemented; non-zero values are rejected. |
+
+### Prices and sizes are adjusted to what the exchange accepts
+
+`executiond` aligns every planned price onto the market tick grid before
+signing, rounding toward the passive side (down for a `BUY`, up for a `SELL`).
+A `mid_price` or offset that lands between ticks is therefore honored rather
+than rejected. If tick alignment would push the price past `max_price` or
+`min_price`, the intent is rejected with `UNPLANNABLE`.
+
+Share counts are floored to the precision the exchange encodes: four decimal
+places for an immediate `BUY` (`FOK`/`FAK`), two decimal places otherwise. A
+size that floors to zero is rejected with `UNPLANNABLE`.
+
+### Reason codes
+
+`execution.intent.ack` carries `reason_code` from a fixed set:
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`,
+`DUPLICATE_INTENT`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`,
+`EXPOSURE_LIMIT`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
+Validation rejections carry the specific failure in `reason`.
+
+`EXPOSURE_LIMIT` is returned when a `BUY` would push total open BUY notional
+past `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD`. The cap is unset by default.
 
 `intent_id` is the durable idempotency identity. Reusing it resumes a signed
 order if necessary and does not create a second child order in the current
@@ -131,6 +164,26 @@ Lifecycle controls such as `reprice_interval_ms`, `max_reprices`,
 `post_only_cross_retry`, `soft_close_after_ms`, `force_close_after_ms`, and
 `cancel_replace_timeout_ms` are reserved for later cancel-replace execution and
 are currently rejected with `UNIMPLEMENTED_POLICY` when non-zero or true.
+
+Closing example. `CLOSE` uses the current position's actual shares:
+
+```json
+{
+  "schema_version": "execution.v1",
+  "intent_id": "late-gap:condition:up:44",
+  "idempotency_key": "late-gap:condition:up:44",
+  "strategy": "late-gap",
+  "kind": "CLOSE",
+  "condition_id": "0xcondition",
+  "token_id": "12345",
+  "outcome": "Up",
+  "side": "SELL",
+  "limit_price": "0.55",
+  "time_in_force": "GTC",
+  "expires_at": "2026-09-04T12:05:00Z",
+  "policy": { "style": "LIMIT", "min_price": "0.50", "complete_within_ms": 30000 }
+}
+```
 
 ## ExecutionCancelRequest
 
@@ -220,22 +273,29 @@ carry the same shape as the streaming `PositionFeature`; `seq` is `0`.
 Without a filter the reply contains every currently held position (rows with a
 positive position size; empty rows are excluded).
 
-Reply payload `PositionQueryResponse`:
+Reply payload `PositionQueryResponse`. A query that cannot be served still
+receives a reply, with `error` set and `positions` empty, so a requester never
+has to distinguish a failure from a lost message:
 
 ```json
 {
   "schema_version": "execution.v1",
-  "positions": [ { "condition_id": "0xcondition", "token_id": "12345", "...": "..." } ]
+  "positions": [ { "condition_id": "0xcondition", "token_id": "12345", "...": "..." } ],
+  "error": ""
 }
 ```
 
 ## Output messages
 
 `ExecutionIntentAck.status` is one of `ACCEPTED`, `REJECTED`, `COMPLETED`,
-`PARTIAL`, `EXPIRED`, or `FAILED`. Rejections use stable reason codes where
-available: `INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`,
-`UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`,
-`DUPLICATE_INTENT`, and `ORDER_REJECTED`.
+`PARTIAL`, `EXPIRED`, or `FAILED`. Rejections use stable reason codes:
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`,
+`NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `UNPLANNABLE`,
+`DUPLICATE_INTENT`, `ORDER_REJECTED`, and `EXECUTION_FAILED`.
+
+An `execution.intent.ack` only ever describes the child order the strategy
+asked for. Internal children, such as the `0.01 SELL FAK` force close, are
+reported through `execution.cancel.ack` and `execution.order.event` only.
 
 `ExecutionOrderEvent.state` is the persisted runtime state. Consumers should
 treat it as an observational event rather than command an order from it.

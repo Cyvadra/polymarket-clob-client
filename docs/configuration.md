@@ -13,6 +13,7 @@ untracked local environment file.
 | `POLYMARKET_API_PASSPHRASE` | Yes | CLOB API passphrase. |
 | `EXECUTION_NATS_URL` | Yes | Core NATS server URL. |
 | `EXECUTION_POSTGRES_URL` | Yes | PostgreSQL connection URL. |
+| `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | Cap on the total notional of active BUY reservations, checked inside the reservation transaction. Unset means no cap. |
 | `EXECUTION_POSITION_FEATURE_INTERVAL` | No | Position snapshot frequency; default `500ms`. |
 | `EXECUTION_RECONCILE_INTERVAL` | No | REST reconciliation frequency; default `30s`. |
 | `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | No | How long an unresolved submitted order may return REST 404 before it is failed; default `2m`. |

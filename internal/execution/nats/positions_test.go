@@ -127,3 +127,31 @@ func TestSubscribePositionQueryRejectsInvalidRequest(t *testing.T) {
 		t.Fatal("expected missing reply subject to fail")
 	}
 }
+
+// A requester that gets no reply can only time out, and the cause would be
+// visible in this daemon's log alone.
+func TestPositionQueryRepliesWithAnErrorInsteadOfStayingSilent(t *testing.T) {
+	connector := &fakeReplyConnector{}
+	if err := SubscribePositionQuery(connector, fakePositionStore{records: queryPositions()}, time.Now); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := deliverPositionQuery(t, connector, protocol.PositionQueryRequest{}); err == nil {
+		t.Fatal("expected a schema version rejection")
+	}
+	if connector.replyTo != "reply.subject" || connector.response.Error == "" {
+		t.Fatalf("expected an error reply on the request subject, got %+v", connector.response)
+	}
+}
+
+func TestPositionQueryRepliesWithAnErrorOnUndecodablePayload(t *testing.T) {
+	connector := &fakeReplyConnector{}
+	if err := SubscribePositionQuery(connector, fakePositionStore{}, time.Now); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := connector.handler(context.Background(), "reply.subject", []byte("not json")); err == nil {
+		t.Fatal("expected a decode failure")
+	}
+	if connector.response.Error == "" {
+		t.Fatalf("expected an error reply, got %+v", connector.response)
+	}
+}

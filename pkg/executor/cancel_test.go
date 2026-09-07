@@ -39,7 +39,7 @@ func forceCancelRequest(intentID string) protocol.ExecutionCancelRequest {
 }
 
 func openPosition() store.PositionRecord {
-	return store.PositionRecord{MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", PositionSize: "2", AvailableSize: "2", ReservedSize: "0", State: "open"}
+	return store.PositionRecord{MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", PositionSize: "2", ActualShares: "2", AvailableSize: "2", ReservedSize: "0", State: "open"}
 }
 
 func TestCancelRejectsMissingSchemaVersion(t *testing.T) {
@@ -111,6 +111,36 @@ func TestCancelForceClosesOpenedPosition(t *testing.T) {
 	}
 	if len(publisher.intentAcks) != 0 {
 		t.Fatalf("force close must not emit an intent ack, got %+v", publisher.intentAcks)
+	}
+}
+
+// Real holdings are rarely round numbers. A force close that only works for
+// exactly representable share counts is a force close that does not work.
+func TestCancelForceClosesFractionalPosition(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	position := openPosition()
+	position.PositionSize, position.ActualShares, position.AvailableSize = "12.3456", "12.3456", "12.3456"
+	storer := &fakeStore{
+		intent:    intentRecord(testIntent(), now),
+		order:     store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3, MatchedShares: "12.3456", RequestedShares: "12.3456"},
+		positions: []store.PositionRecord{position},
+	}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	executor, err := New(storer, client, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	publisher := &recordedCancelPublisher{}
+	executor.SetEventPublisher(publisher)
+
+	if err := executor.Cancel(context.Background(), forceCancelRequest("intent-1")); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if client.created.Shares != 12.34 {
+		t.Fatalf("expected the holding floored to signed share precision, got %+v", client.created)
+	}
+	if len(publisher.cancelAcks) != 1 || publisher.cancelAcks[0].Status != protocol.CancelCompleted {
+		t.Fatalf("unexpected cancel ack: %+v", publisher.cancelAcks)
 	}
 }
 

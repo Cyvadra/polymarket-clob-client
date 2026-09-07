@@ -16,6 +16,7 @@ var (
 	ErrNotFound              = errors.New("record not found")
 	ErrIdempotencyConflict   = errors.New("idempotency key already belongs to another intent")
 	ErrActiveSellReservation = errors.New("active sell reservation already exists")
+	ErrExposureLimit         = errors.New("reservation exceeds the configured open exposure limit")
 )
 
 // Side is the store-local order side. It is deliberately independent of the
@@ -45,6 +46,11 @@ const (
 	IntentOpen  IntentKind = "OPEN"
 	IntentClose IntentKind = "CLOSE"
 )
+
+// StrategyChildSequence is the child order a strategy intent maps onto.
+// Higher sequences are internal children (such as a force-close exit) that the
+// strategy never acknowledged and must not receive intent acknowledgements for.
+const StrategyChildSequence = 1
 
 type OrderIntentRecord struct {
 	IntentID           string
@@ -128,6 +134,7 @@ type PositionRecord struct {
 	TokenID        string
 	Outcome        string
 	PositionSize   string
+	ActualShares   string
 	AvailableSize  string
 	ReservedSize   string
 	EntryPrice     string
