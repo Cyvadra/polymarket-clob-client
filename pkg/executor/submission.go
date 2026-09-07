@@ -90,6 +90,12 @@ func (e *Executor) publishAck(intentID string, status protocol.IntentAckStatus, 
 	}
 }
 
+func (e *Executor) publishCancelAck(ack protocol.ExecutionCancelAck) {
+	if err := protocol.PublishExecutionCancelAck(e.publish, ack); err != nil && e.onError != nil {
+		e.onError(fmt.Errorf("publish cancel acknowledgement: %w", err))
+	}
+}
+
 func (e *Executor) resumeIntent(ctx context.Context, intent protocol.ExecutionIntent) error {
 	order, err := e.store.OrderByIntent(ctx, intent.IntentID, 1)
 	if err != nil {
@@ -102,6 +108,14 @@ func (e *Executor) resumeIntent(ctx context.Context, intent protocol.ExecutionIn
 		e.publishAckForOrder(order, "duplicate intent")
 		return nil
 	}
+	return e.submitSignedOrder(ctx, intent, order)
+}
+
+// submitSignedOrder resumes a persisted signed child order. The strategy-facing
+// intent acknowledgement is only emitted for the first child; internal children
+// appended to an intent (for example a forced-close sell) are submitted without
+// a second execution.intent.ack for the same intent.
+func (e *Executor) submitSignedOrder(ctx context.Context, intent protocol.ExecutionIntent, order store.SignedOrderRecord) error {
 	reservation, err := e.store.Reservation(ctx, reservationID(intent.IntentID, order.ChildSequence))
 	if err != nil {
 		return fmt.Errorf("load signed order reservation: %w", err)
@@ -113,7 +127,7 @@ func (e *Executor) resumeIntent(ctx context.Context, intent protocol.ExecutionIn
 	if err := json.Unmarshal(order.SignedPayload, &signed); err != nil {
 		return fmt.Errorf("decode persisted signed order: %w", err)
 	}
-	return e.submitSigned(ctx, intent, signed, order.ChildSequence, order.Revision, order.OrderType, order.PostOnly)
+	return e.submitOrder(ctx, intent, signed, order.ChildSequence, order.Revision, order.OrderType, order.PostOnly, order.ChildSequence == 1)
 }
 
 func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
@@ -186,6 +200,10 @@ func (e *Executor) planInitialChild(intent protocol.ExecutionIntent) (plannedChi
 }
 
 func (e *Executor) submitSigned(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, childSequence int, revision int64, orderType protocol.TimeInForce, postOnly bool) error {
+	return e.submitOrder(ctx, intent, signed, childSequence, revision, orderType, postOnly, true)
+}
+
+func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, childSequence int, revision int64, orderType protocol.TimeInForce, postOnly bool, emitIntentAck bool) error {
 	order := store.SignedOrderRecord{IntentID: intent.IntentID, ChildSequence: childSequence, State: statemachine.StateSigned, Revision: revision, MatchedShares: "0"}
 	updated, err := e.store.TransitionOrder(ctx, order, statemachine.EventSubmitStarted, "0", "", "submit requested")
 	if err != nil {
@@ -208,22 +226,27 @@ func (e *Executor) submitSigned(ctx context.Context, intent protocol.ExecutionIn
 	live, err := e.store.TransitionOrder(ctx, updated, statemachine.EventSubmitAcknowledged, "0", response.OrderID, "submit acknowledged")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			return e.acceptConcurrentSubmitObservation(ctx, intent, childSequence, response.OrderID)
+			return e.resolveSubmitObservation(ctx, intent, childSequence, response.OrderID, emitIntentAck)
 		}
 		return fmt.Errorf("mark order live: %w", err)
 	}
 	e.publishTransition(live, "submit acknowledged")
-	e.publishAck(intent.IntentID, protocol.IntentAccepted, "", "submit acknowledged", "0", "")
+	if emitIntentAck {
+		e.publishAck(intent.IntentID, protocol.IntentAccepted, "", "submit acknowledged", "0", "")
+	}
 	return nil
 }
 
-func (e *Executor) acceptConcurrentSubmitObservation(ctx context.Context, intent protocol.ExecutionIntent, childSequence int, exchangeOrderID string) error {
+func (e *Executor) resolveSubmitObservation(ctx context.Context, intent protocol.ExecutionIntent, childSequence int, exchangeOrderID string, emitIntentAck bool) error {
 	current, err := e.store.OrderByIntent(ctx, intent.IntentID, childSequence)
 	if err != nil {
 		return fmt.Errorf("load concurrently observed order: %w", err)
 	}
 	if current.ExchangeOrderID != exchangeOrderID {
 		return fmt.Errorf("mark order live: %w", store.ErrConflict)
+	}
+	if !emitIntentAck {
+		return nil
 	}
 	switch current.State {
 	case statemachine.StateLive, statemachine.StatePartiallyFilled:

@@ -24,8 +24,16 @@ type QuoteProvider interface {
 	Get(string) (marketquotes.Snapshot, bool)
 }
 
+// repository is the durable state the executor needs: the execution lifecycle
+// plus read access to current positions (used by cancel-triggered force closes
+// and future event-end force closes).
+type repository interface {
+	store.ExecutionStore
+	store.PositionStore
+}
+
 type Executor struct {
-	store   store.ExecutionStore
+	store   repository
 	clob    CLOB
 	quotes  QuoteProvider
 	now     func() time.Time
@@ -33,7 +41,7 @@ type Executor struct {
 	publish protocol.ExecutionEventPublisher
 }
 
-func New(repository store.ExecutionStore, clob CLOB, now func() time.Time) (*Executor, error) {
+func New(repository repository, clob CLOB, now func() time.Time) (*Executor, error) {
 	if repository == nil || clob == nil {
 		return nil, fmt.Errorf("repository and CLOB client are required")
 	}
@@ -82,7 +90,7 @@ func (e *Executor) resumeSigned(ctx context.Context) error {
 			continue
 		}
 		if err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-			return e.resumeIntent(ctx, executionIntent(intent))
+			return e.submitSignedOrder(ctx, executionIntent(intent), order)
 		}); err != nil {
 			resumeErr = errors.Join(resumeErr, fmt.Errorf("resume signed order %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
@@ -123,28 +131,46 @@ func (e *Executor) cancelExpired(ctx context.Context) error {
 		if !deadlinePassed(intent, e.now().UTC()) {
 			continue
 		}
-		if order.State != statemachine.StateCancelRequested {
-			updated, err := e.store.TransitionOrder(ctx, order, statemachine.EventCancelRequested, order.MatchedShares, order.ExchangeOrderID, "execution deadline elapsed")
-			if err != nil {
-				if err != store.ErrConflict {
-					cancelErr = errors.Join(cancelErr, fmt.Errorf("mark order %s cancellation requested: %w", order.ExchangeOrderID, err))
-				}
-				continue
-			}
-			order = updated
-		}
-		cancelCtx, cancel := context.WithTimeout(ctx, cancelTimeout(intent))
-		err = e.clob.CancelOrder(cancelCtx, order.ExchangeOrderID)
-		cancel()
-		if err != nil {
+		if err := e.cancelOpenOrder(ctx, intent, order); err != nil {
 			cancelErr = errors.Join(cancelErr, fmt.Errorf("cancel order %s: %w", order.ExchangeOrderID, err))
-			continue
-		}
-		if _, err := e.store.TransitionOrder(ctx, order, statemachine.EventCancelAccepted, order.MatchedShares, order.ExchangeOrderID, "cancellation accepted"); err != nil && err != store.ErrConflict {
-			cancelErr = errors.Join(cancelErr, fmt.Errorf("mark order %s cancellation pending: %w", order.ExchangeOrderID, err))
 		}
 	}
 	return cancelErr
+}
+
+// cancelOpenOrder cancels a single still-open exchange order, walking the
+// cancel state chain and tolerating state conflicts when another path already
+// observed the cancellation. Orders without an exchange order ID or in an
+// uncancellable state are left untouched.
+func (e *Executor) cancelOpenOrder(ctx context.Context, intent store.OrderIntentRecord, order store.SignedOrderRecord) error {
+	if order.ExchangeOrderID == "" {
+		return nil
+	}
+	switch order.State {
+	case statemachine.StateLive, statemachine.StatePartiallyFilled, statemachine.StateCancelRequested:
+	default:
+		return nil
+	}
+	if order.State != statemachine.StateCancelRequested {
+		updated, err := e.store.TransitionOrder(ctx, order, statemachine.EventCancelRequested, order.MatchedShares, order.ExchangeOrderID, "cancellation requested")
+		if err != nil {
+			if err != store.ErrConflict {
+				return fmt.Errorf("mark order %s cancellation requested: %w", order.ExchangeOrderID, err)
+			}
+			return nil
+		}
+		order = updated
+	}
+	cancelCtx, cancel := context.WithTimeout(ctx, cancelTimeout(intent))
+	err := e.clob.CancelOrder(cancelCtx, order.ExchangeOrderID)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("cancel order %s: %w", order.ExchangeOrderID, err)
+	}
+	if _, err := e.store.TransitionOrder(ctx, order, statemachine.EventCancelAccepted, order.MatchedShares, order.ExchangeOrderID, "cancellation accepted"); err != nil && err != store.ErrConflict {
+		return fmt.Errorf("mark order %s cancellation pending: %w", order.ExchangeOrderID, err)
+	}
+	return nil
 }
 
 func deadlinePassed(intent store.OrderIntentRecord, now time.Time) bool {

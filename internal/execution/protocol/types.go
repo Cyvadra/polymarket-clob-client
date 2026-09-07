@@ -15,11 +15,14 @@ type ExecutionEventPublisher interface {
 const (
 	SchemaVersionV1 = "execution.v1"
 
-	SubjectStrategyExecutionIntent = "strategy.execution.intent"
-	SubjectExecutionIntentAck      = "execution.intent.ack"
-	SubjectExecutionOrderEvent     = "execution.order.event"
-	SubjectMarketQuotes            = "pmm.market.quotes"
-	SubjectPositionFeaturesPrefix  = "position.features"
+	SubjectStrategyExecutionIntent        = "strategy.execution.intent"
+	SubjectExecutionIntentAck             = "execution.intent.ack"
+	SubjectExecutionOrderEvent            = "execution.order.event"
+	SubjectMarketQuotes                   = "pmm.market.quotes"
+	SubjectPositionFeaturesPrefix         = "position.features"
+	SubjectStrategyExecutionCancel        = "strategy.execution.cancel"
+	SubjectExecutionCancelAck             = "execution.cancel.ack"
+	SubjectStrategyExecutionPositionQuery = "strategy.execution.position.query"
 )
 
 type Side = clobclient.Side
@@ -150,6 +153,53 @@ func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID strin
 		MatchedShares:   matchedShares,
 		OccurredAt:      occurredAt.UTC(),
 	})
+}
+
+type ExecutionCancelRequest struct {
+	SchemaVersion string `json:"schema_version"`
+	IntentID      string `json:"intent_id"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+type CancelAckStatus string
+
+const (
+	CancelCompleted             CancelAckStatus = "COMPLETED"
+	CancelCanceled              CancelAckStatus = "CANCELED"
+	CancelNoPosition            CancelAckStatus = "NO_POSITION"
+	CancelActiveSellReservation CancelAckStatus = "ACTIVE_SELL_RESERVATION"
+	CancelNotFound              CancelAckStatus = "NOT_FOUND"
+	CancelFailed                CancelAckStatus = "FAILED"
+)
+
+type ExecutionCancelAck struct {
+	SchemaVersion  string          `json:"schema_version"`
+	IntentID       string          `json:"intent_id"`
+	Status         CancelAckStatus `json:"status"`
+	ReasonCode     string          `json:"reason_code,omitempty"`
+	Reason         string          `json:"reason,omitempty"`
+	CanceledOrders int             `json:"canceled_orders,omitempty"`
+	OccurredAt     time.Time       `json:"occurred_at"`
+}
+
+func PublishExecutionCancelAck(publisher ExecutionEventPublisher, ack ExecutionCancelAck) error {
+	if publisher == nil {
+		return nil
+	}
+	ack.SchemaVersion = SchemaVersionV1
+	ack.OccurredAt = ack.OccurredAt.UTC()
+	return publisher.PublishJSON(SubjectExecutionCancelAck, ack)
+}
+
+type PositionQueryRequest struct {
+	SchemaVersion string `json:"schema_version"`
+	ConditionID   string `json:"condition_id,omitempty"`
+	MarketID      string `json:"market_id,omitempty"`
+}
+
+type PositionQueryResponse struct {
+	SchemaVersion string            `json:"schema_version"`
+	Positions     []PositionFeature `json:"positions"`
 }
 
 type PositionFeature struct {

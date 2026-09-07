@@ -20,6 +20,10 @@ type Config struct {
 
 type Handler func(context.Context, []byte) error
 
+// ReplyHandler receives the request payload together with the reply subject
+// the requester expects the response on (from Msg.Reply).
+type ReplyHandler func(context.Context, string, []byte) error
+
 type Bus struct {
 	config Config
 	conn   *nats.Conn
@@ -165,6 +169,34 @@ func (b *Bus) Subscribe(subject string, handler Handler) error {
 			ctx = context.Background()
 		}
 		if err := handler(ctx, message.Data); err != nil && b.config.OnHandlerError != nil {
+			b.config.OnHandlerError(fmt.Errorf("handle NATS subject %s: %w", subject, err))
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe NATS subject %s: %w", subject, err)
+	}
+	b.subs = append(b.subs, subscription)
+	return nil
+}
+
+// SubscribeReply registers a request/reply subscription. The handler receives
+// the reply subject from Msg.Reply and is responsible for publishing the
+// response back on it (for example with PublishJSON).
+func (b *Bus) SubscribeReply(subject string, handler ReplyHandler) error {
+	if subject == "" || handler == nil {
+		return fmt.Errorf("NATS subject and handler are required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conn == nil {
+		return fmt.Errorf("NATS bus is not initialized")
+	}
+	subscription, err := b.conn.Subscribe(subject, func(message *nats.Msg) {
+		ctx := b.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := handler(ctx, message.Reply, message.Data); err != nil && b.config.OnHandlerError != nil {
 			b.config.OnHandlerError(fmt.Errorf("handle NATS subject %s: %w", subject, err))
 		}
 	})

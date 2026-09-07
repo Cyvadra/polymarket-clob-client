@@ -62,3 +62,71 @@ func TestExecutionPolicyTacticsMarshalAsDecimalStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandSubjectsAreStable(t *testing.T) {
+	for want, got := range map[string]string{
+		"strategy.execution.cancel":         SubjectStrategyExecutionCancel,
+		"execution.cancel.ack":              SubjectExecutionCancelAck,
+		"strategy.execution.position.query": SubjectStrategyExecutionPositionQuery,
+	} {
+		if want != got {
+			t.Fatalf("expected subject %q, got %q", want, got)
+		}
+	}
+}
+
+type recordingPublisher struct {
+	subject string
+	value   any
+}
+
+func (p *recordingPublisher) PublishJSON(subject string, value any) error {
+	p.subject, p.value = subject, value
+	return nil
+}
+
+func TestCancelAckPublishSetsSchemaAndSubject(t *testing.T) {
+	publisher := &recordingPublisher{}
+	ack := ExecutionCancelAck{IntentID: "intent-1", Status: CancelCompleted, Reason: "done", CanceledOrders: 1, OccurredAt: time.Unix(5, 0).UTC()}
+	if err := PublishExecutionCancelAck(publisher, ack); err != nil {
+		t.Fatalf("publish cancel ack: %v", err)
+	}
+	if publisher.subject != SubjectExecutionCancelAck {
+		t.Fatalf("expected ack subject, got %q", publisher.subject)
+	}
+	payload, err := json.Marshal(publisher.value)
+	if err != nil {
+		t.Fatalf("marshal ack: %v", err)
+	}
+	if !strings.Contains(string(payload), `"schema_version":"execution.v1"`) {
+		t.Fatalf("expected schema version in ack payload, got %s", payload)
+	}
+}
+
+func TestCancelAndQueryMessagesRoundTrip(t *testing.T) {
+	cancel := ExecutionCancelRequest{SchemaVersion: SchemaVersionV1, IntentID: "intent-1", Reason: "abandon"}
+	payload, err := json.Marshal(cancel)
+	if err != nil {
+		t.Fatalf("marshal cancel request: %v", err)
+	}
+	var decoded ExecutionCancelRequest
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("unmarshal cancel request: %v", err)
+	}
+	if decoded.IntentID != cancel.IntentID || decoded.Reason != cancel.Reason {
+		t.Fatalf("cancel request round trip mismatch: %+v", decoded)
+	}
+
+	query := PositionQueryRequest{SchemaVersion: SchemaVersionV1, ConditionID: "condition-a"}
+	payload, err = json.Marshal(query)
+	if err != nil {
+		t.Fatalf("marshal query request: %v", err)
+	}
+	var decodedQuery PositionQueryRequest
+	if err := json.Unmarshal(payload, &decodedQuery); err != nil {
+		t.Fatalf("unmarshal query request: %v", err)
+	}
+	if decodedQuery.ConditionID != query.ConditionID || decodedQuery.MarketID != "" {
+		t.Fatalf("query request round trip mismatch: %+v", decodedQuery)
+	}
+}

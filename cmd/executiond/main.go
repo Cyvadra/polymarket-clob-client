@@ -130,6 +130,12 @@ func run() error {
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {
 		return err
 	}
+	if err := nats.SubscribeCancel(bus, execution); err != nil {
+		return err
+	}
+	if err := nats.SubscribePositionQuery(bus, store, time.Now); err != nil {
+		return err
+	}
 	modules := []namedModule{
 		{name: "nats", module: bus},
 		{name: "executor", module: execution},

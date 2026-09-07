@@ -28,6 +28,7 @@ type fakeStore struct {
 	lockCalls           int
 	reservation         store.ReservationRecord
 	conflictOnSubmitAck bool
+	positions           []store.PositionRecord
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
@@ -87,8 +88,8 @@ func (s *fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRe
 func (s *fakeStore) OrderByExchangeID(context.Context, string) (store.SignedOrderRecord, error) {
 	return store.SignedOrderRecord{}, store.ErrNotFound
 }
-func (s *fakeStore) OrderByIntent(context.Context, string, int) (store.SignedOrderRecord, error) {
-	if s.order.IntentID == "" {
+func (s *fakeStore) OrderByIntent(_ context.Context, intentID string, childSequence int) (store.SignedOrderRecord, error) {
+	if s.order.IntentID == "" || s.order.IntentID != intentID || s.order.ChildSequence != childSequence {
 		return store.SignedOrderRecord{}, store.ErrNotFound
 	}
 	return s.order, nil
@@ -119,7 +120,7 @@ func (s *fakeStore) Release(_ context.Context, reservationID, _ string) error {
 }
 func (s *fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error) { return false, nil }
 func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
-	return nil, nil
+	return s.positions, nil
 }
 
 type fakeCLOB struct {

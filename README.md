@@ -39,11 +39,16 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | `execution.intent.ack` | executiond -> strategy | `ExecutionIntentAck` | 接受、拒绝、终态完成、部分成交、过期或失败。 |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | 持久化的订单生命周期迁移。 |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
+| `strategy.execution.cancel` | strategy -> executiond | `ExecutionCancelRequest` | 撤销某个 intent：撤其未成交开仓单并对该 token 的整条仓位执行 `0.01 SELL FAK` 强平。 |
+| `execution.cancel.ack` | executiond -> strategy | `ExecutionCancelAck` | cancel 命令的唯一终态信号。 |
+| `strategy.execution.position.query` | strategy -> executiond（request/reply） | `PositionQueryRequest` | 查询当前仓位，回复发往请求的 reply subject。 |
 
 `ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、份额、限价、有效期限（time-in-force）以及到期时间或完成期限。`LIMIT` 使用意图限价直接创建初始 child；`MAKER_POST_ONLY`、`TAKER_AGGRESSIVE` 与 `AUTO` 会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force。当前运行时仍只创建一个 child；持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期尚未实现，对应策略字段会被拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。同一个条件 ID 与 token ID 同时只允许一个活跃卖出预留。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
+
+`strategy.execution.cancel` 用于放弃某个 intent：executiond 会撤掉该 intent 仍挂单的 child 订单，并对其 `condition_id`/`token_id` 的整条剩余可用仓位提交一笔内部的 `0.01 SELL FAK` 强平（挂在该 intent 下的第二个 child，不产生 `execution.intent.ack`）。强平一旦派出即对策略侧视为终态：即使未成交也不再重试，剩余份额等待市场结算；命令结果通过 `execution.cancel.ack`（唯一终态信号）回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id` 或 `market_id` 过滤，回复负载与 `PositionFeature` 一致。
 
 ### 仓位记账
 

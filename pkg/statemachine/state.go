@@ -125,7 +125,8 @@ var transitions = map[State]map[Event]State{
 		EventRejectedObserved: StateRejected,
 	},
 	StateSigned: {
-		EventSubmitStarted: StateSubmitting,
+		EventSubmitStarted:  StateSubmitting,
+		EventCancelObserved: StateCanceled,
 	},
 	StateSubmitting: {
 		EventSubmitAcknowledged:    StateLive,

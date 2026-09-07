@@ -31,6 +31,9 @@ authenticated CLOB user-stream adapter, never as a strategy integration rule.
 | `execution.intent.ack` | executiond -> strategy | `ExecutionIntentAck` | Validation, submission, or terminal outcome. |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition observed by executiond. |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest best-effort position snapshot. |
+| `strategy.execution.cancel` | strategy -> executiond | `ExecutionCancelRequest` | Cancel an intent and force close its token position. |
+| `execution.cancel.ack` | executiond -> strategy | `ExecutionCancelAck` | Terminal outcome of a cancel command. |
+| `strategy.execution.position.query` | strategy -> executiond (request/reply) | `PositionQueryRequest` | Query current positions; the reply is published on the request's reply subject. |
 
 Subject tokens must not be empty or include the NATS wildcards `*` or `>`.
 
@@ -128,6 +131,99 @@ Lifecycle controls such as `reprice_interval_ms`, `max_reprices`,
 `post_only_cross_retry`, `soft_close_after_ms`, `force_close_after_ms`, and
 `cancel_replace_timeout_ms` are reserved for later cancel-replace execution and
 are currently rejected with `UNIMPLEMENTED_POLICY` when non-zero or true.
+
+## ExecutionCancelRequest
+
+Cancels an intent by abandoning its position. The strategy sends one cancel per
+intent it wants to stop managing.
+
+| Field | Values and rules |
+| --- | --- |
+| `schema_version` | Required, `execution.v1`. |
+| `intent_id` | Required. The intent to cancel. |
+| `reason` | Optional free-form reason surfaced in the acknowledgement. |
+
+Cancel handling is idempotent and atomic per `intent_id`:
+
+- Any still-open strategy-facing child order of the intent is canceled on the
+  CLOB. A child that was persisted but never submitted is marked canceled
+  before submission instead of being recovered and sent.
+- If the intent opened a position, `executiond` force closes the **whole
+  remaining available position** for the intent's `condition_id`/`token_id` by
+  submitting an internal `0.01 SELL FAK` child of the same intent. The forced
+  sell is never an `execution.intent.ack`; it is reported through
+  `execution.cancel.ack` and the normal order-event/position-feature stream.
+- A repeated cancel for an intent whose force-close child already exists does
+  nothing further: an unfilled forced close is deliberately not retried.
+
+### Forced-close terminal semantics
+
+A forced `0.01 SELL FAK` is terminal for strategy tracking as soon as it is
+dispatched. If it does not fill (for example because there is no bid at `0.01`
+near event end), `executiond` treats it as done from the strategy's point of
+view: the sell reservation is released through the normal terminal order path,
+no further exit is attempted, and any leftover shares await market settlement.
+`executiond` does not mark the position with a durable "closed" flag; position
+snapshots keep reflecting the current durable state. Strategies that sent the
+cancel are expected to stop managing the token after the terminal
+`execution.cancel.ack` and ignore any later position frame for it.
+
+If the token already has another active sell (a competing sell reservation),
+the forced sell is skipped and the acknowledgement reports
+`ACTIVE_SELL_RESERVATION`; the in-flight sell is that token's exit.
+
+## ExecutionCancelAck
+
+`execution.cancel.ack` is the single terminal signal for a cancel command. It is
+published best-effort; strategies should use their own timeout if they require
+one. `status` is one of:
+
+| Status | Meaning |
+| --- | --- |
+| `COMPLETED` | Orders canceled and, when a position existed, the force close was dispatched (fill outcome is reported via order events and position features). |
+| `CANCELED` | Open order canceled; there was no position to force close. |
+| `NO_POSITION` | No available position could be reserved for the forced sell. |
+| `ACTIVE_SELL_RESERVATION` | Force close skipped because another sell is already active on the token. |
+| `NOT_FOUND` | No execution intent exists for `intent_id`. |
+| `FAILED` | The cancel could not be completed; `reason_code` is `INVALID_CANCEL` for a malformed request or `EXECUTION_FAILED` otherwise. |
+
+Example:
+
+```json
+{
+  "schema_version": "execution.v1",
+  "intent_id": "late-gap:condition:up:42",
+  "status": "COMPLETED",
+  "reason": "open orders canceled and position force close submitted at 0.01 FAK",
+  "canceled_orders": 1,
+  "occurred_at": "2026-09-04T12:05:01Z"
+}
+```
+
+## PositionQueryRequest
+
+Request/reply position snapshot. Send the request on
+`strategy.execution.position.query`; `executiond` publishes the response on the
+request's NATS reply subject (`Msg.Reply`). Replies are one-off snapshots and
+carry the same shape as the streaming `PositionFeature`; `seq` is `0`.
+
+| Field | Values and rules |
+| --- | --- |
+| `schema_version` | Required, `execution.v1`. |
+| `condition_id` | Optional. Restricts the reply to one condition. |
+| `market_id` | Optional. Restricts the reply to one market. Both filters may be combined. |
+
+Without a filter the reply contains every currently held position (rows with a
+positive position size; empty rows are excluded).
+
+Reply payload `PositionQueryResponse`:
+
+```json
+{
+  "schema_version": "execution.v1",
+  "positions": [ { "condition_id": "0xcondition", "token_id": "12345", "...": "..." } ]
+}
+```
 
 ## Output messages
 
