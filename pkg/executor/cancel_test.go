@@ -34,6 +34,10 @@ func cancelRequest(intentID string) protocol.ExecutionCancelRequest {
 	return protocol.ExecutionCancelRequest{SchemaVersion: protocol.SchemaVersionV1, IntentID: intentID}
 }
 
+func forceCancelRequest(intentID string) protocol.ExecutionCancelRequest {
+	return protocol.ExecutionCancelRequest{SchemaVersion: protocol.SchemaVersionV1, IntentID: intentID, Force: true}
+}
+
 func openPosition() store.PositionRecord {
 	return store.PositionRecord{MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", PositionSize: "2", AvailableSize: "2", ReservedSize: "0", State: "open"}
 }
@@ -87,7 +91,7 @@ func TestCancelForceClosesOpenedPosition(t *testing.T) {
 	publisher := &recordedCancelPublisher{}
 	executor.SetEventPublisher(publisher)
 
-	if err := executor.Cancel(context.Background(), cancelRequest("intent-1")); err != nil {
+	if err := executor.Cancel(context.Background(), forceCancelRequest("intent-1")); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if client.cancels != 1 {
@@ -107,6 +111,38 @@ func TestCancelForceClosesOpenedPosition(t *testing.T) {
 	}
 	if len(publisher.intentAcks) != 0 {
 		t.Fatalf("force close must not emit an intent ack, got %+v", publisher.intentAcks)
+	}
+}
+
+func TestCancelWithoutForcePreservesPosition(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	storer := &fakeStore{
+		intent: intentRecord(testIntent(), now),
+		order:  store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3, MatchedShares: "2", RequestedShares: "2"},
+	}
+	storer.positions = []store.PositionRecord{openPosition()}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	executor, err := New(storer, client, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	publisher := &recordedCancelPublisher{}
+	executor.SetEventPublisher(publisher)
+
+	if err := executor.Cancel(context.Background(), cancelRequest("intent-1")); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if client.cancels != 1 {
+		t.Fatalf("expected open entry order to be canceled, got %d", client.cancels)
+	}
+	if len(storer.reservations) != 0 {
+		t.Fatalf("expected no force close reservation, got %+v", storer.reservations)
+	}
+	if len(publisher.cancelAcks) != 1 || publisher.cancelAcks[0].Status != protocol.CancelCanceled {
+		t.Fatalf("unexpected cancel ack: %+v", publisher.cancelAcks)
+	}
+	if len(publisher.intentAcks) != 0 {
+		t.Fatalf("unexpected intent ack: %+v", publisher.intentAcks)
 	}
 }
 
@@ -152,7 +188,7 @@ func TestCancelDoesNotRetryExistingForceClose(t *testing.T) {
 	publisher := &recordedCancelPublisher{}
 	executor.SetEventPublisher(publisher)
 
-	if err := executor.Cancel(context.Background(), cancelRequest("intent-1")); err != nil {
+	if err := executor.Cancel(context.Background(), forceCancelRequest("intent-1")); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if client.cancels != 0 || client.submits != 0 || len(storer.reservations) != 0 {
@@ -179,7 +215,7 @@ func TestCancelSkipsForceCloseWhenActiveSellReservation(t *testing.T) {
 	publisher := &recordedCancelPublisher{}
 	executor.SetEventPublisher(publisher)
 
-	if err := executor.Cancel(context.Background(), cancelRequest("intent-1")); err != nil {
+	if err := executor.Cancel(context.Background(), forceCancelRequest("intent-1")); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
 	if client.submits != 0 {

@@ -73,15 +73,20 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 func validatePolicyTactics(intent protocol.ExecutionIntent, limitPrice float64) error {
 	policy := intent.Policy
 	switch policy.Style {
-	case "", protocol.ExecutionStyleLimit:
+	case protocol.ExecutionStyleLimit:
 		return nil
-	case protocol.ExecutionStyleMakerPostOnly, protocol.ExecutionStyleTakerAggressive, protocol.ExecutionStyleAuto:
+	case protocol.ExecutionStyleMakerPostOnly, protocol.ExecutionStyleTakerAggressive:
+	case "":
+		return fmt.Errorf("execution policy style must be explicitly set to LIMIT, MAKER_POST_ONLY, or TAKER_AGGRESSIVE; got %q", intent.Policy.Style)
 	default:
 		return fmt.Errorf("unsupported execution style %q", intent.Policy.Style)
 	}
-	initialPrice, err := optionalPolicyPrice("initial_price", policy.InitialPrice, limitPrice)
+	signalPrice, err := optionalPolicyPrice("mid_price", policy.MidPrice, limitPrice)
 	if err != nil {
-		return err
+		signalPrice, err = optionalPolicyPrice("initial_price", policy.InitialPrice, limitPrice)
+		if err != nil {
+			return err
+		}
 	}
 	maxPrice, hasMaxPrice, err := optionalPolicyBound("max_price", policy.MaxPrice)
 	if err != nil {
@@ -105,16 +110,16 @@ func validatePolicyTactics(intent protocol.ExecutionIntent, limitPrice float64) 
 		if !hasMaxPrice {
 			return fmt.Errorf("buy execution policy requires max_price")
 		}
-		if initialPrice > maxPrice {
-			return fmt.Errorf("buy execution policy initial_price exceeds max_price")
+		if signalPrice > maxPrice {
+			return fmt.Errorf("buy execution policy signal price exceeds max_price")
 		}
 	}
 	if intent.Side == protocol.SideSell {
 		if !hasMinPrice {
 			return fmt.Errorf("sell execution policy requires min_price")
 		}
-		if initialPrice < minPrice {
-			return fmt.Errorf("sell execution policy initial_price is below min_price")
+		if signalPrice < minPrice {
+			return fmt.Errorf("sell execution policy signal price is below min_price")
 		}
 	}
 	return nil

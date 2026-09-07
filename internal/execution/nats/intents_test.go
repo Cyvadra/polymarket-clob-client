@@ -95,7 +95,7 @@ func TestSubscribeIntentsDecodesAndExecutes(t *testing.T) {
 	if subscriber.subject != protocol.SubjectStrategyExecutionIntent || subscriber.handler == nil {
 		t.Fatalf("subscription=%+v", subscriber)
 	}
-	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
+	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: protocol.ExecutionStyleLimit}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

@@ -50,13 +50,13 @@ func TestExecutionIntentKeepsDecimalValuesAsStrings(t *testing.T) {
 }
 
 func TestExecutionPolicyTacticsMarshalAsDecimalStrings(t *testing.T) {
-	policy := ExecutionPolicy{Style: ExecutionStyleMakerPostOnly, InitialPrice: "0.41", MaxPrice: "0.47", PriceStep: "0.01", QuoteMaxAgeMillis: 500}
+	policy := ExecutionPolicy{Style: ExecutionStyleMakerPostOnly, MidPrice: "0.44", InitialPrice: "0.41", MaxPrice: "0.47", PriceStep: "0.01", QuoteMaxAgeMillis: 500}
 	payload, err := json.Marshal(policy)
 	if err != nil {
 		t.Fatalf("marshal execution policy: %v", err)
 	}
 	body := string(payload)
-	for _, want := range []string{`"style":"MAKER_POST_ONLY"`, `"initial_price":"0.41"`, `"max_price":"0.47"`, `"price_step":"0.01"`, `"quote_max_age_ms":500`} {
+	for _, want := range []string{`"style":"MAKER_POST_ONLY"`, `"mid_price":"0.44"`, `"initial_price":"0.41"`, `"max_price":"0.47"`, `"price_step":"0.01"`, `"quote_max_age_ms":500`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("expected %s in payload, got %s", want, body)
 		}
@@ -104,7 +104,7 @@ func TestCancelAckPublishSetsSchemaAndSubject(t *testing.T) {
 }
 
 func TestCancelAndQueryMessagesRoundTrip(t *testing.T) {
-	cancel := ExecutionCancelRequest{SchemaVersion: SchemaVersionV1, IntentID: "intent-1", Reason: "abandon"}
+	cancel := ExecutionCancelRequest{SchemaVersion: SchemaVersionV1, IntentID: "intent-1", Reason: "abandon", Force: true}
 	payload, err := json.Marshal(cancel)
 	if err != nil {
 		t.Fatalf("marshal cancel request: %v", err)
@@ -113,7 +113,7 @@ func TestCancelAndQueryMessagesRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("unmarshal cancel request: %v", err)
 	}
-	if decoded.IntentID != cancel.IntentID || decoded.Reason != cancel.Reason {
+	if decoded.IntentID != cancel.IntentID || decoded.Reason != cancel.Reason || !decoded.Force {
 		t.Fatalf("cancel request round trip mismatch: %+v", decoded)
 	}
 

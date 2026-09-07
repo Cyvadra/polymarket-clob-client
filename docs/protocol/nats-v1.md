@@ -52,7 +52,7 @@ either a future `expires_at` or a positive `policy.complete_within_ms`.
 | `limit_price` | Decimal string strictly between `0` and `1`. |
 | `time_in_force` | `GTC`, `FOK`, `FAK`, or `GTD`. |
 | `post_only` | Boolean passed to the CLOB order. |
-| `policy.style` | Omitted, `LIMIT`, `MAKER_POST_ONLY`, `TAKER_AGGRESSIVE`, or `AUTO`. Omitted is treated as `LIMIT`. |
+| `policy.style` | Required: `LIMIT`, `MAKER_POST_ONLY`, or `TAKER_AGGRESSIVE`. The strategy must explicitly choose one. |
 | `policy.complete_within_ms` | Optional positive execution deadline. |
 | `policy.cancel_timeout_ms` | Optional cancellation timeout. |
 | `policy.max_feature_age_ms` | Optional maximum age of `feature_completed_at`. |
@@ -72,7 +72,7 @@ either a future `expires_at` or a positive `policy.complete_within_ms`.
 `intent_id` is the durable idempotency identity. Reusing it resumes a signed
 order if necessary and does not create a second child order in the current
 runtime. Quote snapshots are used to plan the initial child order price, post-only flag, and
-time-in-force for `MAKER_POST_ONLY`, `TAKER_AGGRESSIVE`, and `AUTO` styles. The
+time-in-force for `MAKER_POST_ONLY` and `TAKER_AGGRESSIVE` styles. The
 live executor still creates one child order only. It does not yet perform
 cancel-replace, post-only crossing retry, price-drift repricing after submit, or
 soft/force-close lifecycle execution; policy fields for those behaviors are rejected.
@@ -142,17 +142,21 @@ intent it wants to stop managing.
 | `schema_version` | Required, `execution.v1`. |
 | `intent_id` | Required. The intent to cancel. |
 | `reason` | Optional free-form reason surfaced in the acknowledgement. |
+| `force` | Optional boolean. When true, executiond performs the current internal `SELL 0.01 FAK` force-close path after canceling the open child. When false or omitted, executiond cancels the live child and preserves the remaining position for settlement. |
 
 Cancel handling is idempotent and atomic per `intent_id`:
 
 - Any still-open strategy-facing child order of the intent is canceled on the
   CLOB. A child that was persisted but never submitted is marked canceled
   before submission instead of being recovered and sent.
-- If the intent opened a position, `executiond` force closes the **whole
-  remaining available position** for the intent's `condition_id`/`token_id` by
-  submitting an internal `0.01 SELL FAK` child of the same intent. The forced
-  sell is never an `execution.intent.ack`; it is reported through
-  `execution.cancel.ack` and the normal order-event/position-feature stream.
+- If `force=true` and the intent opened a position, `executiond` force closes
+  the **whole remaining available position** for the intent's
+  `condition_id`/`token_id` by submitting an internal `0.01 SELL FAK` child of
+  the same intent. The forced sell is never an `execution.intent.ack`; it is
+  reported through `execution.cancel.ack` and the normal order-event/
+  position-feature stream.
+- If `force=false` or the field is omitted, `executiond` cancels the open
+  strategy-facing child and preserves the remaining position for settlement.
 - A repeated cancel for an intent whose force-close child already exists does
   nothing further: an unfilled forced close is deliberately not retried.
 

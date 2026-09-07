@@ -44,7 +44,7 @@ func (e *Executor) Cancel(ctx context.Context, req protocol.ExecutionCancelReque
 		e.publishCancelAck(protocol.ExecutionCancelAck{IntentID: req.IntentID, Status: protocol.CancelFailed, ReasonCode: "INVALID_CANCEL", Reason: err.Error(), OccurredAt: e.now()})
 		return err
 	}
-	ack, err := e.cancelIntent(ctx, req.IntentID, req.Reason)
+	ack, err := e.cancelIntent(ctx, req.IntentID, req.Reason, req.Force)
 	if err != nil {
 		e.publishCancelAck(protocol.ExecutionCancelAck{IntentID: req.IntentID, Status: protocol.CancelFailed, ReasonCode: "EXECUTION_FAILED", Reason: err.Error(), OccurredAt: e.now()})
 		return err
@@ -63,7 +63,7 @@ func validateCancelRequest(req protocol.ExecutionCancelRequest) error {
 	return nil
 }
 
-func (e *Executor) cancelIntent(ctx context.Context, intentID, reason string) (protocol.ExecutionCancelAck, error) {
+func (e *Executor) cancelIntent(ctx context.Context, intentID, reason string, force bool) (protocol.ExecutionCancelAck, error) {
 	intent, err := e.store.Intent(ctx, intentID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -73,7 +73,7 @@ func (e *Executor) cancelIntent(ctx context.Context, intentID, reason string) (p
 	}
 	var ack protocol.ExecutionCancelAck
 	err = e.store.WithIntentLock(ctx, intentID, func(ctx context.Context) error {
-		ack, err = e.cancelIntentLocked(ctx, intent, reason)
+		ack, err = e.cancelIntentLocked(ctx, intent, reason, force)
 		return err
 	})
 	if err != nil {
@@ -82,7 +82,7 @@ func (e *Executor) cancelIntent(ctx context.Context, intentID, reason string) (p
 	return ack, nil
 }
 
-func (e *Executor) cancelIntentLocked(ctx context.Context, intent store.OrderIntentRecord, reason string) (protocol.ExecutionCancelAck, error) {
+func (e *Executor) cancelIntentLocked(ctx context.Context, intent store.OrderIntentRecord, reason string, force bool) (protocol.ExecutionCancelAck, error) {
 	ack := protocol.ExecutionCancelAck{IntentID: intent.IntentID, OccurredAt: e.now()}
 
 	// Cancel the intent's strategy-facing child order when it is still open.
@@ -110,6 +110,16 @@ func (e *Executor) cancelIntentLocked(ctx context.Context, intent store.OrderInt
 		default:
 			// Terminal; nothing left to cancel.
 		}
+	}
+
+	if !force {
+		ack.Status = protocol.CancelCanceled
+		if ack.CanceledOrders > 0 {
+			ack.Reason = "open order canceled"
+		} else {
+			ack.Reason = "no open order to cancel; position preserved"
+		}
+		return ack, nil
 	}
 
 	// A force-close child (sequence two) already exists for this intent: the

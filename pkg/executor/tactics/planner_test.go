@@ -9,49 +9,37 @@ import (
 )
 
 func TestPlanMakerPostOnlyBuySubmitsAtBidOffsetBelowMax(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	decision := Plan(Request{Intent: tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly), Quote: tacticQuote(now), HasQuote: true, Now: now})
+	decision := Plan(Request{Intent: tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly), Quote: tacticQuote(time.Unix(100, 0).UTC()), HasQuote: true})
 	if decision.Action != ActionSubmitChild || decision.Price != "0.43" || !decision.PostOnly || decision.NextSequence != 1 {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
 }
 
 func TestPlanMakerPostOnlyBuyClampsAtMaxPrice(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
 	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly)
+	intent.Policy.MidPrice = "0.44"
 	intent.Policy.MaxPrice = "0.42"
-	decision := Plan(Request{Intent: intent, Quote: tacticQuote(now), HasQuote: true, Now: now})
+	decision := Plan(Request{Intent: intent, Quote: tacticQuote(time.Unix(100, 0).UTC()), HasQuote: true})
 	if decision.Action != ActionSubmitChild || decision.Price != "0.42" {
 		t.Fatalf("expected max-price clamp, got %+v", decision)
 	}
 }
 
 func TestPlanTakerAggressiveBuyUsesAskPlusStepAndFAK(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
 	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleTakerAggressive)
 	intent.TimeInForce = protocol.TimeInForceGTC
-	decision := Plan(Request{Intent: intent, Quote: tacticQuote(now), HasQuote: true, Now: now})
-	if decision.Action != ActionSubmitChild || decision.Price != "0.47" || decision.TimeInForce != protocol.TimeInForceFAK || decision.PostOnly {
+	decision := Plan(Request{Intent: intent})
+	if decision.Action != ActionSubmitChild || decision.Price != "0.45" || decision.TimeInForce != protocol.TimeInForceFAK || decision.PostOnly {
 		t.Fatalf("unexpected taker decision: %+v", decision)
 	}
 }
 
-func TestPlanAutoBuyUsesAskPlusStepAndFAK(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleAuto)
-	intent.TimeInForce = protocol.TimeInForceGTC
-	decision := Plan(Request{Intent: intent, Quote: tacticQuote(now), HasQuote: true, Now: now})
-	if decision.Action != ActionSubmitChild || decision.Price != "0.47" || decision.TimeInForce != protocol.TimeInForceFAK {
-		t.Fatalf("unexpected auto decision: %+v", decision)
-	}
-}
-
-func TestPlanWaitsForFreshQuote(t *testing.T) {
-	now := time.Unix(100, 0).UTC()
-	quote := tacticQuote(now.Add(-time.Second))
-	decision := Plan(Request{Intent: tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly), Quote: quote, HasQuote: true, Now: now})
-	if decision.Action != ActionWait || decision.Reason != "quote is stale" {
-		t.Fatalf("expected stale quote wait, got %+v", decision)
+func TestPlanUsesSignalPriceWithoutQuote(t *testing.T) {
+	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleMakerPostOnly)
+	intent.Policy.MidPrice = "0.44"
+	decision := Plan(Request{Intent: intent})
+	if decision.Action != ActionSubmitChild || decision.Price != "0.43" {
+		t.Fatalf("expected signal-priced submission without quote, got %+v", decision)
 	}
 }
 
@@ -83,7 +71,7 @@ func tacticIntent(side protocol.Side, style protocol.ExecutionStyle) protocol.Ex
 	} else {
 		minPrice = ""
 	}
-	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", ConditionID: "condition", TokenID: "up-token", Outcome: "Up", Side: side, TargetUSD: "0.82", LimitPrice: "0.41", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{Style: style, InitialPrice: "0.41", MaxPrice: maxPrice, MinPrice: minPrice, PriceStep: "0.01", QuoteOffset: "0.01", QuoteMaxAgeMillis: 500}}
+	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", ConditionID: "condition", TokenID: "up-token", Outcome: "Up", Side: side, TargetUSD: "0.82", LimitPrice: "0.41", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{Style: style, MidPrice: "0.44", InitialPrice: "0.41", MaxPrice: maxPrice, MinPrice: minPrice, PriceStep: "0.01", QuoteOffset: "0.01", QuoteMaxAgeMillis: 500}}
 }
 
 func tacticQuote(at time.Time) marketquotes.Snapshot {

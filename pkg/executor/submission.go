@@ -193,7 +193,7 @@ func (e *Executor) planInitialChild(intent protocol.ExecutionIntent) (plannedChi
 	if e.quotes != nil {
 		quote, hasQuote = e.quotes.Get(intent.ConditionID)
 	}
-	decision := tactics.Plan(tactics.Request{Intent: intent, Quote: quote, HasQuote: hasQuote, Now: e.now().UTC()})
+	decision := tactics.Plan(tactics.Request{Intent: intent, Quote: quote, HasQuote: hasQuote})
 	if decision.Action != tactics.ActionSubmitChild {
 		return plannedChild{}, fmt.Errorf("execution plan did not produce a child order: %s", decision.Reason)
 	}

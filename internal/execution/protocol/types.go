@@ -54,7 +54,6 @@ const (
 	ExecutionStyleLimit           ExecutionStyle = "LIMIT"
 	ExecutionStyleMakerPostOnly   ExecutionStyle = "MAKER_POST_ONLY"
 	ExecutionStyleTakerAggressive ExecutionStyle = "TAKER_AGGRESSIVE"
-	ExecutionStyleAuto            ExecutionStyle = "AUTO"
 )
 
 type ExecutionPolicy struct {
@@ -62,6 +61,7 @@ type ExecutionPolicy struct {
 	CancelTimeoutMillis        int64          `json:"cancel_timeout_ms,omitempty"`
 	MaxFeatureAgeMillis        int64          `json:"max_feature_age_ms,omitempty"`
 	Style                      ExecutionStyle `json:"style,omitempty"`
+	MidPrice                   string         `json:"mid_price,omitempty"`
 	InitialPrice               string         `json:"initial_price,omitempty"`
 	MaxPrice                   string         `json:"max_price,omitempty"`
 	MinPrice                   string         `json:"min_price,omitempty"`
@@ -159,6 +159,7 @@ type ExecutionCancelRequest struct {
 	SchemaVersion string `json:"schema_version"`
 	IntentID      string `json:"intent_id"`
 	Reason        string `json:"reason,omitempty"`
+	Force         bool   `json:"force,omitempty"`
 }
 
 type CancelAckStatus string

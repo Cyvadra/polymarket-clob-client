@@ -5,7 +5,6 @@ package tactics
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
@@ -26,7 +25,6 @@ type Request struct {
 	Intent   protocol.ExecutionIntent
 	Quote    marketquotes.Snapshot
 	HasQuote bool
-	Now      time.Time
 }
 
 type Decision struct {
@@ -43,10 +41,7 @@ func Plan(request Request) Decision {
 	intent := request.Intent
 	policy := intent.Policy
 	style := policy.Style
-	if style == "" {
-		style = protocol.ExecutionStyleLimit
-	}
-	price, err := targetPrice(intent, request.Quote, request.HasQuote, request.Now)
+	price, err := targetPrice(intent, request.Quote, request.HasQuote)
 	if err != nil {
 		return Decision{Action: ActionWait, Reason: err.Error()}
 	}
@@ -57,53 +52,56 @@ func Plan(request Request) Decision {
 	return Decision{Action: ActionSubmitChild, NextSequence: 1, Price: decimal.FormatPrice(price), Shares: shares, PostOnly: postOnly(intent), TimeInForce: timeInForce(intent, style), Reason: "submit initial child"}
 }
 
-func targetPrice(intent protocol.ExecutionIntent, snapshot marketquotes.Snapshot, hasQuote bool, now time.Time) (float64, error) {
+func targetPrice(intent protocol.ExecutionIntent, snapshot marketquotes.Snapshot, hasQuote bool) (float64, error) {
 	policy := intent.Policy
 	style := policy.Style
-	if style == "" || style == protocol.ExecutionStyleLimit {
+	if style == protocol.ExecutionStyleLimit {
 		return parsePrice(intent.LimitPrice)
 	}
-	if !hasQuote {
-		return 0, fmt.Errorf("quote is required")
+	basePrice, err := baseSignalPrice(intent)
+	if err != nil {
+		return 0, err
 	}
-	if policy.QuoteMaxAgeMillis > 0 && now.Sub(snapshot.At) > time.Duration(policy.QuoteMaxAgeMillis)*time.Millisecond {
-		return 0, fmt.Errorf("quote is stale")
+	if style == protocol.ExecutionStyleTakerAggressive {
+		return takerPrice(intent, basePrice)
 	}
-	quote, ok := quoteForToken(snapshot, intent.TokenID)
-	if !ok {
-		return 0, fmt.Errorf("quote token mismatch")
-	}
-	if style == protocol.ExecutionStyleTakerAggressive || style == protocol.ExecutionStyleAuto {
-		return takerPrice(intent, quote)
-	}
-	return makerPrice(intent, quote)
+	return makerPrice(intent, snapshot, hasQuote, basePrice)
 }
 
-func makerPrice(intent protocol.ExecutionIntent, quote marketquotes.Quote) (float64, error) {
+func baseSignalPrice(intent protocol.ExecutionIntent) (float64, error) {
+	if intent.Policy.MidPrice != "" {
+		return parsePrice(intent.Policy.MidPrice)
+	}
+	if intent.Policy.InitialPrice != "" {
+		return parsePrice(intent.Policy.InitialPrice)
+	}
+	return parsePrice(intent.LimitPrice)
+}
+
+func makerPrice(intent protocol.ExecutionIntent, snapshot marketquotes.Snapshot, hasQuote bool, basePrice float64) (float64, error) {
 	policy := intent.Policy
 	offset := decimal.OptionalFloat(policy.QuoteOffset, 0)
 	step := decimal.OptionalFloat(policy.PriceStep, defaultTick)
 	if intent.Side == protocol.SideBuy {
-		price := quote.Bid + offset
-		if price >= quote.Ask {
+		price := basePrice - offset
+		if quote, ok := optionalQuoteForToken(snapshot, intent.TokenID, hasQuote, policy.QuoteMaxAgeMillis); ok && price >= quote.Ask {
 			price = quote.Ask - step
 		}
 		return clampBuy(intent, price)
 	}
-	price := quote.Ask - offset
-	if price <= quote.Bid {
+	price := basePrice + offset
+	if quote, ok := optionalQuoteForToken(snapshot, intent.TokenID, hasQuote, policy.QuoteMaxAgeMillis); ok && price <= quote.Bid {
 		price = quote.Bid + step
 	}
 	return clampSell(intent, price)
 }
 
-func takerPrice(intent protocol.ExecutionIntent, quote marketquotes.Quote) (float64, error) {
+func takerPrice(intent protocol.ExecutionIntent, basePrice float64) (float64, error) {
 	policy := intent.Policy
-	step := decimal.OptionalFloat(policy.PriceStep, defaultTick)
 	if intent.Side == protocol.SideBuy {
-		return clampBuy(intent, quote.Ask+step)
+		return clampBuy(intent, basePrice+decimal.OptionalFloat(policy.QuoteOffset, 0))
 	}
-	return clampSell(intent, quote.Bid-step)
+	return clampSell(intent, basePrice-decimal.OptionalFloat(policy.QuoteOffset, 0))
 }
 
 func clampBuy(intent protocol.ExecutionIntent, price float64) (float64, error) {
@@ -128,7 +126,10 @@ func clampSell(intent protocol.ExecutionIntent, price float64) (float64, error) 
 	return validClamped(price)
 }
 
-func quoteForToken(snapshot marketquotes.Snapshot, tokenID string) (marketquotes.Quote, bool) {
+func optionalQuoteForToken(snapshot marketquotes.Snapshot, tokenID string, hasQuote bool, maxAgeMillis int64) (marketquotes.Quote, bool) {
+	if !hasQuote {
+		return marketquotes.Quote{}, false
+	}
 	if strings.TrimSpace(snapshot.Up.AssetID) == strings.TrimSpace(tokenID) {
 		return snapshot.Up, true
 	}
@@ -139,7 +140,7 @@ func quoteForToken(snapshot marketquotes.Snapshot, tokenID string) (marketquotes
 }
 
 func timeInForce(intent protocol.ExecutionIntent, style protocol.ExecutionStyle) protocol.TimeInForce {
-	if style == protocol.ExecutionStyleTakerAggressive || style == protocol.ExecutionStyleAuto {
+	if style == protocol.ExecutionStyleTakerAggressive {
 		if intent.TimeInForce == protocol.TimeInForceGTC || intent.TimeInForce == "" {
 			return protocol.TimeInForceFAK
 		}

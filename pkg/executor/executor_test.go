@@ -520,7 +520,7 @@ func TestValidateIntentAcceptsMakerPostOnlyBuyWithinMaxPrice(t *testing.T) {
 	intent := testIntent()
 	intent.PostOnly = true
 	intent.Policy.Style = protocol.ExecutionStyleMakerPostOnly
-	intent.Policy.InitialPrice = "0.50"
+	intent.Policy.MidPrice = "0.50"
 	intent.Policy.MaxPrice = "0.55"
 	intent.Policy.PriceStep = "0.01"
 	intent.Policy.QuoteMaxAgeMillis = 500
@@ -534,6 +534,14 @@ func TestValidateIntentRejectsUnimplementedLifecyclePolicy(t *testing.T) {
 	intent.Policy.RepriceIntervalMillis = 250
 	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
 		t.Fatal("expected unimplemented lifecycle policy rejection")
+	}
+}
+
+func TestValidateIntentRequiresExplicitExecutionStyle(t *testing.T) {
+	intent := testIntent()
+	intent.Policy.Style = ""
+	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
+		t.Fatal("expected missing execution style rejection")
 	}
 }
 
@@ -554,7 +562,7 @@ func TestExecuteUsesPlannerForMakerPostOnlyOrder(t *testing.T) {
 	intent.TokenID = "up-token"
 	intent.LimitPrice = "0.41"
 	intent.Policy.Style = protocol.ExecutionStyleMakerPostOnly
-	intent.Policy.InitialPrice = "0.41"
+	intent.Policy.MidPrice = "0.44"
 	intent.Policy.MaxPrice = "0.55"
 	intent.Policy.PriceStep = "0.01"
 	intent.Policy.QuoteOffset = "0.01"
@@ -588,14 +596,15 @@ func TestExecuteUsesPlannerForTakerAggressiveOrder(t *testing.T) {
 	intent.LimitPrice = "0.41"
 	intent.TimeInForce = protocol.TimeInForceGTC
 	intent.Policy.Style = protocol.ExecutionStyleTakerAggressive
-	intent.Policy.InitialPrice = "0.41"
+	intent.Policy.MidPrice = "0.44"
 	intent.Policy.MaxPrice = "0.55"
 	intent.Policy.PriceStep = "0.01"
+	intent.Policy.QuoteOffset = "0.01"
 	intent.Policy.QuoteMaxAgeMillis = 500
 	if err := executor.Execute(context.Background(), intent); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if client.created.Price != 0.47 || client.created.OrderType != protocol.TimeInForceFAK || client.submittedType != protocol.TimeInForceFAK {
+	if client.created.Price != 0.45 || client.created.OrderType != protocol.TimeInForceFAK || client.submittedType != protocol.TimeInForceFAK {
 		t.Fatalf("expected planned taker order, created=%+v submittedType=%s", client.created, client.submittedType)
 	}
 }
@@ -603,7 +612,7 @@ func TestExecuteUsesPlannerForTakerAggressiveOrder(t *testing.T) {
 func TestValidateIntentRejectsBuyPolicyAboveMaxPrice(t *testing.T) {
 	intent := testIntent()
 	intent.Policy.Style = protocol.ExecutionStyleTakerAggressive
-	intent.Policy.InitialPrice = "0.60"
+	intent.Policy.MidPrice = "0.60"
 	intent.Policy.MaxPrice = "0.55"
 	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
 		t.Fatal("expected invalid buy policy")
@@ -614,7 +623,7 @@ func TestValidateIntentRejectsSellPolicyBelowMinPrice(t *testing.T) {
 	intent := testIntent()
 	intent.Side = protocol.SideSell
 	intent.Policy.Style = protocol.ExecutionStyleMakerPostOnly
-	intent.Policy.InitialPrice = "0.40"
+	intent.Policy.MidPrice = "0.40"
 	intent.Policy.MinPrice = "0.45"
 	if err := validateIntentAt(intent, time.Unix(10, 0).UTC()); err == nil {
 		t.Fatal("expected invalid sell policy")
@@ -622,7 +631,7 @@ func TestValidateIntentRejectsSellPolicyBelowMinPrice(t *testing.T) {
 }
 
 func testIntent() protocol.ExecutionIntent {
-	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
+	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000, Style: protocol.ExecutionStyleLimit}}
 }
 
 func testQuote(at time.Time) marketquotes.Snapshot {
