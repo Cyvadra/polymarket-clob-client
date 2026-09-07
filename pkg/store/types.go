@@ -57,7 +57,7 @@ type OrderIntentRecord struct {
 	TokenID            string
 	Outcome            string
 	Side               Side
-	TargetShares       string
+	TargetUSD          string
 	LimitPrice         string
 	TimeInForce        TimeInForce
 	PostOnly           bool

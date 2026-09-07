@@ -88,7 +88,7 @@ type ExecutionIntent struct {
 	TokenID            string          `json:"token_id"`
 	Outcome            string          `json:"outcome"`
 	Side               Side            `json:"side"`
-	TargetShares       string          `json:"target_shares"`
+	TargetUSD          string          `json:"target_usd"`
 	LimitPrice         string          `json:"limit_price"`
 	TimeInForce        TimeInForce     `json:"time_in_force"`
 	PostOnly           bool            `json:"post_only"`

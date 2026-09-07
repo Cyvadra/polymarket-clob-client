@@ -41,14 +41,14 @@ Subject tokens must not be empty or include the NATS wildcards `*` or `>`.
 
 Required fields are `schema_version`, `intent_id`, `idempotency_key`,
 `strategy`, `kind`, `condition_id`, `token_id`, `outcome`, `side`,
-`target_shares`, `limit_price`, and `time_in_force`. An intent also needs
+`target_usd`, `limit_price`, and `time_in_force`. An intent also needs
 either a future `expires_at` or a positive `policy.complete_within_ms`.
 
 | Field | Values and rules |
 | --- | --- |
 | `kind` | `OPEN` or `CLOSE`; `CLOSE` must use `SELL`. |
 | `side` | `BUY` or `SELL`. |
-| `target_shares` | Positive decimal string. |
+| `target_usd` | Positive decimal string. The program calculates shares from this amount and the order price. |
 | `limit_price` | Decimal string strictly between `0` and `1`. |
 | `time_in_force` | `GTC`, `FOK`, `FAK`, or `GTD`. |
 | `post_only` | Boolean passed to the CLOB order. |
@@ -90,7 +90,7 @@ Example:
   "token_id": "12345",
   "outcome": "Up",
   "side": "BUY",
-  "target_shares": "12.5",
+  "target_usd": "12.5",
   "limit_price": "0.42",
   "time_in_force": "GTC",
   "expires_at": "2026-09-04T12:05:00Z",
@@ -111,7 +111,7 @@ Maker post-only policy example accepted by validation and the tactic planner:
   "token_id": "12345",
   "outcome": "Up",
   "side": "BUY",
-  "target_shares": "12.5",
+  "target_usd": "12.5",
   "limit_price": "0.42",
   "time_in_force": "GTC",
   "post_only": true,

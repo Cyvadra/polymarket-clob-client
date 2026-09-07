@@ -46,15 +46,15 @@ func Plan(request Request) Decision {
 	if style == "" {
 		style = protocol.ExecutionStyleLimit
 	}
-	shares, err := decimal.PositiveFloat(intent.TargetShares)
-	if err != nil {
-		return fail("invalid shares")
-	}
 	price, err := targetPrice(intent, request.Quote, request.HasQuote, request.Now)
 	if err != nil {
 		return Decision{Action: ActionWait, Reason: err.Error()}
 	}
-	return Decision{Action: ActionSubmitChild, NextSequence: 1, Price: decimal.FormatPrice(price), Shares: decimal.FormatPrice(shares), PostOnly: postOnly(intent), TimeInForce: timeInForce(intent, style), Reason: "submit initial child"}
+	shares, ok := decimal.DivideAndRoundDown(intent.TargetUSD, decimal.FormatPrice(price), 4)
+	if !ok {
+		return fail("invalid target usd")
+	}
+	return Decision{Action: ActionSubmitChild, NextSequence: 1, Price: decimal.FormatPrice(price), Shares: shares, PostOnly: postOnly(intent), TimeInForce: timeInForce(intent, style), Reason: "submit initial child"}
 }
 
 func targetPrice(intent protocol.ExecutionIntent, snapshot marketquotes.Snapshot, hasQuote bool, now time.Time) (float64, error) {

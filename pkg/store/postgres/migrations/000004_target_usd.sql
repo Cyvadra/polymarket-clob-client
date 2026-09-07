@@ -1,0 +1,1 @@
+ALTER TABLE order_intents RENAME COLUMN target_shares TO target_usd;

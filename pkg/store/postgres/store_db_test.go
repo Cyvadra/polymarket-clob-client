@@ -39,7 +39,7 @@ func seedIntent(t *testing.T, s *Store, intentID string) {
 	_, err := s.InsertIntent(context.Background(), store.OrderIntentRecord{
 		IntentID: intentID, IdempotencyKey: intentID + "-key", Strategy: "test", Kind: store.IntentOpen,
 		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
-		TargetShares: "2", LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
+		TargetUSD: "1", LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
 	})
 	if err != nil {
 		t.Fatalf("seed intent: %v", err)

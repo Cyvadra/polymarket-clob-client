@@ -55,6 +55,26 @@ func TestPlanWaitsForFreshQuote(t *testing.T) {
 	}
 }
 
+func TestPlanRoundsSharesDownToFourDigits(t *testing.T) {
+	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleLimit)
+	intent.TargetUSD = "1"
+	intent.LimitPrice = "0.43"
+	decision := Plan(Request{Intent: intent})
+	if decision.Action != ActionSubmitChild || decision.Price != "0.43" || decision.Shares != "2.3255" {
+		t.Fatalf("expected rounded shares, got %+v", decision)
+	}
+}
+
+func TestPlanRejectsAmountBelowSharePrecision(t *testing.T) {
+	intent := tacticIntent(protocol.SideBuy, protocol.ExecutionStyleLimit)
+	intent.TargetUSD = "0.00001"
+	intent.LimitPrice = "0.99"
+	decision := Plan(Request{Intent: intent})
+	if decision.Action != ActionFail || decision.Reason != "invalid target usd" {
+		t.Fatalf("expected invalid target usd, got %+v", decision)
+	}
+}
+
 func tacticIntent(side protocol.Side, style protocol.ExecutionStyle) protocol.ExecutionIntent {
 	minPrice := "0.35"
 	maxPrice := "0.55"
@@ -63,7 +83,7 @@ func tacticIntent(side protocol.Side, style protocol.ExecutionStyle) protocol.Ex
 	} else {
 		minPrice = ""
 	}
-	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", ConditionID: "condition", TokenID: "up-token", Outcome: "Up", Side: side, TargetShares: "2", LimitPrice: "0.41", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{Style: style, InitialPrice: "0.41", MaxPrice: maxPrice, MinPrice: minPrice, PriceStep: "0.01", QuoteOffset: "0.01", QuoteMaxAgeMillis: 500}}
+	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", ConditionID: "condition", TokenID: "up-token", Outcome: "Up", Side: side, TargetUSD: "0.82", LimitPrice: "0.41", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{Style: style, InitialPrice: "0.41", MaxPrice: maxPrice, MinPrice: minPrice, PriceStep: "0.01", QuoteOffset: "0.01", QuoteMaxAgeMillis: 500}}
 }
 
 func tacticQuote(at time.Time) marketquotes.Snapshot {

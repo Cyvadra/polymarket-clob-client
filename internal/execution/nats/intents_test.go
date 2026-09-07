@@ -95,7 +95,7 @@ func TestSubscribeIntentsDecodesAndExecutes(t *testing.T) {
 	if subscriber.subject != protocol.SubjectStrategyExecutionIntent || subscriber.handler == nil {
 		t.Fatalf("subscription=%+v", subscriber)
 	}
-	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
+	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -116,7 +116,7 @@ func TestSubscribeIntentsAcknowledgesDecodableInvalidIntent(t *testing.T) {
 	if err := SubscribeIntents(subscriber, execution); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
+	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

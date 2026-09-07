@@ -132,7 +132,7 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 	commandTag, err := s.pool.Exec(ctx, `
 		INSERT INTO order_intents (
 			intent_id, idempotency_key, strategy, kind, market_id, event_slug, condition_id,
-			token_id, outcome, side, target_shares, limit_price,
+			token_id, outcome, side, target_usd, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
 		) VALUES (
@@ -143,7 +143,7 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 		)
 		ON CONFLICT (intent_id) DO NOTHING
 	`, record.IntentID, record.IdempotencyKey, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
-		record.TokenID, record.Outcome, record.Side, record.TargetShares, record.LimitPrice,
+		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt)
 	if err != nil {
@@ -161,7 +161,7 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 	}
 	row := s.pool.QueryRow(ctx, `
 		SELECT intent_id, idempotency_key, strategy, kind, market_id, event_slug, condition_id,
-			token_id, outcome, side, target_shares::text, limit_price::text,
+			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
 		FROM order_intents
@@ -793,7 +793,7 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	var policy []byte
 	err := row.Scan(
 		&record.IntentID, &record.IdempotencyKey, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
-		&record.TokenID, &record.Outcome, &record.Side, &record.TargetShares, &record.LimitPrice,
+		&record.TokenID, &record.Outcome, &record.Side, &record.TargetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &record.FeatureCompletedAt, &record.ExpiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,
 	)

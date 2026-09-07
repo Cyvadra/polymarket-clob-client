@@ -87,6 +87,23 @@ func MulString(left, right string) (string, bool) {
 	return new(big.Rat).Mul(leftRat, rightRat).FloatString(scale), true
 }
 
+func DivideAndRoundDown(numerator, denominator string, digits int) (string, bool) {
+	left, leftOK := Rat(numerator)
+	right, rightOK := Rat(denominator)
+	if !leftOK || !rightOK || right.Sign() <= 0 || digits < 0 {
+		return "", false
+	}
+	scaleRat := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil)
+	quotient := new(big.Rat).Quo(left, right)
+	quotient.Mul(quotient, new(big.Rat).SetInt(scaleRat))
+	units := new(big.Int).Quo(quotient.Num(), quotient.Denom())
+	if units.Sign() <= 0 {
+		return "", false
+	}
+	result := new(big.Rat).SetFrac(units, scaleRat)
+	return result.FloatString(digits), true
+}
+
 func FormatPrice(value float64) string {
 	return strconv.FormatFloat(math.Round(value*1e6)/1e6, 'f', -1, 64)
 }

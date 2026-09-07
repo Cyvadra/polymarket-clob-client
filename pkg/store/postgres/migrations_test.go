@@ -10,8 +10,8 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-	if len(migrations) != 3 {
-		t.Fatalf("expected three migrations, got %d", len(migrations))
+	if len(migrations) != 4 {
+		t.Fatalf("expected four migrations, got %d", len(migrations))
 	}
 	if migrations[0].Name != "000001_execution_state.sql" {
 		t.Fatalf("unexpected migration name %q", migrations[0].Name)
@@ -38,5 +38,8 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	}
 	if migrations[2].Name != "000003_active_sell_reservation.sql" || !strings.Contains(migrations[2].SQL, "reservations_one_active_sell_idx") {
 		t.Fatalf("unexpected active sell reservation migration: %+v", migrations[2])
+	}
+	if migrations[3].Name != "000004_target_usd.sql" || !strings.Contains(migrations[3].SQL, "RENAME COLUMN target_shares TO target_usd") {
+		t.Fatalf("unexpected target usd migration: %+v", migrations[3])
 	}
 }

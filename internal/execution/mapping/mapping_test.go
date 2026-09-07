@@ -80,7 +80,7 @@ func TestIntentRecordRoundTrip(t *testing.T) {
 		TokenID:        "token",
 		Outcome:        "Up",
 		Side:           protocol.SideBuy,
-		TargetShares:   "1.5",
+		TargetUSD:      "1.5",
 		LimitPrice:     "0.5",
 		TimeInForce:    protocol.TimeInForceGTC,
 		Policy:         protocol.ExecutionPolicy{CompleteWithinMillis: 60_000},
@@ -95,7 +95,7 @@ func TestIntentRecordRoundTrip(t *testing.T) {
 		t.Fatal("expected serialized policy")
 	}
 	round := ExecutionIntent(record)
-	if round.Policy.CompleteWithinMillis != 60_000 || round.Side != protocol.SideBuy || round.TargetShares != "1.5" {
+	if round.Policy.CompleteWithinMillis != 60_000 || round.Side != protocol.SideBuy || round.TargetUSD != "1.5" {
 		t.Fatalf("round trip mismatch: %+v", round)
 	}
 	if !SameIntent(intent, record) {

@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS order_intents (
     token_id TEXT NOT NULL,
     outcome TEXT NOT NULL,
     side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
-    target_shares NUMERIC(38, 18) NOT NULL CHECK (target_shares > 0),
+    target_usd NUMERIC(38, 18) NOT NULL CHECK (target_usd > 0),
     limit_price NUMERIC(38, 18) NOT NULL CHECK (limit_price > 0 AND limit_price < 1),
     time_in_force TEXT NOT NULL,
     post_only BOOLEAN NOT NULL DEFAULT FALSE,

@@ -29,9 +29,9 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.Side != protocol.SideBuy && intent.Side != protocol.SideSell {
 		return fmt.Errorf("invalid side %q", intent.Side)
 	}
-	shares, err := decimal.PositiveFloat(intent.TargetShares)
-	if err != nil || shares <= 0 {
-		return fmt.Errorf("invalid target shares: %w", err)
+	usd, err := decimal.PositiveFloat(intent.TargetUSD)
+	if err != nil || usd <= 0 {
+		return fmt.Errorf("invalid target usd: %w", err)
 	}
 	price, err := decimal.Price(intent.LimitPrice)
 	if err != nil {
@@ -165,7 +165,7 @@ func reservationID(intentID string, childSequence int) string {
 }
 
 func userOrder(intent protocol.ExecutionIntent, child plannedChild) (clobclient.UserOrder, error) {
-	shares, err := decimal.Float(child.Shares)
+	shares, err := decimal.PositiveFloat(child.Shares)
 	if err != nil || shares <= 0 {
 		return clobclient.UserOrder{}, fmt.Errorf("invalid planned shares %q", child.Shares)
 	}

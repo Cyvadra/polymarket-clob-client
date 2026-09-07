@@ -38,13 +38,13 @@ func TestPositionFeatureEmptyPositionUsesNullEntryFields(t *testing.T) {
 }
 
 func TestExecutionIntentKeepsDecimalValuesAsStrings(t *testing.T) {
-	intent := ExecutionIntent{Kind: IntentOpen, SchemaVersion: SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "strategy:condition:token:1", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetShares: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
+	intent := ExecutionIntent{Kind: IntentOpen, SchemaVersion: SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "strategy:condition:token:1", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetUSD: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal execution intent: %v", err)
 	}
 	body := string(payload)
-	if !strings.Contains(body, `"target_shares":"12.3456"`) || !strings.Contains(body, `"limit_price":"0.42"`) {
+	if !strings.Contains(body, `"target_usd":"12.3456"`) || !strings.Contains(body, `"limit_price":"0.42"`) {
 		t.Fatalf("expected decimal strings in payload, got %s", body)
 	}
 }

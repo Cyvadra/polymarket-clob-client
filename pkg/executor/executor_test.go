@@ -565,7 +565,7 @@ func TestExecuteUsesPlannerForMakerPostOnlyOrder(t *testing.T) {
 	if client.created.Price != 0.43 || !client.created.PostOnly || client.submittedType != protocol.TimeInForceGTC || !client.submittedPostOnly {
 		t.Fatalf("expected planned maker order, created=%+v submittedType=%s submittedPostOnly=%v", client.created, client.submittedType, client.submittedPostOnly)
 	}
-	if storer.order.Price != "0.43" || !storer.order.PostOnly || storer.reservations[0].Shares != "2" || storer.reservations[0].Notional != "0.860000000000000000" {
+	if storer.order.Price != "0.43" || !storer.order.PostOnly || storer.reservations[0].Shares != "2.3255" || storer.reservations[0].Notional != "0.999965000000000000" {
 		t.Fatalf("expected planned order persistence, order=%+v reservations=%+v", storer.order, storer.reservations)
 	}
 }
@@ -622,7 +622,7 @@ func TestValidateIntentRejectsSellPolicyBelowMinPrice(t *testing.T) {
 }
 
 func testIntent() protocol.ExecutionIntent {
-	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetShares: "2", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
+	return protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "key-1", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 60_000}}
 }
 
 func testQuote(at time.Time) marketquotes.Snapshot {

@@ -27,7 +27,7 @@ func IntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 	return store.OrderIntentRecord{
 		IntentID: intent.IntentID, IdempotencyKey: intent.IdempotencyKey, Strategy: intent.Strategy, MarketID: intent.MarketID,
 		Kind: store.IntentKind(intent.Kind), EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
-		Side: store.Side(intent.Side), TargetShares: intent.TargetShares, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
+		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
 		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
 		Status: statemachine.StateIntentReceived, Policy: policy, CreatedAt: now, UpdatedAt: now,
 	}
@@ -43,7 +43,7 @@ func ExecutionIntent(record store.OrderIntentRecord) protocol.ExecutionIntent {
 		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, IdempotencyKey: record.IdempotencyKey, Strategy: record.Strategy,
 		Kind: protocol.IntentKind(record.Kind), MarketID: record.MarketID, EventSlug: record.EventSlug,
 		ConditionID: record.ConditionID, TokenID: record.TokenID, Outcome: record.Outcome, Side: protocol.Side(record.Side),
-		TargetShares: record.TargetShares, LimitPrice: record.LimitPrice, TimeInForce: protocol.TimeInForce(record.TimeInForce),
+		TargetUSD: record.TargetUSD, LimitPrice: record.LimitPrice, TimeInForce: protocol.TimeInForce(record.TimeInForce),
 		PostOnly: record.PostOnly, FeatureSeq: record.FeatureSeq, FeatureCompletedAt: record.FeatureCompletedAt,
 		ExpiresAt: record.ExpiresAt, Policy: policy,
 	}
@@ -56,7 +56,7 @@ func SameIntent(intent protocol.ExecutionIntent, record store.OrderIntentRecord)
 	if intent.IntentID != record.IntentID || intent.IdempotencyKey != record.IdempotencyKey || intent.Strategy != record.Strategy ||
 		intent.Kind != protocol.IntentKind(record.Kind) || intent.MarketID != record.MarketID || intent.EventSlug != record.EventSlug ||
 		intent.ConditionID != record.ConditionID || intent.TokenID != record.TokenID || intent.Outcome != record.Outcome ||
-		intent.Side != protocol.Side(record.Side) || !SameDecimal(intent.TargetShares, record.TargetShares) || !SameDecimal(intent.LimitPrice, record.LimitPrice) ||
+		intent.Side != protocol.Side(record.Side) || !SameDecimal(intent.TargetUSD, record.TargetUSD) || !SameDecimal(intent.LimitPrice, record.LimitPrice) ||
 		intent.TimeInForce != protocol.TimeInForce(record.TimeInForce) || intent.PostOnly != record.PostOnly || intent.FeatureSeq != record.FeatureSeq ||
 		!intent.FeatureCompletedAt.Equal(record.FeatureCompletedAt) || !intent.ExpiresAt.Equal(record.ExpiresAt) {
 		return false
