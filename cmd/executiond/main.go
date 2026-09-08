@@ -128,13 +128,13 @@ func run() error {
 	orders.SetEventPublisher(bus)
 	repair.SetEventPublisher(bus)
 
-	if err := nats.SubscribeIntents(bus, execution); err != nil {
+	if err := nats.SubscribeOpen(bus, execution); err != nil {
 		return err
 	}
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {
 		return err
 	}
-	if err := nats.SubscribeCancel(bus, execution); err != nil {
+	if err := nats.SubscribeClose(bus, execution); err != nil {
 		return err
 	}
 	if err := nats.SubscribePositionQuery(bus, store, time.Now); err != nil {

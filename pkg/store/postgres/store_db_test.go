@@ -37,7 +37,7 @@ func testStore(t *testing.T) *Store {
 func seedIntent(t *testing.T, s *Store, intentID string) {
 	t.Helper()
 	_, err := s.InsertIntent(context.Background(), store.OrderIntentRecord{
-		IntentID: intentID, IdempotencyKey: intentID + "-key", Strategy: "test", Kind: store.IntentOpen,
+		IntentID: intentID, Strategy: "test", Kind: store.IntentOpen,
 		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
 		TargetUSD: "1", LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
 	})

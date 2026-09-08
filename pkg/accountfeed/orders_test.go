@@ -19,16 +19,15 @@ type fakeOrderStore struct {
 }
 
 type recordedPublisher struct {
-	acks []protocol.ExecutionIntentAck
+	results []protocol.ExecutionOpenResult
 }
 
 func (p *recordedPublisher) PublishJSON(subject string, value any) error {
-	if subject != protocol.SubjectExecutionIntentAck {
+	if subject != protocol.SubjectExecutionOpenResult {
 		return nil
 	}
-	ack, ok := value.(protocol.ExecutionIntentAck)
-	if ok {
-		p.acks = append(p.acks, ack)
+	if result, ok := value.(protocol.ExecutionOpenResult); ok {
+		p.results = append(p.results, result)
 	}
 	return nil
 }
@@ -47,19 +46,26 @@ func (s *fakeOrderStore) TransitionOrder(_ context.Context, order store.SignedOr
 	s.updated = transition.To
 	s.matchedShares = matchedShares
 	s.observedEvents = append(s.observedEvents, event)
-	s.order.State = transition.To
-	s.order.Revision = order.Revision + 1
-	s.order.MatchedShares = matchedShares
+	order.State = transition.To
+	order.Revision++
+	order.MatchedShares = matchedShares
 	if exchangeOrderID != "" {
-		s.order.ExchangeOrderID = exchangeOrderID
+		order.ExchangeOrderID = exchangeOrderID
 	}
-	return s.order, nil
+	s.order = order
+	return order, nil
 }
 func (s *fakeOrderStore) OrderByExchangeID(_ context.Context, exchangeOrderID string) (store.SignedOrderRecord, error) {
 	if exchangeOrderID != s.order.ExchangeOrderID {
 		return store.SignedOrderRecord{}, store.ErrNotFound
 	}
 	return s.order, nil
+}
+func (s *fakeOrderStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	if s.order.IntentID == intentID {
+		return store.OrderIntentRecord{IntentID: intentID, Kind: store.IntentOpen}, nil
+	}
+	return store.OrderIntentRecord{}, store.ErrNotFound
 }
 
 func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
@@ -68,8 +74,7 @@ func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
 	}
-	err = consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1.25"})
-	if err != nil {
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1.25"}); err != nil {
 		t.Fatalf("consume order event: %v", err)
 	}
 	if repository.updated != statemachine.StateCanceled {
@@ -80,50 +85,56 @@ func TestOrderConsumerTransitionsKnownOrder(t *testing.T) {
 	}
 }
 
-func TestPublishTerminalAckCanceledWithoutFillIsExpired(t *testing.T) {
-	for _, matchedShares := range []string{"0", "0.000000000000000000"} {
-		publisher := &recordedPublisher{}
-		order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: matchedShares}
-		if err := PublishTerminalAck(publisher, order, "canceled", time.Unix(1, 0)); err != nil {
-			t.Fatalf("publish ack: %v", err)
-		}
-		if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentExpired {
-			t.Fatalf("expected expired ack for %q, got %+v", matchedShares, publisher.acks)
-		}
+func TestPublishTerminalResultCanceledWithoutFillIsFailed(t *testing.T) {
+	publisher := &recordedPublisher{}
+	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "0"}
+	if err := PublishTerminalResult(publisher, intent, order, "canceled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish result: %v", err)
+	}
+	if len(publisher.results) != 1 || publisher.results[0].Status != protocol.ResultFailed {
+		t.Fatalf("expected failed result, got %+v", publisher.results)
 	}
 }
 
-func TestPublishTerminalAckCanceledWithFillIsPartial(t *testing.T) {
+func TestPublishTerminalResultCanceledWithFillIsSuccess(t *testing.T) {
 	publisher := &recordedPublisher{}
+	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
 	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "1.25"}
-	if err := PublishTerminalAck(publisher, order, "canceled", time.Unix(1, 0)); err != nil {
-		t.Fatalf("publish ack: %v", err)
+	if err := PublishTerminalResult(publisher, intent, order, "canceled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish result: %v", err)
 	}
-	if len(publisher.acks) != 1 || publisher.acks[0].Status != protocol.IntentPartial {
-		t.Fatalf("expected partial ack, got %+v", publisher.acks)
+	if len(publisher.results) != 1 || publisher.results[0].Status != protocol.ResultSucceeded {
+		t.Fatalf("expected success result, got %+v", publisher.results)
 	}
 }
 
-// The strategy never asked for an internal child such as a force-close exit,
-// so its outcome must not be reported as the intent's outcome.
-func TestPublishTerminalAckSkipsInternalChildren(t *testing.T) {
+func TestPublishTerminalResultSkipsInternalChildren(t *testing.T) {
 	publisher := &recordedPublisher{}
+	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
 	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}
-	if err := PublishTerminalAck(publisher, order, "filled", time.Unix(1, 0)); err != nil {
-		t.Fatalf("publish ack: %v", err)
+	if err := PublishTerminalResult(publisher, intent, order, "filled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish result: %v", err)
 	}
-	if len(publisher.acks) != 0 {
-		t.Fatalf("expected no intent ack for an internal child, got %+v", publisher.acks)
+	if len(publisher.results) != 0 {
+		t.Fatalf("expected no result for internal child, got %+v", publisher.results)
 	}
 }
 
-// A FAK cannot rest, so a partial match ends it. Leaving it partially filled
-// would hold its sell reservation open and block every later sell on the token.
+func TestPublishTerminalResultSkipsCloseIntents(t *testing.T) {
+	publisher := &recordedPublisher{}
+	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateFilled, MatchedShares: "2"}
+	if err := PublishTerminalResult(publisher, intent, order, "filled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish result: %v", err)
+	}
+	if len(publisher.results) != 0 {
+		t.Fatalf("expected no open result for a close intent, got %+v", publisher.results)
+	}
+}
+
 func TestOrderConsumerClosesPartiallyMatchedImmediateOrder(t *testing.T) {
-	repository := &fakeOrderStore{order: store.SignedOrderRecord{
-		IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1",
-		State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceFAK,
-	}}
+	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceFAK}}
 	consumer, err := NewOrderConsumer(repository, time.Now)
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
@@ -136,12 +147,8 @@ func TestOrderConsumerClosesPartiallyMatchedImmediateOrder(t *testing.T) {
 	}
 }
 
-// A resting order with the same observation is still working.
 func TestOrderConsumerKeepsPartiallyMatchedRestingOrderOpen(t *testing.T) {
-	repository := &fakeOrderStore{order: store.SignedOrderRecord{
-		IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1",
-		State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceGTC,
-	}}
+	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceGTC}}
 	consumer, err := NewOrderConsumer(repository, time.Now)
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)

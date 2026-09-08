@@ -1,124 +1,80 @@
 # executiond NATS Protocol v1
 
-`executiond` uses core NATS. The protocol version is `execution.v1` and all
-messages on the subjects below are JSON objects. Senders should include
-`schema_version`; receivers currently accept an omitted version only for the
-authenticated CLOB user-stream adapter, never as a strategy integration rule.
+`executiond` uses core NATS. Messages are JSON and use `schema_version: "execution.v1"` unless noted otherwise.
 
-## Delivery and deployment
+## Delivery
 
-- Intents use ordinary core-NATS publish/subscribe and are at-most-once. There
-  is no durable consumer, replay, or transport acknowledgement.
-- Run one `executiond` instance per wallet. Core NATS subscriptions are not a
-  queue group, so more than one instance receives the same intent.
-- A decodable intent with a non-empty `intent_id` always receives a rejection
-  acknowledgement when validation fails. Malformed JSON with no usable ID can
-  only be logged.
-- Published acknowledgements, order events, and position features are
-  best-effort. Strategies must tolerate a missing event and use their own
-  deadline for the at-most-once intent decision.
-- On startup and each reconciliation tick, `executiond` replays account trades
-  from CLOB REST through the same idempotent fill path as the user stream.
-  This repairs fills missed during WebSocket disconnects when CLOB REST exposes
-  the trade. A settled fill reaches the store once per process.
-- An order that cannot rest on the book (`FOK` or `FAK`) is terminal as soon as
-  the exchange reports a match: whatever was not matched is gone, so a partial
-  match closes the child and releases its reservation rather than leaving it
-  open forever.
+- Strategy commands are at-most-once.
+- `executiond` publishes order events and results best-effort.
+- One `executiond` instance should manage one wallet.
 
 ## Subjects
 
 | Subject | Direction | Payload | Meaning |
 | --- | --- | --- | --- |
-| `strategy.execution.intent` | strategy -> executiond | `ExecutionIntent` | Submit one order intent. |
-| `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Latest condition quote snapshot cached for execution tactics. |
-| `execution.intent.ack` | executiond -> strategy | `ExecutionIntentAck` | Validation, submission, or terminal outcome. |
-| `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition observed by executiond. |
-| `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest best-effort position snapshot. |
-| `strategy.execution.cancel` | strategy -> executiond | `ExecutionCancelRequest` | Cancel an intent and force close its token position. |
-| `execution.cancel.ack` | executiond -> strategy | `ExecutionCancelAck` | Terminal outcome of a cancel command. |
-| `strategy.execution.position.query` | strategy -> executiond (request/reply) | `PositionQueryRequest` | Query current positions; the reply is published on the request's reply subject. |
+| `strategy.execution.open` | strategy -> executiond | `ExecutionOpenRequest` | Submit one open order request. |
+| `execution.open.result` | executiond -> strategy | `ExecutionOpenResult` | Success or failure for an open request. |
+| `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | Close current position using limit-close or force-close mode. |
+| `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | Success or failure for a close request. |
+| `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition. |
+| `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Cached quote snapshot for tactics. |
+| `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest position snapshot. |
+| `strategy.execution.position.query` | strategy -> executiond (request/reply) | `PositionQueryRequest` | Query positions by condition or market. |
 
-Subject tokens must not be empty or include the NATS wildcards `*` or `>`.
+Subject tokens must not be empty or include `*` or `>`.
 
-## ExecutionIntent
+`execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
 
-Required fields are `schema_version`, `intent_id`, `idempotency_key`,
-`strategy`, `kind`, `condition_id`, `token_id`, `outcome`, `side`,
-`limit_price`, and `time_in_force`. An intent also needs either a future
-`expires_at` or a positive `policy.complete_within_ms`.
+## ExecutionOpenRequest
 
-`target_usd` is the only intent sizing field. A `SELL` or `CLOSE` resolves its
-share quantity from the current position record; a `CLOSE` uses the position's
-`actual_shares` and sells the whole available position. This keeps the intent
-contract independent from the accounting representation of a holding.
+Required fields are `schema_version`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. Signals are delivered at most once and never replayed, so no client-supplied idempotency key is required; executiond assigns each execution a server-side identity.
 
-| Field | Values and rules |
+| Field | Rules |
 | --- | --- |
-| `kind` | `OPEN` or `CLOSE`; `CLOSE` must use `SELL`. |
 | `side` | `BUY` or `SELL`. |
-| `target_usd` | Positive decimal string. Shares are derived from it and the planned price for all ordinary intents; `CLOSE` uses the current position's actual shares. |
-| `limit_price` | Decimal string strictly between `0` and `1`. |
-| `time_in_force` | `GTC`, `FOK`, `FAK`, or `GTD`. |
-| `post_only` | Boolean passed to the CLOB order. |
-| `policy.style` | Required: `LIMIT`, `MAKER_POST_ONLY`, or `TAKER_AGGRESSIVE`. The strategy must explicitly choose one. |
-| `policy.complete_within_ms` | Optional positive execution deadline. |
-| `policy.cancel_timeout_ms` | Optional cancellation timeout. |
-| `policy.max_feature_age_ms` | Optional maximum age of `feature_completed_at`. |
-| `policy.mid_price` | Optional decimal string used as the tactic signal price; takes priority over `initial_price`. |
-| `policy.initial_price` | Optional decimal string used by tactic planning; defaults to `limit_price`. |
-| `policy.max_price` | Required for advanced `BUY` tactics; hard ceiling for automatic repricing. |
-| `policy.min_price` | Required for advanced `SELL` tactics; hard floor for automatic repricing. |
-| `policy.price_step` | Optional decimal string for tactic price increments; defaults to the market tick size. |
-| `policy.quote_offset` | Optional decimal string offset from best bid/ask for maker planning. |
-| `policy.reprice_interval_ms` | Not implemented; non-zero values are rejected. |
-| `policy.max_reprices` | Not implemented; non-zero values are rejected. |
-| `policy.quote_max_age_ms` | Optional maximum age for quote snapshots. A snapshot older than this is ignored and planning falls back to the signal price. |
-| `policy.post_only_cross_retry` | Not implemented; true is rejected. |
-| `policy.soft_close_after_ms` | Not implemented; non-zero values are rejected. |
-| `policy.force_close_after_ms` | Not implemented; non-zero values are rejected. |
-| `policy.cancel_replace_timeout_ms` | Not implemented; non-zero values are rejected. |
+| `policy.style` | `LIMIT`, `MAKER_POST_ONLY`, or `TAKER_AGGRESSIVE`. |
+| `policy.quote_max_age_ms` | Optional freshness bound for quotes. |
+| `policy.reprice_interval_ms` | Reserved; non-zero rejected. |
+| `policy.max_reprices` | Reserved; non-zero rejected. |
+| `policy.soft_close_after_ms` | Reserved; non-zero rejected. |
+| `policy.force_close_after_ms` | Reserved; non-zero rejected. |
+| `policy.cancel_replace_timeout_ms` | Reserved; non-zero rejected. |
 
-### Prices and sizes are adjusted to what the exchange accepts
+Prices are aligned to tick size before signing. Share sizes are floored to exchange precision.
 
-`executiond` aligns every planned price onto the market tick grid before
-signing, rounding toward the passive side (down for a `BUY`, up for a `SELL`).
-A `mid_price` or offset that lands between ticks is therefore honored rather
-than rejected. If tick alignment would push the price past `max_price` or
-`min_price`, the intent is rejected with `UNPLANNABLE`.
+## ExecutionCloseRequest
 
-Share counts are floored to the precision the exchange encodes: four decimal
-places for an immediate `BUY` (`FOK`/`FAK`), two decimal places otherwise. A
-size that floors to zero is rejected with `UNPLANNABLE`.
+Close requests operate on `condition_id + asset_id` rather than an intent ID.
 
-### Reason codes
+| Field | Rules |
+| --- | --- |
+| `schema_version` | Required, `execution.v1`. |
+| `mode` | `LIMIT_CLOSE` or `FORCE_CLOSE`. |
+| `limit_price` | Required for `LIMIT_CLOSE`. |
+| `asset_id` | The token/asset being closed. |
 
-`execution.intent.ack` carries `reason_code` from a fixed set:
-`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`,
-`DUPLICATE_INTENT`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`,
-`EXPOSURE_LIMIT`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
-Validation rejections carry the specific failure in `reason`.
+`LIMIT_CLOSE` submits a normal sell close. `FORCE_CLOSE` submits a `SELL 0.01 FAK` exit for the remaining position.
 
-`EXPOSURE_LIMIT` is returned when a `BUY` would push total open BUY notional
-past `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD`. The cap is unset by default.
+## Results
 
-`intent_id` is the durable idempotency identity. Reusing it resumes a signed
-order if necessary and does not create a second child order in the current
-runtime. Quote snapshots are used to plan the initial child order price, post-only flag, and
-time-in-force for `MAKER_POST_ONLY` and `TAKER_AGGRESSIVE` styles. The
-live executor still creates one child order only. It does not yet perform
-cancel-replace, post-only crossing retry, price-drift repricing after submit, or
-soft/force-close lifecycle execution; policy fields for those behaviors are rejected.
+Open and close results identify the affected position (`condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key. They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields.
 
-Example:
+Open results are emitted **only at terminal resolution** of an open — when the child order reaches a fill (any amount counts as success, including a partial fill) or is cancelled without any fill (failure). executiond never publishes an open `SUCCEEDED` merely because a resting order was accepted, so a success always means shares were actually bought. `filled_shares` is populated on terminal open results.
+
+Close results report *dispatch*: `FORCE_CLOSE` reports `SUCCEEDED` once the 0.01 FAK exit is submitted (best effort — success even if the sell never fills), and `LIMIT_CLOSE` reports success once the limit sell is submitted.
+
+`average_price` is currently reserved and not populated on either result; the authoritative entry/exit price is conveyed on `position.features.*`.
+
+## Reason codes
+
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
+
+## Examples
 
 ```json
 {
   "schema_version": "execution.v1",
-  "intent_id": "late-gap:condition:up:42",
-  "idempotency_key": "late-gap:condition:up:42",
   "strategy": "late-gap",
-  "kind": "OPEN",
   "condition_id": "0xcondition",
   "token_id": "12345",
   "outcome": "Up",
@@ -131,181 +87,13 @@ Example:
 }
 ```
 
-Maker post-only policy example accepted by validation and the tactic planner:
-
 ```json
 {
   "schema_version": "execution.v1",
-  "intent_id": "late-gap:condition:up:43",
-  "idempotency_key": "late-gap:condition:up:43",
   "strategy": "late-gap",
-  "kind": "OPEN",
   "condition_id": "0xcondition",
-  "token_id": "12345",
+  "asset_id": "12345",
   "outcome": "Up",
-  "side": "BUY",
-  "target_usd": "12.5",
-  "limit_price": "0.42",
-  "time_in_force": "GTC",
-  "post_only": true,
-  "expires_at": "2026-09-04T12:05:00Z",
-  "policy": {
-    "style": "MAKER_POST_ONLY",
-    "initial_price": "0.42",
-    "max_price": "0.48",
-    "price_step": "0.01",
-    "quote_offset": "0.01",
-    "quote_max_age_ms": 500
-  }
+  "mode": "FORCE_CLOSE"
 }
 ```
-
-Lifecycle controls such as `reprice_interval_ms`, `max_reprices`,
-`post_only_cross_retry`, `soft_close_after_ms`, `force_close_after_ms`, and
-`cancel_replace_timeout_ms` are reserved for later cancel-replace execution and
-are currently rejected with `UNIMPLEMENTED_POLICY` when non-zero or true.
-
-Closing example. `CLOSE` uses the current position's actual shares:
-
-```json
-{
-  "schema_version": "execution.v1",
-  "intent_id": "late-gap:condition:up:44",
-  "idempotency_key": "late-gap:condition:up:44",
-  "strategy": "late-gap",
-  "kind": "CLOSE",
-  "condition_id": "0xcondition",
-  "token_id": "12345",
-  "outcome": "Up",
-  "side": "SELL",
-  "limit_price": "0.55",
-  "time_in_force": "GTC",
-  "expires_at": "2026-09-04T12:05:00Z",
-  "policy": { "style": "LIMIT", "min_price": "0.50", "complete_within_ms": 30000 }
-}
-```
-
-## ExecutionCancelRequest
-
-Cancels an intent by abandoning its position. The strategy sends one cancel per
-intent it wants to stop managing.
-
-| Field | Values and rules |
-| --- | --- |
-| `schema_version` | Required, `execution.v1`. |
-| `intent_id` | Required. The intent to cancel. |
-| `reason` | Optional free-form reason surfaced in the acknowledgement. |
-| `force` | Optional boolean. When true, executiond performs the current internal `SELL 0.01 FAK` force-close path after canceling the open child. When false or omitted, executiond cancels the live child and preserves the remaining position for settlement. |
-
-Cancel handling is idempotent and atomic per `intent_id`:
-
-- Any still-open strategy-facing child order of the intent is canceled on the
-  CLOB. A child that was persisted but never submitted is marked canceled
-  before submission instead of being recovered and sent.
-- If `force=true` and the intent opened a position, `executiond` force closes
-  the **whole remaining available position** for the intent's
-  `condition_id`/`token_id` by submitting an internal `0.01 SELL FAK` child of
-  the same intent. The forced sell is never an `execution.intent.ack`; it is
-  reported through `execution.cancel.ack` and the normal order-event/
-  position-feature stream.
-- If `force=false` or the field is omitted, `executiond` cancels the open
-  strategy-facing child and preserves the remaining position for settlement.
-- A repeated cancel for an intent whose force-close child already exists does
-  nothing further: an unfilled forced close is deliberately not retried.
-
-### Forced-close terminal semantics
-
-A forced `0.01 SELL FAK` is terminal for strategy tracking as soon as it is
-dispatched. If it does not fill (for example because there is no bid at `0.01`
-near event end), `executiond` treats it as done from the strategy's point of
-view: the sell reservation is released through the normal terminal order path,
-no further exit is attempted, and any leftover shares await market settlement.
-`executiond` does not mark the position with a durable "closed" flag; position
-snapshots keep reflecting the current durable state. Strategies that sent the
-cancel are expected to stop managing the token after the terminal
-`execution.cancel.ack` and ignore any later position frame for it.
-
-If the token already has another active sell (a competing sell reservation),
-the forced sell is skipped and the acknowledgement reports
-`ACTIVE_SELL_RESERVATION`; the in-flight sell is that token's exit.
-
-## ExecutionCancelAck
-
-`execution.cancel.ack` is the single terminal signal for a cancel command. It is
-published best-effort; strategies should use their own timeout if they require
-one. `status` is one of:
-
-| Status | Meaning |
-| --- | --- |
-| `COMPLETED` | Orders canceled and, when a position existed, the force close was dispatched (fill outcome is reported via order events and position features). |
-| `CANCELED` | Open order canceled; there was no position to force close. |
-| `NO_POSITION` | No available position could be reserved for the forced sell. |
-| `ACTIVE_SELL_RESERVATION` | Force close skipped because another sell is already active on the token. |
-| `NOT_FOUND` | No execution intent exists for `intent_id`. |
-| `FAILED` | The cancel could not be completed; `reason_code` is `INVALID_CANCEL` for a malformed request or `EXECUTION_FAILED` otherwise. |
-
-Example:
-
-```json
-{
-  "schema_version": "execution.v1",
-  "intent_id": "late-gap:condition:up:42",
-  "status": "COMPLETED",
-  "reason": "open orders canceled and position force close submitted at 0.01 FAK",
-  "canceled_orders": 1,
-  "occurred_at": "2026-09-04T12:05:01Z"
-}
-```
-
-## PositionQueryRequest
-
-Request/reply position snapshot. Send the request on
-`strategy.execution.position.query`; `executiond` publishes the response on the
-request's NATS reply subject (`Msg.Reply`). Replies are one-off snapshots and
-carry the same shape as the streaming `PositionFeature`; `seq` is `0`.
-
-| Field | Values and rules |
-| --- | --- |
-| `schema_version` | Required, `execution.v1`. |
-| `condition_id` | Optional. Restricts the reply to one condition. |
-| `market_id` | Optional. Restricts the reply to one market. Both filters may be combined. |
-
-Without a filter the reply contains every currently held position (rows with a
-positive position size; empty rows are excluded).
-
-Reply payload `PositionQueryResponse`. A query that cannot be served still
-receives a reply, with `error` set and `positions` empty, so a requester never
-has to distinguish a failure from a lost message:
-
-```json
-{
-  "schema_version": "execution.v1",
-  "positions": [ { "condition_id": "0xcondition", "token_id": "12345", "...": "..." } ],
-  "error": ""
-}
-```
-
-## Output messages
-
-`ExecutionIntentAck.status` is one of `ACCEPTED`, `REJECTED`, `COMPLETED`,
-`PARTIAL`, `EXPIRED`, or `FAILED`. Rejections use stable reason codes:
-`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`,
-`NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `UNPLANNABLE`,
-`DUPLICATE_INTENT`, `ORDER_REJECTED`, and `EXECUTION_FAILED`.
-
-An `execution.intent.ack` only ever describes the child order the strategy
-asked for. Internal children, such as the `0.01 SELL FAK` force close, are
-reported through `execution.cancel.ack` and `execution.order.event` only.
-
-`ExecutionOrderEvent.state` is the persisted runtime state. Consumers should
-treat it as an observational event rather than command an order from it.
-
-If a submitted order has an unresolved outcome and CLOB REST returns `404`,
-`executiond` first marks the order `UNKNOWN_RECONCILE`. Only after the
-configured missing-order grace period does a continuing `404` become terminal
-`FAILED`, which releases any active reservation.
-
-`PositionFeature.seq` is process-local and resets after an `executiond`
-restart. For durable change detection, use the per-position
-`source_revision`; position feature messages are snapshots and later frames
-supersede earlier frames.

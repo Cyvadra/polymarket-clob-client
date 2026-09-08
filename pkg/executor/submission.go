@@ -2,12 +2,14 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
+	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
@@ -18,8 +20,6 @@ import (
 )
 
 // plannedChild is one child order about to be reserved, signed, and submitted.
-// EmitIntentAck separates the strategy-facing first child from internal
-// children such as a force-close exit, which the strategy never asked for.
 type plannedChild struct {
 	Sequence          int
 	Shares            string
@@ -27,76 +27,79 @@ type plannedChild struct {
 	PostOnly          bool
 	TimeInForce       protocol.TimeInForce
 	ReservationReason string
-	EmitIntentAck     bool
+}
+
+// newExecutionID returns a server-side unique execution identity. Signals are
+// delivered at most once and never replayed, so no client-supplied idempotency
+// key is needed; a random ID keeps every execution independent.
+func newExecutionID() string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("exec-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(raw[:])
+}
+
+func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRequest) error {
+	return e.Execute(ctx, protocol.ExecutionIntent{
+		SchemaVersion:      req.SchemaVersion,
+		IntentID:           newExecutionID(),
+		Strategy:           req.Strategy,
+		Kind:               protocol.IntentOpen,
+		MarketID:           req.MarketID,
+		EventSlug:          req.EventSlug,
+		ConditionID:        req.ConditionID,
+		TokenID:            req.TokenID,
+		Outcome:            req.Outcome,
+		Side:               req.Side,
+		TargetUSD:          req.TargetUSD,
+		LimitPrice:         req.LimitPrice,
+		TimeInForce:        req.TimeInForce,
+		PostOnly:           req.PostOnly,
+		FeatureSeq:         req.FeatureSeq,
+		FeatureCompletedAt: req.FeatureCompletedAt,
+		CreatedAt:          req.CreatedAt,
+		ExpiresAt:          req.ExpiresAt,
+		Policy:             req.Policy,
+	})
 }
 
 func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
-		if strings.TrimSpace(intent.IntentID) != "" {
-			e.publishRejection(intent.IntentID, err)
-		}
+		e.publishOpenRejection(intent, err)
 		return err
 	}
 	err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-		inserted, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC()))
-		if err != nil {
-			if errors.Is(err, store.ErrIdempotencyConflict) {
-				return rejection{code: protocol.ReasonDuplicateIntent, reason: "idempotency key already belongs to another intent", cause: err}
-			}
+		if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC())); err != nil {
 			return fmt.Errorf("persist intent: %w", err)
-		}
-		if !inserted {
-			return e.resumeIntent(ctx, intent)
 		}
 		return e.prepareAndSubmit(ctx, intent)
 	})
 	if err != nil {
-		e.publishRejection(intent.IntentID, err)
+		e.publishOpenRejection(intent, err)
 	}
 	return err
 }
 
-func (e *Executor) publishRejection(intentID string, err error) {
+func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err error) {
 	status, code, reason := reasonFor(err)
-	e.publishAck(intentID, status, code, reason, "", "")
+	e.publishOpenResult(intent, status, code, reason, "", "")
 }
 
-func (e *Executor) publishAck(intentID string, status protocol.IntentAckStatus, code, reason, filledShares, averagePrice string) {
-	if err := protocol.PublishExecutionIntentAck(e.publish, protocol.ExecutionIntentAck{
-		IntentID: intentID, Status: status, ReasonCode: code, Reason: reason,
+func (e *Executor) publishOpenResult(intent protocol.ExecutionIntent, status protocol.ResultStatus, code, reason, filledShares, averagePrice string) {
+	if err := protocol.PublishExecutionOpenResult(e.publish, protocol.ExecutionOpenResult{
+		ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
+		Status: status, ReasonCode: code, Reason: reason,
 		FilledShares: filledShares, AveragePrice: averagePrice, OccurredAt: e.now(),
 	}); err != nil && e.onError != nil {
-		e.onError(fmt.Errorf("publish intent acknowledgement: %w", err))
+		e.onError(fmt.Errorf("publish open result: %w", err))
 	}
 }
 
-func (e *Executor) publishCancelAck(ack protocol.ExecutionCancelAck) {
-	if err := protocol.PublishExecutionCancelAck(e.publish, ack); err != nil && e.onError != nil {
-		e.onError(fmt.Errorf("publish cancel acknowledgement: %w", err))
+func (e *Executor) publishCloseResult(result protocol.ExecutionCloseResult) {
+	if err := protocol.PublishExecutionCloseResult(e.publish, result); err != nil && e.onError != nil {
+		e.onError(fmt.Errorf("publish close result: %w", err))
 	}
-}
-
-func (e *Executor) resumeIntent(ctx context.Context, intent protocol.ExecutionIntent) error {
-	existing, err := e.store.Intent(ctx, intent.IntentID)
-	if err != nil {
-		return fmt.Errorf("load duplicate intent: %w", err)
-	}
-	if !mapping.SameIntent(intent, existing) {
-		return rejection{code: protocol.ReasonDuplicateIntent, reason: "intent ID already belongs to a different intent", cause: store.ErrIdempotencyConflict}
-	}
-	stored := mapping.ExecutionIntent(existing)
-	order, err := e.store.OrderByIntent(ctx, stored.IntentID, store.StrategyChildSequence)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return e.prepareAndSubmit(ctx, stored)
-		}
-		return fmt.Errorf("load existing order: %w", err)
-	}
-	if order.State != statemachine.StateSigned {
-		e.publishAckForOrder(order, "duplicate intent")
-		return nil
-	}
-	return e.submitSignedOrder(ctx, stored, order)
 }
 
 // submitSignedOrder resumes a child order that was persisted as signed but
@@ -116,7 +119,6 @@ func (e *Executor) submitSignedOrder(ctx context.Context, intent protocol.Execut
 	child := plannedChild{
 		Sequence: order.ChildSequence, Shares: order.RequestedShares, Price: order.Price,
 		PostOnly: order.PostOnly, TimeInForce: protocol.TimeInForce(order.OrderType),
-		EmitIntentAck: order.ChildSequence == store.StrategyChildSequence,
 	}
 	return e.submitOrder(ctx, intent, signed, child, order.Revision)
 }
@@ -191,8 +193,6 @@ func (e *Executor) reserveChild(ctx context.Context, intent protocol.ExecutionIn
 		return rejection{code: protocol.ReasonActiveSellReservation, reason: "active sell reservation already exists", cause: err}
 	case errors.Is(err, store.ErrExposureLimit):
 		return rejection{code: protocol.ReasonExposureLimit, reason: "order exceeds the configured open exposure limit", cause: err}
-	case errors.Is(err, store.ErrIdempotencyConflict):
-		return rejection{code: protocol.ReasonDuplicateIntent, reason: "idempotency key already belongs to another intent", cause: err}
 	default:
 		return fmt.Errorf("reserve order exposure: %w", err)
 	}
@@ -224,7 +224,7 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	return plannedChild{
 		Sequence: store.StrategyChildSequence, Shares: decision.Shares, Price: decision.Price,
 		PostOnly: decision.PostOnly, TimeInForce: decision.TimeInForce,
-		ReservationReason: "execution intent accepted", EmitIntentAck: true,
+		ReservationReason: "execution intent accepted",
 	}, nil
 }
 
@@ -267,12 +267,14 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 		return fmt.Errorf("mark order live: %w", err)
 	}
 	e.publishTransition(live, "submit acknowledged")
-	if child.EmitIntentAck {
-		e.publishAck(intent.IntentID, protocol.IntentAccepted, "", "submit acknowledged", "0", "")
-	}
 	return nil
 }
 
+// resolveSubmitObservation reconciles the case where a concurrent observer
+// (the account user stream) already advanced the order past SUBMITTING before
+// the REST submission response returned. That observer already emits terminal
+// open results, so this path only verifies the concurrent observation matches
+// the exchange order we submitted and does not publish a second result.
 func (e *Executor) resolveSubmitObservation(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild, exchangeOrderID string) error {
 	current, err := e.store.OrderByIntent(ctx, intent.IntentID, child.Sequence)
 	if err != nil {
@@ -281,19 +283,7 @@ func (e *Executor) resolveSubmitObservation(ctx context.Context, intent protocol
 	if current.ExchangeOrderID != exchangeOrderID {
 		return fmt.Errorf("mark order live: %w", store.ErrConflict)
 	}
-	if !child.EmitIntentAck {
-		return nil
-	}
-	switch current.State {
-	case statemachine.StateLive, statemachine.StatePartiallyFilled:
-		e.publishAck(intent.IntentID, protocol.IntentAccepted, "", "submit acknowledged after concurrent observation", current.MatchedShares, "")
-		return nil
-	case statemachine.StateFilled, statemachine.StateCanceled, statemachine.StateRejected, statemachine.StateExpired, statemachine.StateFailed:
-		e.publishAckForOrder(current, "submit acknowledged after concurrent terminal observation")
-		return nil
-	default:
-		return fmt.Errorf("mark order live: %w", store.ErrConflict)
-	}
+	return nil
 }
 
 func isOrderRejected(err error) bool {
@@ -318,15 +308,4 @@ func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrd
 	}
 	e.publishTransition(rejected, reason)
 	return rejection{code: protocol.ReasonOrderRejected, reason: reason, cause: submitErr}
-}
-
-func (e *Executor) publishAckForOrder(order store.SignedOrderRecord, reason string) {
-	ack, ok := mapping.TerminalAck(order, reason, e.now())
-	if !ok {
-		if order.ChildSequence == store.StrategyChildSequence {
-			e.publishAck(order.IntentID, protocol.IntentAccepted, "", reason, order.MatchedShares, "")
-		}
-		return
-	}
-	e.publishAck(ack.IntentID, ack.Status, ack.ReasonCode, ack.Reason, ack.FilledShares, ack.AveragePrice)
 }

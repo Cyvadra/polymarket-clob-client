@@ -14,7 +14,6 @@ var (
 	ErrDuplicate             = errors.New("duplicate record")
 	ErrConflict              = errors.New("state conflict")
 	ErrNotFound              = errors.New("record not found")
-	ErrIdempotencyConflict   = errors.New("idempotency key already belongs to another intent")
 	ErrActiveSellReservation = errors.New("active sell reservation already exists")
 	ErrExposureLimit         = errors.New("reservation exceeds the configured open exposure limit")
 )
@@ -54,7 +53,6 @@ const StrategyChildSequence = 1
 
 type OrderIntentRecord struct {
 	IntentID           string
-	IdempotencyKey     string
 	Strategy           string
 	Kind               IntentKind
 	MarketID           string
@@ -203,11 +201,13 @@ type AccountFillStore interface {
 type AccountOrderStore interface {
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)
+	Intent(context.Context, string) (OrderIntentRecord, error)
 }
 
 type ReconcileStore interface {
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OpenOrders(context.Context) ([]SignedOrderRecord, error)
+	Intent(context.Context, string) (OrderIntentRecord, error)
 }
 
 type Store interface {

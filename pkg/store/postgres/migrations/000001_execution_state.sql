@@ -1,6 +1,5 @@
 CREATE TABLE IF NOT EXISTS order_intents (
     intent_id TEXT PRIMARY KEY,
-    idempotency_key TEXT NOT NULL UNIQUE,
     strategy TEXT NOT NULL,
 	kind TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',

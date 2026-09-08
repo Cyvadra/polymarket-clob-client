@@ -216,8 +216,17 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	if err := protocol.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation event: %w", err)
 	}
-	if err := accountfeed.PublishTerminalAck(r.publish, updated, reason, r.now()); err != nil {
-		return fmt.Errorf("publish reconciliation intent acknowledgement: %w", err)
+	// Terminal open results carry identity from the parent intent; skip if the
+	// intent is gone (nothing meaningful to report).
+	intent, err := r.store.Intent(ctx, updated.IntentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load reconciliation intent: %w", err)
+	}
+	if err := accountfeed.PublishTerminalResult(r.publish, intent, updated, reason, r.now()); err != nil {
+		return fmt.Errorf("publish reconciliation open result: %w", err)
 	}
 	return nil
 }

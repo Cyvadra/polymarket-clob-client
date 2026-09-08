@@ -37,11 +37,11 @@ func TestPositionFeatureEmptyPositionUsesNullEntryFields(t *testing.T) {
 	}
 }
 
-func TestExecutionIntentKeepsDecimalValuesAsStrings(t *testing.T) {
-	intent := ExecutionIntent{Kind: IntentOpen, SchemaVersion: SchemaVersionV1, IntentID: "intent-1", IdempotencyKey: "strategy:condition:token:1", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetUSD: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
+func TestExecutionOpenKeepsDecimalValuesAsStrings(t *testing.T) {
+	intent := ExecutionOpenRequest{SchemaVersion: SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetUSD: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
 	payload, err := json.Marshal(intent)
 	if err != nil {
-		t.Fatalf("marshal execution intent: %v", err)
+		t.Fatalf("marshal execution open request: %v", err)
 	}
 	body := string(payload)
 	if !strings.Contains(body, `"target_usd":"12.3456"`) || !strings.Contains(body, `"limit_price":"0.42"`) {
@@ -65,8 +65,10 @@ func TestExecutionPolicyTacticsMarshalAsDecimalStrings(t *testing.T) {
 
 func TestCommandSubjectsAreStable(t *testing.T) {
 	for want, got := range map[string]string{
-		"strategy.execution.cancel":         SubjectStrategyExecutionCancel,
-		"execution.cancel.ack":              SubjectExecutionCancelAck,
+		"strategy.execution.open":           SubjectStrategyExecutionOpen,
+		"execution.open.result":             SubjectExecutionOpenResult,
+		"strategy.execution.close":          SubjectStrategyExecutionClose,
+		"execution.close.result":            SubjectExecutionCloseResult,
 		"strategy.execution.position.query": SubjectStrategyExecutionPositionQuery,
 	} {
 		if want != got {
@@ -85,36 +87,36 @@ func (p *recordingPublisher) PublishJSON(subject string, value any) error {
 	return nil
 }
 
-func TestCancelAckPublishSetsSchemaAndSubject(t *testing.T) {
+func TestOpenResultPublishSetsSchemaAndSubject(t *testing.T) {
 	publisher := &recordingPublisher{}
-	ack := ExecutionCancelAck{IntentID: "intent-1", Status: CancelCompleted, Reason: "done", CanceledOrders: 1, OccurredAt: time.Unix(5, 0).UTC()}
-	if err := PublishExecutionCancelAck(publisher, ack); err != nil {
-		t.Fatalf("publish cancel ack: %v", err)
+	result := ExecutionOpenResult{ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, Status: ResultSucceeded, Reason: "done", FilledShares: "1", OccurredAt: time.Unix(5, 0).UTC()}
+	if err := PublishExecutionOpenResult(publisher, result); err != nil {
+		t.Fatalf("publish open result: %v", err)
 	}
-	if publisher.subject != SubjectExecutionCancelAck {
-		t.Fatalf("expected ack subject, got %q", publisher.subject)
+	if publisher.subject != SubjectExecutionOpenResult {
+		t.Fatalf("expected result subject, got %q", publisher.subject)
 	}
 	payload, err := json.Marshal(publisher.value)
 	if err != nil {
-		t.Fatalf("marshal ack: %v", err)
+		t.Fatalf("marshal result: %v", err)
 	}
 	if !strings.Contains(string(payload), `"schema_version":"execution.v1"`) {
-		t.Fatalf("expected schema version in ack payload, got %s", payload)
+		t.Fatalf("expected schema version in result payload, got %s", payload)
 	}
 }
 
-func TestCancelAndQueryMessagesRoundTrip(t *testing.T) {
-	cancel := ExecutionCancelRequest{SchemaVersion: SchemaVersionV1, IntentID: "intent-1", Reason: "abandon", Force: true}
-	payload, err := json.Marshal(cancel)
+func TestCloseAndQueryMessagesRoundTrip(t *testing.T) {
+	closeReq := ExecutionCloseRequest{SchemaVersion: SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", AssetID: "asset", Outcome: "Up", Mode: ExecutionCloseModeForce}
+	payload, err := json.Marshal(closeReq)
 	if err != nil {
-		t.Fatalf("marshal cancel request: %v", err)
+		t.Fatalf("marshal close request: %v", err)
 	}
-	var decoded ExecutionCancelRequest
+	var decoded ExecutionCloseRequest
 	if err := json.Unmarshal(payload, &decoded); err != nil {
-		t.Fatalf("unmarshal cancel request: %v", err)
+		t.Fatalf("unmarshal close request: %v", err)
 	}
-	if decoded.IntentID != cancel.IntentID || decoded.Reason != cancel.Reason || !decoded.Force {
-		t.Fatalf("cancel request round trip mismatch: %+v", decoded)
+	if decoded.Mode != closeReq.Mode || decoded.AssetID != closeReq.AssetID || decoded.ConditionID != closeReq.ConditionID {
+		t.Fatalf("close request round trip mismatch: %+v", decoded)
 	}
 
 	query := PositionQueryRequest{SchemaVersion: SchemaVersionV1, ConditionID: "condition-a"}

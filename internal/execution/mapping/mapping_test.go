@@ -71,21 +71,20 @@ func TestPositionFeatureEmptyPosition(t *testing.T) {
 func TestIntentRecordRoundTrip(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	intent := protocol.ExecutionIntent{
-		SchemaVersion:  protocol.SchemaVersionV1,
-		IntentID:       "intent",
-		IdempotencyKey: "key",
-		Strategy:       "strategy",
-		Kind:           protocol.IntentOpen,
-		ConditionID:    "condition",
-		TokenID:        "token",
-		Outcome:        "Up",
-		Side:           protocol.SideBuy,
-		TargetUSD:      "1.5",
-		LimitPrice:     "0.5",
-		TimeInForce:    protocol.TimeInForceGTC,
-		Policy:         protocol.ExecutionPolicy{CompleteWithinMillis: 60_000},
-		FeatureSeq:     7,
-		ExpiresAt:      time.Unix(200, 0).UTC(),
+		SchemaVersion: protocol.SchemaVersionV1,
+		IntentID:      "intent",
+		Strategy:      "strategy",
+		Kind:          protocol.IntentOpen,
+		ConditionID:   "condition",
+		TokenID:       "token",
+		Outcome:       "Up",
+		Side:          protocol.SideBuy,
+		TargetUSD:     "1.5",
+		LimitPrice:    "0.5",
+		TimeInForce:   protocol.TimeInForceGTC,
+		Policy:        protocol.ExecutionPolicy{CompleteWithinMillis: 60_000},
+		FeatureSeq:    7,
+		ExpiresAt:     time.Unix(200, 0).UTC(),
 	}
 	record := IntentRecord(intent, now)
 	if record.Side != store.SideBuy || record.Kind != store.IntentOpen || record.TimeInForce != store.TimeInForceGTC {
@@ -98,49 +97,49 @@ func TestIntentRecordRoundTrip(t *testing.T) {
 	if round.Policy.CompleteWithinMillis != 60_000 || round.Side != protocol.SideBuy || round.TargetUSD != "1.5" {
 		t.Fatalf("round trip mismatch: %+v", round)
 	}
-	if !SameIntent(intent, record) {
-		t.Fatal("expected same intent")
-	}
 }
 
-func TestTerminalAckMapsStates(t *testing.T) {
+func TestTerminalResultMapsStates(t *testing.T) {
 	at := time.Unix(100, 0).UTC()
+	openIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
 	cases := []struct {
 		state    statemachine.State
-		status   protocol.IntentAckStatus
+		status   protocol.ResultStatus
 		hasMatch bool
 	}{
-		{statemachine.StateFilled, protocol.IntentCompleted, true},
-		{statemachine.StateCanceled, protocol.IntentExpired, true},
-		{statemachine.StateRejected, protocol.IntentRejected, true},
-		{statemachine.StateExpired, protocol.IntentExpired, true},
-		{statemachine.StateFailed, protocol.IntentFailed, true},
+		{statemachine.StateFilled, protocol.ResultSucceeded, true},
+		{statemachine.StateCanceled, protocol.ResultFailed, true},
+		{statemachine.StateRejected, protocol.ResultFailed, true},
+		{statemachine.StateExpired, protocol.ResultFailed, true},
+		{statemachine.StateFailed, protocol.ResultFailed, true},
 		{statemachine.StateLive, "", false},
 	}
 	for _, tc := range cases {
-		ack, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: tc.state, MatchedShares: "0"}, "reason", at)
+		result, ok := TerminalResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: tc.state, MatchedShares: "0"}, openIntent, "reason", at)
 		if ok != tc.hasMatch {
 			t.Fatalf("state %s ok=%v want %v", tc.state, ok, tc.hasMatch)
 		}
 		if !ok {
 			continue
 		}
-		if ack.Status != tc.status {
-			t.Fatalf("state %s status=%s want %s", tc.state, ack.Status, tc.status)
+		if result.Status != tc.status {
+			t.Fatalf("state %s status=%s want %s", tc.state, result.Status, tc.status)
 		}
 	}
 }
 
-func TestTerminalAckPartialCancel(t *testing.T) {
-	ack, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "0.5"}, "reason", time.Unix(100, 0).UTC())
-	if !ok || ack.Status != protocol.IntentPartial {
-		t.Fatalf("expected partial ack, got ok=%v ack=%+v", ok, ack)
+func TestTerminalResultPartialCancelCountsSuccess(t *testing.T) {
+	openIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
+	result, ok := TerminalResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "0.5"}, openIntent, "reason", time.Unix(100, 0).UTC())
+	if !ok || result.Status != protocol.ResultSucceeded {
+		t.Fatalf("expected successful result, got ok=%v result=%+v", ok, result)
 	}
 }
 
 // A force-close exit reaching a terminal state is not the intent's outcome.
-func TestTerminalAckIgnoresInternalChildren(t *testing.T) {
-	if _, ok := TerminalAck(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}, "reason", time.Unix(100, 0).UTC()); ok {
-		t.Fatal("expected no terminal ack for an internal child order")
+func TestTerminalResultIgnoresInternalChildren(t *testing.T) {
+	openIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
+	if _, ok := TerminalResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}, openIntent, "reason", time.Unix(100, 0).UTC()); ok {
+		t.Fatal("expected no terminal result for an internal child order")
 	}
 }

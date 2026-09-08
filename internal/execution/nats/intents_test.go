@@ -24,7 +24,7 @@ func (s *fakeSubscriber) Subscribe(subject string, handler natsbus.Handler) erro
 	return nil
 }
 
-type fakeStore struct{}
+type fakeStore struct{ positions []store.PositionRecord }
 
 func (fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
 	return fn(ctx)
@@ -55,10 +55,13 @@ func (fakeStore) Reserve(context.Context, store.ReservationRecord) error        
 func (fakeStore) Reservation(context.Context, string) (store.ReservationRecord, error) {
 	return store.ReservationRecord{}, store.ErrNotFound
 }
-func (fakeStore) Release(context.Context, string, string) error                    { return nil }
-func (fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error)        { return false, nil }
-func (fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) { return nil, nil }
+func (fakeStore) Release(context.Context, string, string) error             { return nil }
+func (fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error) { return false, nil }
+func (s fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
+	return s.positions, nil
+}
 
+// fakeCLOB satisfies the executor CLOB interface.
 type fakeCLOB struct{}
 
 func (fakeCLOB) CreateOrder(context.Context, clobclient.UserOrder) (clobclient.SignedOrderV2, error) {
@@ -67,37 +70,33 @@ func (fakeCLOB) CreateOrder(context.Context, clobclient.UserOrder) (clobclient.S
 func (fakeCLOB) SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error) {
 	return &clobclient.OrderResponse{OrderID: "order-1"}, nil
 }
-func (fakeCLOB) CancelOrder(context.Context, string) error { return nil }
-
+func (fakeCLOB) CancelOrder(context.Context, string) error         { return nil }
 func (fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
 
 type recordedPublisher struct {
 	subject string
-	ack     protocol.ExecutionIntentAck
+	value   any
 }
 
 func (p *recordedPublisher) PublishJSON(subject string, value any) error {
 	p.subject = subject
-	ack, ok := value.(protocol.ExecutionIntentAck)
-	if ok {
-		p.ack = ack
-	}
+	p.value = value
 	return nil
 }
 
-func TestSubscribeIntentsDecodesAndExecutes(t *testing.T) {
+func TestSubscribeOpenDecodesAndExecutes(t *testing.T) {
 	execution, err := executor.New(fakeStore{}, fakeCLOB{}, time.Now)
 	if err != nil {
 		t.Fatalf("new executor: %v", err)
 	}
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeIntents(subscriber, execution); err != nil {
+	if err := SubscribeOpen(subscriber, execution); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	if subscriber.subject != protocol.SubjectStrategyExecutionIntent || subscriber.handler == nil {
+	if subscriber.subject != protocol.SubjectStrategyExecutionOpen || subscriber.handler == nil {
 		t.Fatalf("subscription=%+v", subscriber)
 	}
-	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: protocol.ExecutionStyleLimit}}
+	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: protocol.ExecutionStyleLimit}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -107,7 +106,7 @@ func TestSubscribeIntentsDecodesAndExecutes(t *testing.T) {
 	}
 }
 
-func TestSubscribeIntentsAcknowledgesDecodableInvalidIntent(t *testing.T) {
+func TestSubscribeOpenPublishesFailureForInvalidIntent(t *testing.T) {
 	execution, err := executor.New(fakeStore{}, fakeCLOB{}, time.Now)
 	if err != nil {
 		t.Fatalf("new executor: %v", err)
@@ -115,10 +114,10 @@ func TestSubscribeIntentsAcknowledgesDecodableInvalidIntent(t *testing.T) {
 	publisher := &recordedPublisher{}
 	execution.SetEventPublisher(publisher)
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeIntents(subscriber, execution); err != nil {
+	if err := SubscribeOpen(subscriber, execution); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	intent := protocol.ExecutionIntent{SchemaVersion: protocol.SchemaVersionV1, IntentID: "intent", IdempotencyKey: "key", Strategy: "strategy", Kind: protocol.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
+	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -126,7 +125,8 @@ func TestSubscribeIntentsAcknowledgesDecodableInvalidIntent(t *testing.T) {
 	if err := subscriber.handler(context.Background(), payload); err == nil {
 		t.Fatal("expected invalid intent error")
 	}
-	if publisher.subject != protocol.SubjectExecutionIntentAck || publisher.ack.IntentID != intent.IntentID || publisher.ack.Status != protocol.IntentRejected || publisher.ack.ReasonCode != "UNSUPPORTED_EXECUTION_STYLE" {
-		t.Fatalf("acknowledgement=%+v subject=%q", publisher.ack, publisher.subject)
+	result, ok := publisher.value.(protocol.ExecutionOpenResult)
+	if !ok || publisher.subject != protocol.SubjectExecutionOpenResult || result.ConditionID != "condition" || result.TokenID != "token" || result.Status != protocol.ResultFailed || result.ReasonCode != "UNSUPPORTED_EXECUTION_STYLE" {
+		t.Fatalf("result=%+v subject=%q", publisher.value, publisher.subject)
 	}
 }

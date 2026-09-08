@@ -36,8 +36,8 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.SchemaVersion != protocol.SchemaVersionV1 {
 		return invalid("unsupported intent schema version %q", intent.SchemaVersion)
 	}
-	if intent.IntentID == "" || intent.IdempotencyKey == "" || intent.Strategy == "" || intent.ConditionID == "" || intent.TokenID == "" || intent.Outcome == "" {
-		return invalid("intent ID, idempotency key, strategy, condition ID, token ID, and outcome are required")
+	if intent.IntentID == "" || intent.Strategy == "" || intent.ConditionID == "" || intent.TokenID == "" || intent.Outcome == "" {
+		return invalid("intent ID, strategy, condition ID, token ID, and outcome are required")
 	}
 	if intent.Side != protocol.SideBuy && intent.Side != protocol.SideSell {
 		return invalid("invalid side %q", intent.Side)
@@ -48,8 +48,10 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.Kind == protocol.IntentClose && intent.Side != protocol.SideSell {
 		return invalid("close execution intent must sell")
 	}
-	if _, err := decimal.PositiveFloat(intent.TargetUSD); err != nil {
-		return invalid("invalid target usd %q", intent.TargetUSD)
+	if intent.Kind == protocol.IntentOpen {
+		if _, err := decimal.PositiveFloat(intent.TargetUSD); err != nil {
+			return invalid("invalid target usd %q", intent.TargetUSD)
+		}
 	}
 	if _, err := decimal.Price(intent.LimitPrice); err != nil {
 		return invalid("invalid limit price %q", intent.LimitPrice)
@@ -57,11 +59,13 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.TimeInForce != protocol.TimeInForceGTC && intent.TimeInForce != protocol.TimeInForceFOK && intent.TimeInForce != protocol.TimeInForceFAK && intent.TimeInForce != protocol.TimeInForceGTD {
 		return invalid("invalid time in force %q", intent.TimeInForce)
 	}
-	if !intent.ExpiresAt.IsZero() && !intent.ExpiresAt.After(now) {
-		return invalid("execution intent expired at %s", intent.ExpiresAt.UTC().Format(time.RFC3339Nano))
-	}
-	if intent.ExpiresAt.IsZero() && intent.Policy.CompleteWithinMillis == 0 {
-		return invalid("execution intent requires expires_at or complete_within_ms")
+	if intent.Kind == protocol.IntentOpen {
+		if !intent.ExpiresAt.IsZero() && !intent.ExpiresAt.After(now) {
+			return invalid("execution intent expired at %s", intent.ExpiresAt.UTC().Format(time.RFC3339Nano))
+		}
+		if intent.ExpiresAt.IsZero() && intent.Policy.CompleteWithinMillis == 0 {
+			return invalid("execution intent requires expires_at or complete_within_ms")
+		}
 	}
 	if err := validatePolicyDurations(intent.Policy); err != nil {
 		return err
@@ -95,20 +99,20 @@ func validatePolicyDurations(policy protocol.ExecutionPolicy) error {
 
 // reasonFor maps an execution error onto the wire status, reason code, and
 // strategy-visible message.
-func reasonFor(err error) (protocol.IntentAckStatus, string, string) {
+func reasonFor(err error) (protocol.ResultStatus, string, string) {
 	var declared rejection
 	if errors.As(err, &declared) {
-		status := protocol.IntentRejected
+		status := protocol.ResultFailed
 		if declared.code == protocol.ReasonExecutionFailed {
-			status = protocol.IntentFailed
+			status = protocol.ResultFailed
 		}
 		return status, declared.code, declared.reason
 	}
 	var rejected *clobclient.OrderRejectedError
 	if errors.As(err, &rejected) {
-		return protocol.IntentRejected, protocol.ReasonOrderRejected, rejected.Message
+		return protocol.ResultFailed, protocol.ReasonOrderRejected, rejected.Message
 	}
-	return protocol.IntentFailed, protocol.ReasonExecutionFailed, "execution failed"
+	return protocol.ResultFailed, protocol.ReasonExecutionFailed, "execution failed"
 }
 
 // reservationRecord describes the exposure a planned child order locks.

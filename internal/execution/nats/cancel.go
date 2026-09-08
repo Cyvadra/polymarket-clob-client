@@ -8,23 +8,21 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 )
 
-// CancelExecutor is the execution surface that consumes cancel commands.
-type CancelExecutor interface {
-	Cancel(context.Context, protocol.ExecutionCancelRequest) error
+// CloseExecutor is the execution surface that consumes close commands.
+type CloseExecutor interface {
+	ExecuteClose(context.Context, protocol.ExecutionCloseRequest) error
 }
 
-// SubscribeCancel wires the strategy.execution.cancel subject to the executor.
-// Cancels are at-most-once like intents: a decodable request always receives an
-// execution.cancel.ack from the executor; malformed JSON can only be logged.
-func SubscribeCancel(bus Subscriber, execution CancelExecutor) error {
+// SubscribeClose wires the strategy.execution.close subject to the executor.
+func SubscribeClose(bus Subscriber, execution CloseExecutor) error {
 	if bus == nil || execution == nil {
-		return fmt.Errorf("NATS subscriber and cancel executor are required")
+		return fmt.Errorf("NATS subscriber and close executor are required")
 	}
-	return bus.Subscribe(protocol.SubjectStrategyExecutionCancel, func(ctx context.Context, payload []byte) error {
-		request, err := natsbus.DecodeJSON[protocol.ExecutionCancelRequest](payload)
+	return bus.Subscribe(protocol.SubjectStrategyExecutionClose, func(ctx context.Context, payload []byte) error {
+		request, err := natsbus.DecodeJSON[protocol.ExecutionCloseRequest](payload)
 		if err != nil {
 			return err
 		}
-		return execution.Cancel(ctx, request)
+		return execution.ExecuteClose(ctx, request)
 	})
 }

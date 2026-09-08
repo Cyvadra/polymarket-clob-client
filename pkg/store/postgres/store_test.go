@@ -117,9 +117,6 @@ func TestUniqueConstraintMatchesNamedPostgresViolation(t *testing.T) {
 	if !isUniqueConstraint(err, "reservations_one_active_sell_idx") {
 		t.Fatal("expected active sell reservation constraint to match")
 	}
-	if isUniqueConstraint(err, "order_intents_idempotency_key_key") {
-		t.Fatal("unexpected idempotency constraint match")
-	}
 }
 
 func TestTransitionOrderReturnsPersistedValuesFromDatabase(t *testing.T) {

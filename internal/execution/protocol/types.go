@@ -15,13 +15,13 @@ type ExecutionEventPublisher interface {
 const (
 	SchemaVersionV1 = "execution.v1"
 
-	SubjectStrategyExecutionIntent        = "strategy.execution.intent"
-	SubjectExecutionIntentAck             = "execution.intent.ack"
+	SubjectStrategyExecutionOpen          = "strategy.execution.open"
+	SubjectExecutionOpenResult            = "execution.open.result"
+	SubjectStrategyExecutionClose         = "strategy.execution.close"
+	SubjectExecutionCloseResult           = "execution.close.result"
 	SubjectExecutionOrderEvent            = "execution.order.event"
 	SubjectMarketQuotes                   = "pmm.market.quotes"
 	SubjectPositionFeaturesPrefix         = "position.features"
-	SubjectStrategyExecutionCancel        = "strategy.execution.cancel"
-	SubjectExecutionCancelAck             = "execution.cancel.ack"
 	SubjectStrategyExecutionPositionQuery = "strategy.execution.position.query"
 )
 
@@ -79,7 +79,6 @@ type ExecutionPolicy struct {
 type ExecutionIntent struct {
 	SchemaVersion      string          `json:"schema_version"`
 	IntentID           string          `json:"intent_id"`
-	IdempotencyKey     string          `json:"idempotency_key"`
 	Strategy           string          `json:"strategy"`
 	Kind               IntentKind      `json:"kind"`
 	MarketID           string          `json:"market_id,omitempty"`
@@ -99,14 +98,52 @@ type ExecutionIntent struct {
 	Policy             ExecutionPolicy `json:"policy,omitempty"`
 }
 
-// Reason codes carried by ExecutionIntentAck.ReasonCode. They are part of the
-// wire contract, so they are declared once here rather than derived from
-// error text.
+type ExecutionOpenRequest struct {
+	SchemaVersion      string          `json:"schema_version"`
+	Strategy           string          `json:"strategy"`
+	MarketID           string          `json:"market_id,omitempty"`
+	EventSlug          string          `json:"event_slug,omitempty"`
+	ConditionID        string          `json:"condition_id"`
+	TokenID            string          `json:"token_id"`
+	Outcome            string          `json:"outcome"`
+	Side               Side            `json:"side"`
+	TargetUSD          string          `json:"target_usd,omitempty"`
+	LimitPrice         string          `json:"limit_price"`
+	TimeInForce        TimeInForce     `json:"time_in_force"`
+	PostOnly           bool            `json:"post_only"`
+	FeatureSeq         int64           `json:"feature_seq,omitempty"`
+	FeatureCompletedAt time.Time       `json:"feature_completed_at"`
+	CreatedAt          time.Time       `json:"created_at"`
+	ExpiresAt          time.Time       `json:"expires_at"`
+	Policy             ExecutionPolicy `json:"policy,omitempty"`
+}
+
+type ExecutionCloseMode string
+
+const (
+	ExecutionCloseModeLimit ExecutionCloseMode = "LIMIT_CLOSE"
+	ExecutionCloseModeForce ExecutionCloseMode = "FORCE_CLOSE"
+)
+
+type ExecutionCloseRequest struct {
+	SchemaVersion string             `json:"schema_version"`
+	Strategy      string             `json:"strategy"`
+	ConditionID   string             `json:"condition_id"`
+	AssetID       string             `json:"asset_id"`
+	Outcome       string             `json:"outcome"`
+	Mode          ExecutionCloseMode `json:"mode"`
+	LimitPrice    string             `json:"limit_price,omitempty"`
+	TimeInForce   TimeInForce        `json:"time_in_force,omitempty"`
+	CreatedAt     time.Time          `json:"created_at"`
+	Policy        ExecutionPolicy    `json:"policy,omitempty"`
+}
+
+// Reason codes carried by result messages. They are part of the wire contract,
+// so they are declared once here rather than derived from error text.
 const (
 	ReasonInvalidIntent         = "INVALID_INTENT"
 	ReasonUnsupportedStyle      = "UNSUPPORTED_EXECUTION_STYLE"
 	ReasonUnimplementedPolicy   = "UNIMPLEMENTED_POLICY"
-	ReasonDuplicateIntent       = "DUPLICATE_INTENT"
 	ReasonNoPosition            = "NO_POSITION"
 	ReasonActiveSellReservation = "ACTIVE_SELL_RESERVATION"
 	ReasonExposureLimit         = "EXPOSURE_LIMIT"
@@ -115,35 +152,57 @@ const (
 	ReasonExecutionFailed       = "EXECUTION_FAILED"
 )
 
-type IntentAckStatus string
+type ResultStatus string
 
 const (
-	IntentAccepted  IntentAckStatus = "ACCEPTED"
-	IntentRejected  IntentAckStatus = "REJECTED"
-	IntentCompleted IntentAckStatus = "COMPLETED"
-	IntentPartial   IntentAckStatus = "PARTIAL"
-	IntentExpired   IntentAckStatus = "EXPIRED"
-	IntentFailed    IntentAckStatus = "FAILED"
+	ResultSucceeded ResultStatus = "SUCCEEDED"
+	ResultFailed    ResultStatus = "FAILED"
 )
 
-type ExecutionIntentAck struct {
-	SchemaVersion string          `json:"schema_version"`
-	IntentID      string          `json:"intent_id"`
-	Status        IntentAckStatus `json:"status"`
-	ReasonCode    string          `json:"reason_code,omitempty"`
-	Reason        string          `json:"reason,omitempty"`
-	FilledShares  string          `json:"filled_shares,omitempty"`
-	AveragePrice  string          `json:"average_price,omitempty"`
-	OccurredAt    time.Time       `json:"occurred_at"`
+type ExecutionOpenResult struct {
+	SchemaVersion string       `json:"schema_version"`
+	ConditionID   string       `json:"condition_id"`
+	TokenID       string       `json:"token_id"`
+	Outcome       string       `json:"outcome"`
+	Side          Side         `json:"side"`
+	Status        ResultStatus `json:"status"`
+	ReasonCode    string       `json:"reason_code,omitempty"`
+	Reason        string       `json:"reason,omitempty"`
+	FilledShares  string       `json:"filled_shares,omitempty"`
+	AveragePrice  string       `json:"average_price,omitempty"`
+	OccurredAt    time.Time    `json:"occurred_at"`
 }
 
-func PublishExecutionIntentAck(publisher ExecutionEventPublisher, ack ExecutionIntentAck) error {
+type ExecutionCloseResult struct {
+	SchemaVersion string       `json:"schema_version"`
+	ConditionID   string       `json:"condition_id"`
+	AssetID       string       `json:"asset_id"`
+	Outcome       string       `json:"outcome"`
+	Side          Side         `json:"side"`
+	Status        ResultStatus `json:"status"`
+	ReasonCode    string       `json:"reason_code,omitempty"`
+	Reason        string       `json:"reason,omitempty"`
+	FilledShares  string       `json:"filled_shares,omitempty"`
+	AveragePrice  string       `json:"average_price,omitempty"`
+	OccurredAt    time.Time    `json:"occurred_at"`
+}
+
+func PublishExecutionOpenResult(publisher ExecutionEventPublisher, result ExecutionOpenResult) error {
 	if publisher == nil {
 		return nil
 	}
-	ack.SchemaVersion = SchemaVersionV1
-	ack.OccurredAt = ack.OccurredAt.UTC()
-	return publisher.PublishJSON(SubjectExecutionIntentAck, ack)
+	result.SchemaVersion = SchemaVersionV1
+	result.OccurredAt = result.OccurredAt.UTC()
+	return publisher.PublishJSON(SubjectExecutionOpenResult, result)
+}
+
+func PublishExecutionCloseResult(publisher ExecutionEventPublisher, result ExecutionCloseResult) error {
+	if publisher == nil {
+		return nil
+	}
+	result.SchemaVersion = SchemaVersionV1
+	result.OccurredAt = result.OccurredAt.UTC()
+	return publisher.PublishJSON(SubjectExecutionCloseResult, result)
 }
 
 type ExecutionOrderEvent struct {
@@ -169,43 +228,6 @@ func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID strin
 		MatchedShares:   matchedShares,
 		OccurredAt:      occurredAt.UTC(),
 	})
-}
-
-type ExecutionCancelRequest struct {
-	SchemaVersion string `json:"schema_version"`
-	IntentID      string `json:"intent_id"`
-	Reason        string `json:"reason,omitempty"`
-	Force         bool   `json:"force,omitempty"`
-}
-
-type CancelAckStatus string
-
-const (
-	CancelCompleted             CancelAckStatus = "COMPLETED"
-	CancelCanceled              CancelAckStatus = "CANCELED"
-	CancelNoPosition            CancelAckStatus = "NO_POSITION"
-	CancelActiveSellReservation CancelAckStatus = "ACTIVE_SELL_RESERVATION"
-	CancelNotFound              CancelAckStatus = "NOT_FOUND"
-	CancelFailed                CancelAckStatus = "FAILED"
-)
-
-type ExecutionCancelAck struct {
-	SchemaVersion  string          `json:"schema_version"`
-	IntentID       string          `json:"intent_id"`
-	Status         CancelAckStatus `json:"status"`
-	ReasonCode     string          `json:"reason_code,omitempty"`
-	Reason         string          `json:"reason,omitempty"`
-	CanceledOrders int             `json:"canceled_orders,omitempty"`
-	OccurredAt     time.Time       `json:"occurred_at"`
-}
-
-func PublishExecutionCancelAck(publisher ExecutionEventPublisher, ack ExecutionCancelAck) error {
-	if publisher == nil {
-		return nil
-	}
-	ack.SchemaVersion = SchemaVersionV1
-	ack.OccurredAt = ack.OccurredAt.UTC()
-	return publisher.PublishJSON(SubjectExecutionCancelAck, ack)
 }
 
 type PositionQueryRequest struct {

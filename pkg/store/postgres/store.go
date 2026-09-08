@@ -120,8 +120,8 @@ func (s *Store) WithIntentLock(ctx context.Context, intentID string, fn func(con
 }
 
 func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord) (bool, error) {
-	if record.IntentID == "" || record.IdempotencyKey == "" {
-		return false, fmt.Errorf("intent ID and idempotency key are required")
+	if record.IntentID == "" {
+		return false, fmt.Errorf("intent ID is required")
 	}
 	policy := record.Policy
 	if len(policy) == 0 {
@@ -142,25 +142,22 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 
 	commandTag, err := s.pool.Exec(ctx, `
 		INSERT INTO order_intents (
-			intent_id, idempotency_key, strategy, kind, market_id, event_slug, condition_id,
+			intent_id, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, NULLIF($11, '')::numeric, $12,
-			$13, $14, $15, $16, $17,
-			$18, $19, $20, $21
+			$1, $2, $3, $4, $5, $6,
+			$7, $8, $9, NULLIF($10, '')::numeric, $11,
+			$12, $13, $14, $15, $16,
+			$17, $18, $19, $20
 		)
 		ON CONFLICT (intent_id) DO NOTHING
-	`, record.IntentID, record.IdempotencyKey, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
+	`, record.IntentID, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt)
 	if err != nil {
-		if isUniqueConstraint(err, "order_intents_idempotency_key_key") {
-			return false, store.ErrIdempotencyConflict
-		}
 		return false, fmt.Errorf("insert intent: %w", err)
 	}
 	return commandTag.RowsAffected() == 1, nil
@@ -171,7 +168,7 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 		return store.OrderIntentRecord{}, fmt.Errorf("intent ID is required")
 	}
 	row := s.pool.QueryRow(ctx, `
-		SELECT intent_id, idempotency_key, strategy, kind, market_id, event_slug, condition_id,
+		SELECT intent_id, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
@@ -830,7 +827,7 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	var policy []byte
 	var targetUSD *string
 	err := row.Scan(
-		&record.IntentID, &record.IdempotencyKey, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
+		&record.IntentID, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &record.FeatureCompletedAt, &record.ExpiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,

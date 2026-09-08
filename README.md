@@ -21,12 +21,12 @@
 ```text
 pmm market features -> strategy -> executiond -> Polymarket CLOB
                               ^             |
-                              +-- position features and intent acknowledgements
+                              +-- position features and execution results
 ```
 
-`pmm` 负责市场特征产出并发布行情快照；策略负责解析市场标识符并发布完整的执行意图。`executiond` 负责签名、提交、撤单、已认证账户事件、持久化订单状态、仓位记账，以及使用最新行情快照为高级执行风格规划初始 child 订单。
+`pmm` 负责市场特征产出并发布行情快照；策略发布 open / close 请求。`executiond` 负责签名、提交、关闭、已认证账户事件、持久化订单状态、仓位记账，以及使用最新行情快照为高级执行风格规划初始 child 订单。
 
-服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。意图投递刻意采用 at-most-once 语义：过期或丢失的意图不会被重放。可解码且具有 `intent_id` 的非法意图会收到拒绝确认；无效 JSON 无法确认。策略必须把缺失确认视为不确定结果，而不是“未开仓”。每个钱包只能运行一个 `executiond` 实例。
+服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。请求投递刻意采用 at-most-once 语义：过期或丢失的请求不会被重放。可解码但无效的请求会收到失败结果；无效 JSON 无法回应。每个钱包只能运行一个 `executiond` 实例。
 
 ### NATS 契约
 
@@ -34,21 +34,21 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 | 主题 | 方向 | 负载 | 用途 |
 | --- | --- | --- | --- |
-| `strategy.execution.intent` | strategy -> executiond | `ExecutionIntent` | 请求一个 `OPEN` 或 `CLOSE` 订单。 |
+| `strategy.execution.open` | strategy -> executiond | `ExecutionOpenRequest` | 请求一个开仓订单。 |
+| `execution.open.result` | executiond -> strategy | `ExecutionOpenResult` | 开仓请求的成功或失败结果。 |
+| `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | 请求一个平仓。 |
+| `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | 平仓请求的成功或失败结果。 |
 | `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | 高级执行风格使用的最新行情快照。 |
-| `execution.intent.ack` | executiond -> strategy | `ExecutionIntentAck` | 接受、拒绝、终态完成、部分成交、过期或失败。 |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | 持久化的订单生命周期迁移。 |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
-| `strategy.execution.cancel` | strategy -> executiond | `ExecutionCancelRequest` | 撤销某个 intent：撤其未成交开仓单并对该 token 的整条仓位执行 `0.01 SELL FAK` 强平。 |
-| `execution.cancel.ack` | executiond -> strategy | `ExecutionCancelAck` | cancel 命令的唯一终态信号。 |
 | `strategy.execution.position.query` | strategy -> executiond（request/reply） | `PositionQueryRequest` | 查询当前仓位，回复发往请求的 reply subject。 |
 
-`ExecutionIntent` 要求提供意图 ID、幂等键、策略、类型（kind）、条件 ID、token ID、结果（outcome）、方向、限价、有效期限（time-in-force）、明确的下单模式以及到期时间或完成期限。`target_usd` 是唯一的意图计量字段；普通意图的份额会根据当前计划价格推导，而 `CLOSE` 会从当前仓位记录读取 `actual_shares` 并按该值平仓。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用意图限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force，超过 `policy.quote_max_age_ms` 的快照会被忽略。所有价格在签名前都会按被动方向（买单向下、卖单向上）对齐到市场 tick；份额会按交易所实际编码的精度向下取整。当前运行时仍只创建一个 child；持续 cancel-replace、post-only crossing retry、价格漂移后的自动重报价、soft-close 或 force-close 生命周期尚未实现，对应策略字段会被拒绝。`CLOSE` 意图必须是卖出。卖出会针对可用库存进行原子预留；没有可卖仓位的平仓会以 `NO_POSITION` 拒绝。同一个条件 ID 与 token ID 同时只允许一个活跃卖出预留。设置 `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` 后，超过未平仓买入名义总额上限的买单会以 `EXPOSURE_LIMIT` 拒绝。
+开仓请求要求 `strategy`、`condition_id`、`token_id`、`outcome`、`side`、`limit_price` 和 `time_in_force`。`target_usd` 是唯一的开仓计量字段；普通开仓的份额会根据当前计划价格推导。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用请求限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force，超过 `policy.quote_max_age_ms` 的快照会被忽略。所有价格在签名前都会按被动方向（买单向下、卖单向上）对齐到市场 tick；份额会按交易所实际编码的精度向下取整。关闭请求按 `condition_id + asset_id` 定位仓位，`LIMIT_CLOSE` 走普通限价卖出，`FORCE_CLOSE` 走 `SELL 0.01 FAK`。设置 `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` 后，超过未平仓买入名义总额上限的买单会以 `EXPOSURE_LIMIT` 拒绝。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
 
-`strategy.execution.cancel` 用于放弃某个 intent：executiond 会撤掉该 intent 仍挂单的 child 订单，并对其 `condition_id`/`token_id` 的整条剩余可用仓位提交一笔内部的 `0.01 SELL FAK` 强平（挂在该 intent 下的第二个 child，不产生 `execution.intent.ack`）。强平一旦派出即对策略侧视为终态：即使未成交也不再重试，剩余份额等待市场结算；命令结果通过 `execution.cancel.ack`（唯一终态信号）回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id` 或 `market_id` 过滤，回复负载与 `PositionFeature` 一致。
+`strategy.execution.close` 用于关闭当前仓位：`LIMIT_CLOSE` 先撤掉同一 `condition_id` / `asset_id` 上仍挂单的开仓 child，再提交限价卖出；`FORCE_CLOSE` 会先撤单，再提交内部的 `0.01 SELL FAK` 强平。关闭结果通过 `execution.close.result` 回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id` 或 `market_id` 过滤，回复负载与 `PositionFeature` 一致。
 
 ### 仓位记账
 

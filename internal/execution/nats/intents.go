@@ -14,15 +14,15 @@ type Subscriber interface {
 	Subscribe(string, natsbus.Handler) error
 }
 
-func SubscribeIntents(bus Subscriber, execution *executor.Executor) error {
+func SubscribeOpen(bus Subscriber, execution *executor.Executor) error {
 	if bus == nil || execution == nil {
 		return fmt.Errorf("NATS subscriber and executor are required")
 	}
-	return bus.Subscribe(protocol.SubjectStrategyExecutionIntent, func(ctx context.Context, payload []byte) error {
-		intent, err := natsbus.DecodeJSON[protocol.ExecutionIntent](payload)
+	return bus.Subscribe(protocol.SubjectStrategyExecutionOpen, func(ctx context.Context, payload []byte) error {
+		req, err := natsbus.DecodeJSON[protocol.ExecutionOpenRequest](payload)
 		if err != nil {
 			return err
 		}
-		return execution.Execute(ctx, intent)
+		return execution.ExecuteOpen(ctx, req)
 	})
 }

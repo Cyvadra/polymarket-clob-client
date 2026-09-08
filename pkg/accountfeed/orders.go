@@ -63,19 +63,28 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	if err := protocol.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, c.now()); err != nil {
 		return fmt.Errorf("publish account order event: %w", err)
 	}
-	if err := PublishTerminalAck(c.publish, updated, reason, c.now()); err != nil {
+	// Terminal open results carry position identity from the parent intent. A
+	// missing intent is abnormal for an order we track; skip rather than error.
+	intent, err := c.store.Intent(ctx, updated.IntentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load order intent for result: %w", err)
+	}
+	if err := PublishTerminalResult(c.publish, intent, updated, reason, c.now()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func PublishTerminalAck(publisher protocol.ExecutionEventPublisher, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
-	ack, ok := mapping.TerminalAck(order, reason, occurredAt)
+func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
+	result, ok := mapping.TerminalResult(order, intent, reason, occurredAt)
 	if !ok {
 		return nil
 	}
-	if err := protocol.PublishExecutionIntentAck(publisher, ack); err != nil {
-		return fmt.Errorf("publish terminal intent acknowledgement: %w", err)
+	if err := protocol.PublishExecutionOpenResult(publisher, result); err != nil {
+		return fmt.Errorf("publish terminal open result: %w", err)
 	}
 	return nil
 }

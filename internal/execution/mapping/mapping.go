@@ -25,7 +25,7 @@ func IntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 		policy = nil
 	}
 	return store.OrderIntentRecord{
-		IntentID: intent.IntentID, IdempotencyKey: intent.IdempotencyKey, Strategy: intent.Strategy, MarketID: intent.MarketID,
+		IntentID: intent.IntentID, Strategy: intent.Strategy, MarketID: intent.MarketID,
 		Kind: store.IntentKind(intent.Kind), EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
 		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
@@ -40,28 +40,13 @@ func ExecutionIntent(record store.OrderIntentRecord) protocol.ExecutionIntent {
 		_ = json.Unmarshal(record.Policy, &policy)
 	}
 	return protocol.ExecutionIntent{
-		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, IdempotencyKey: record.IdempotencyKey, Strategy: record.Strategy,
+		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, Strategy: record.Strategy,
 		Kind: protocol.IntentKind(record.Kind), MarketID: record.MarketID, EventSlug: record.EventSlug,
 		ConditionID: record.ConditionID, TokenID: record.TokenID, Outcome: record.Outcome, Side: protocol.Side(record.Side),
 		TargetUSD: record.TargetUSD, LimitPrice: record.LimitPrice, TimeInForce: protocol.TimeInForce(record.TimeInForce),
 		PostOnly: record.PostOnly, FeatureSeq: record.FeatureSeq, FeatureCompletedAt: record.FeatureCompletedAt,
 		ExpiresAt: record.ExpiresAt, Policy: policy,
 	}
-}
-
-// SameIntent reports whether a wire intent is the same logical intent as the
-// durable record, used for idempotent redelivery detection. The policy is
-// compared on its normalized JSON form.
-func SameIntent(intent protocol.ExecutionIntent, record store.OrderIntentRecord) bool {
-	if intent.IntentID != record.IntentID || intent.IdempotencyKey != record.IdempotencyKey || intent.Strategy != record.Strategy ||
-		intent.Kind != protocol.IntentKind(record.Kind) || intent.MarketID != record.MarketID || intent.EventSlug != record.EventSlug ||
-		intent.ConditionID != record.ConditionID || intent.TokenID != record.TokenID || intent.Outcome != record.Outcome ||
-		intent.Side != protocol.Side(record.Side) || !SameDecimal(intent.TargetUSD, record.TargetUSD) || !SameDecimal(intent.LimitPrice, record.LimitPrice) ||
-		intent.TimeInForce != protocol.TimeInForce(record.TimeInForce) || intent.PostOnly != record.PostOnly || intent.FeatureSeq != record.FeatureSeq ||
-		!intent.FeatureCompletedAt.Equal(record.FeatureCompletedAt) || !intent.ExpiresAt.Equal(record.ExpiresAt) {
-		return false
-	}
-	return policyEqual(intent.Policy, record.Policy)
 }
 
 // SameDecimal compares two decimal strings numerically, falling back to a
@@ -75,35 +60,43 @@ func SameDecimal(left, right string) bool {
 	return leftRat.Cmp(rightRat) == 0
 }
 
-// TerminalAck derives the strategy-facing terminal intent acknowledgement for
-// an order that reached a terminal state. Internal children (a force-close
-// exit, for example) were never acknowledged to the strategy and must not
-// produce one, or a canceled intent would report itself completed.
-func TerminalAck(order store.SignedOrderRecord, reason string, occurredAt time.Time) (protocol.ExecutionIntentAck, bool) {
-	if order.ChildSequence != store.StrategyChildSequence {
-		return protocol.ExecutionIntentAck{}, false
+// TerminalResult derives the strategy-facing open result for an order of an
+// OPEN intent that reached a terminal state. Only the strategy child of an
+// open intent produces a result: internal children (a force-close exit) and
+// close intents are never surfaced as an open result. The result carries the
+// position identity from the parent intent so the strategy can attribute it
+// without a client-supplied correlation key.
+func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason string, occurredAt time.Time) (protocol.ExecutionOpenResult, bool) {
+	if order.ChildSequence != store.StrategyChildSequence || intent.Kind != store.IntentOpen {
+		return protocol.ExecutionOpenResult{}, false
 	}
-	ack := protocol.ExecutionIntentAck{IntentID: order.IntentID, Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt}
+	result := protocol.ExecutionOpenResult{
+		ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
+		Side: protocol.Side(intent.Side), Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt,
+	}
 	switch order.State {
 	case statemachine.StateFilled:
-		ack.Status = protocol.IntentCompleted
+		result.Status = protocol.ResultSucceeded
 	case statemachine.StateCanceled:
-		ack.Status = protocol.IntentExpired
 		if decimal.Positive(order.MatchedShares) {
-			ack.Status = protocol.IntentPartial
+			result.Status = protocol.ResultSucceeded
+		} else {
+			result.Status = protocol.ResultFailed
 		}
 	case statemachine.StateRejected:
-		ack.Status = protocol.IntentRejected
-		ack.ReasonCode = protocol.ReasonOrderRejected
+		result.Status = protocol.ResultFailed
+		result.ReasonCode = protocol.ReasonOrderRejected
 	case statemachine.StateExpired:
-		ack.Status = protocol.IntentExpired
+		result.Status = protocol.ResultFailed
 	case statemachine.StateFailed:
-		ack.Status = protocol.IntentFailed
-		ack.ReasonCode = protocol.ReasonExecutionFailed
+		result.Status = protocol.ResultFailed
+		result.ReasonCode = protocol.ReasonExecutionFailed
+	case statemachine.StatePartiallyFilled:
+		result.Status = protocol.ResultSucceeded
 	default:
-		return protocol.ExecutionIntentAck{}, false
+		return protocol.ExecutionOpenResult{}, false
 	}
-	return ack, true
+	return result, true
 }
 
 // PositionFeature maps a durable position record onto the strategy-facing
@@ -144,12 +137,4 @@ func PositionFeature(position store.PositionRecord, sequence int64, publishedAt 
 		UpdatedAt:         position.UpdatedAt.UTC(),
 		PublishedAt:       publishedAt.UTC(),
 	}
-}
-
-func policyEqual(wire protocol.ExecutionPolicy, stored []byte) bool {
-	encoded, err := json.Marshal(wire)
-	if err != nil {
-		return false
-	}
-	return bytes.Equal(encoded, stored)
 }

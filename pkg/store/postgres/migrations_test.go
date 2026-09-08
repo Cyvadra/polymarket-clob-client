@@ -20,7 +20,6 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 	sql := migrations[0].SQL
 	for _, fragment := range []string{
 		"CREATE TABLE IF NOT EXISTS order_intents",
-		"idempotency_key TEXT NOT NULL UNIQUE",
 		"CREATE TABLE IF NOT EXISTS orders",
 		"signed_order_hash TEXT NOT NULL UNIQUE",
 		"CREATE TABLE IF NOT EXISTS fills",
