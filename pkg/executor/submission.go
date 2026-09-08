@@ -44,6 +44,7 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 	intent := protocol.ExecutionIntent{
 		SchemaVersion:      req.SchemaVersion,
 		IntentID:           newExecutionID(),
+		UniqueTag:          req.UniqueTag,
 		Strategy:           req.Strategy,
 		Kind:               protocol.IntentOpen,
 		MarketID:           req.MarketID,
@@ -91,7 +92,7 @@ func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err err
 
 func (e *Executor) publishOpenResult(intent protocol.ExecutionIntent, status protocol.ResultStatus, code, reason, filledShares, averagePrice string) {
 	if err := protocol.PublishExecutionOpenResult(e.publish, protocol.ExecutionOpenResult{
-		ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
+		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
 		Status: status, ReasonCode: code, Reason: reason,
 		FilledShares: filledShares, AveragePrice: averagePrice, OccurredAt: e.now(),
 	}); err != nil && e.onError != nil {
@@ -208,7 +209,7 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	}
 	request := tactics.Request{Intent: intent, Market: market, Now: e.now().UTC()}
 	if intent.Side == protocol.SideSell {
-		position, found, err := e.positionFor(ctx, intent.ConditionID, intent.TokenID)
+		position, found, err := e.positionFor(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag)
 		if err != nil {
 			return plannedChild{}, err
 		}

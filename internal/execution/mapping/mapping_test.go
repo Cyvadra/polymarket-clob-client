@@ -16,6 +16,7 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 		MarketID:       "market",
 		ConditionID:    "condition",
 		TokenID:        "token",
+		UniqueTag:      "lane-a",
 		Outcome:        "Up",
 		PositionSize:   "5.5",
 		AvailableSize:  "4.5",
@@ -29,6 +30,9 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 
 	if !feature.HasPosition {
 		t.Fatal("expected open position")
+	}
+	if feature.UniqueTag != "lane-a" {
+		t.Fatalf("unique tag=%q", feature.UniqueTag)
 	}
 	if feature.EntryPrice == nil || *feature.EntryPrice != "0.42" {
 		t.Fatalf("entry price=%v", feature.EntryPrice)
@@ -73,6 +77,7 @@ func TestIntentRecordRoundTrip(t *testing.T) {
 	intent := protocol.ExecutionIntent{
 		SchemaVersion: protocol.SchemaVersionV1,
 		IntentID:      "intent",
+		UniqueTag:     "lane-a",
 		Strategy:      "strategy",
 		Kind:          protocol.IntentOpen,
 		ConditionID:   "condition",
@@ -87,14 +92,14 @@ func TestIntentRecordRoundTrip(t *testing.T) {
 		ExpiresAt:     time.Unix(200, 0).UTC(),
 	}
 	record := IntentRecord(intent, now)
-	if record.Side != store.SideBuy || record.Kind != store.IntentOpen || record.TimeInForce != store.TimeInForceGTC {
+	if record.Side != store.SideBuy || record.Kind != store.IntentOpen || record.TimeInForce != store.TimeInForceGTC || record.UniqueTag != "lane-a" {
 		t.Fatalf("unexpected record types: %+v", record)
 	}
 	if len(record.Policy) == 0 {
 		t.Fatal("expected serialized policy")
 	}
 	round := ExecutionIntent(record)
-	if round.Policy.CompleteWithinMillis != 60_000 || round.Side != protocol.SideBuy || round.TargetUSD != "1.5" {
+	if round.Policy.CompleteWithinMillis != 60_000 || round.Side != protocol.SideBuy || round.TargetUSD != "1.5" || round.UniqueTag != "lane-a" {
 		t.Fatalf("round trip mismatch: %+v", round)
 	}
 }

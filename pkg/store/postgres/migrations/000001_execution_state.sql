@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS order_intents (
     intent_id TEXT PRIMARY KEY,
+    unique_tag TEXT NOT NULL,
     strategy TEXT NOT NULL,
 	kind TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS fills (
     fill_id TEXT PRIMARY KEY,
     exchange_order_id TEXT,
     intent_id TEXT,
+    unique_tag TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',
     condition_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
@@ -84,6 +86,7 @@ CREATE INDEX IF NOT EXISTS fills_order_idx ON fills(exchange_order_id) WHERE exc
 CREATE TABLE IF NOT EXISTS positions (
     condition_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
+    unique_tag TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',
     outcome TEXT NOT NULL,
     position_size NUMERIC(38, 18) NOT NULL DEFAULT 0 CHECK (position_size >= 0),
@@ -95,7 +98,7 @@ CREATE TABLE IF NOT EXISTS positions (
     state TEXT NOT NULL DEFAULT 'empty',
     source_revision BIGINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (condition_id, token_id),
+    PRIMARY KEY (condition_id, token_id, unique_tag),
     CHECK (available_size + reserved_size <= position_size)
 );
 
@@ -103,6 +106,7 @@ CREATE TABLE IF NOT EXISTS reservations (
     reservation_id TEXT PRIMARY KEY,
     intent_id TEXT NOT NULL,
     child_sequence INTEGER,
+    unique_tag TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',
     condition_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
@@ -118,4 +122,4 @@ CREATE TABLE IF NOT EXISTS reservations (
 
 CREATE INDEX IF NOT EXISTS reservations_position_idx ON reservations(condition_id, token_id, state);
 CREATE INDEX IF NOT EXISTS reservations_intent_idx ON reservations(intent_id);
-CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_active_sell_idx ON reservations(condition_id, token_id) WHERE side = 'SELL' AND state = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_active_sell_idx ON reservations(condition_id, token_id, unique_tag) WHERE side = 'SELL' AND state = 'active';

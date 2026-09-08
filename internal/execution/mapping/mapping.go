@@ -25,7 +25,7 @@ func IntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 		policy = nil
 	}
 	return store.OrderIntentRecord{
-		IntentID: intent.IntentID, Strategy: intent.Strategy, MarketID: intent.MarketID,
+		IntentID: intent.IntentID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, MarketID: intent.MarketID,
 		Kind: store.IntentKind(intent.Kind), EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
 		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
@@ -40,7 +40,7 @@ func ExecutionIntent(record store.OrderIntentRecord) protocol.ExecutionIntent {
 		_ = json.Unmarshal(record.Policy, &policy)
 	}
 	return protocol.ExecutionIntent{
-		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, Strategy: record.Strategy,
+		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, UniqueTag: record.UniqueTag, Strategy: record.Strategy,
 		Kind: protocol.IntentKind(record.Kind), MarketID: record.MarketID, EventSlug: record.EventSlug,
 		ConditionID: record.ConditionID, TokenID: record.TokenID, Outcome: record.Outcome, Side: protocol.Side(record.Side),
 		TargetUSD: record.TargetUSD, LimitPrice: record.LimitPrice, TimeInForce: protocol.TimeInForce(record.TimeInForce),
@@ -99,7 +99,7 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 		return protocol.ExecutionOpenResult{}, false
 	}
 	return protocol.ExecutionOpenResult{
-		ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
+		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
 		FilledShares: order.MatchedShares, OccurredAt: occurredAt,
 	}, true
@@ -118,7 +118,7 @@ func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntent
 		return protocol.ExecutionCloseResult{}, false
 	}
 	return protocol.ExecutionCloseResult{
-		ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
+		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.SideSell, Status: status, ReasonCode: reasonCode, Reason: reason,
 		FilledShares: order.MatchedShares, OccurredAt: occurredAt,
 	}, true
@@ -145,6 +145,7 @@ func PositionFeature(position store.PositionRecord, sequence int64, publishedAt 
 	return protocol.PositionFeature{
 		SchemaVersion:     protocol.SchemaVersionV1,
 		Seq:               sequence,
+		UniqueTag:         position.UniqueTag,
 		MarketID:          position.MarketID,
 		ConditionID:       position.ConditionID,
 		TokenID:           position.TokenID,

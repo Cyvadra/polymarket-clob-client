@@ -32,8 +32,8 @@ func (fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.C
 func (fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
 	return true, nil
 }
-func (fakeStore) Intent(context.Context, string) (store.OrderIntentRecord, error) {
-	return store.OrderIntentRecord{}, store.ErrNotFound
+func (fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}, nil
 }
 func (fakeStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error { return nil }
 func (fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRecord, event statemachine.Event, matched, exchangeID, _ string) (store.SignedOrderRecord, error) {
@@ -96,7 +96,7 @@ func TestSubscribeOpenDecodesAndExecutes(t *testing.T) {
 	if subscriber.subject != protocol.SubjectStrategyExecutionOpen || subscriber.handler == nil {
 		t.Fatalf("subscription=%+v", subscriber)
 	}
-	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: protocol.ExecutionStyleLimit}}
+	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: protocol.ExecutionStyleLimit}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -117,7 +117,7 @@ func TestSubscribeOpenPublishesFailureForInvalidIntent(t *testing.T) {
 	if err := SubscribeOpen(subscriber, execution); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
+	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -126,7 +126,7 @@ func TestSubscribeOpenPublishesFailureForInvalidIntent(t *testing.T) {
 		t.Fatal("expected invalid intent error")
 	}
 	result, ok := publisher.value.(protocol.ExecutionOpenResult)
-	if !ok || publisher.subject != protocol.SubjectExecutionOpenResult || result.ConditionID != "condition" || result.TokenID != "token" || result.Status != protocol.ResultFailed || result.ReasonCode != "UNSUPPORTED_EXECUTION_STYLE" {
+	if !ok || publisher.subject != protocol.SubjectExecutionOpenResult || result.UniqueTag != "lane-a" || result.ConditionID != "condition" || result.TokenID != "token" || result.Status != protocol.ResultFailed || result.ReasonCode != "UNSUPPORTED_EXECUTION_STYLE" {
 		t.Fatalf("result=%+v subject=%q", publisher.value, publisher.subject)
 	}
 }

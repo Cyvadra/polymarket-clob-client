@@ -74,6 +74,9 @@ func positionQueryResponse(ctx context.Context, positions PositionStore, payload
 		if request.MarketID != "" && record.MarketID != request.MarketID {
 			continue
 		}
+		if request.UniqueTag != "" && record.UniqueTag != request.UniqueTag {
+			continue
+		}
 		// Empty rows (no current holding) are not positions.
 		if !decimal.Positive(record.PositionSize) {
 			continue

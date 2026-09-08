@@ -43,12 +43,12 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
 | `strategy.execution.position.query` | strategy -> executiond（request/reply） | `PositionQueryRequest` | 查询当前仓位，回复发往请求的 reply subject。 |
 
-开仓请求要求 `strategy`、`condition_id`、`token_id`、`outcome`、`side`、`limit_price` 和 `time_in_force`。`target_usd` 是唯一的开仓计量字段；普通开仓的份额会根据当前计划价格推导。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用请求限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force，超过 `policy.quote_max_age_ms` 的快照会被忽略。所有价格在签名前都会按被动方向（买单向下、卖单向上）对齐到市场 tick；份额会按交易所实际编码的精度向下取整。关闭请求按 `condition_id + asset_id` 定位仓位，`LIMIT_CLOSE` 走普通限价卖出，`FORCE_CLOSE` 走 `SELL 0.01 FAK`。设置 `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` 后，超过未平仓买入名义总额上限的买单会以 `EXPOSURE_LIMIT` 拒绝。
+开仓请求要求 `unique_tag`、`strategy`、`condition_id`、`token_id`、`outcome`、`side`、`limit_price` 和 `time_in_force`。`target_usd` 是唯一的开仓计量字段；普通开仓的份额会根据当前计划价格推导。`unique_tag` 是策略通道键，用来隔离同一资产上的并行开平仓信号，不是幂等键。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用请求限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force，超过 `policy.quote_max_age_ms` 的快照会被忽略。所有价格在签名前都会按被动方向（买单向下、卖单向上）对齐到市场 tick；份额会按交易所实际编码的精度向下取整。关闭请求按 `condition_id + asset_id + unique_tag` 定位仓位，`LIMIT_CLOSE` 走普通限价卖出，`FORCE_CLOSE` 走 `SELL 0.01 FAK`。设置 `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` 后，超过未平仓买入名义总额上限的买单会以 `EXPOSURE_LIMIT` 拒绝。
 
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
 
-`strategy.execution.close` 用于关闭当前仓位：`LIMIT_CLOSE` 先撤掉同一 `condition_id` / `asset_id` 上仍挂单的开仓 child，再提交限价卖出；`FORCE_CLOSE` 会先撤单，再提交内部的 `0.01 SELL FAK` 强平。关闭结果通过 `execution.close.result` 回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id` 或 `market_id` 过滤，回复负载与 `PositionFeature` 一致。
+`strategy.execution.close` 用于关闭当前仓位：`LIMIT_CLOSE` 先撤掉同一 `condition_id` / `asset_id` / `unique_tag` 上仍挂单的开仓 child，再提交限价卖出；`FORCE_CLOSE` 会先撤单，再提交内部的 `0.01 SELL FAK` 强平。关闭结果通过 `execution.close.result` 回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id`、`market_id` 或 `unique_tag` 过滤，回复负载与 `PositionFeature` 一致。
 
 ### 仓位记账
 

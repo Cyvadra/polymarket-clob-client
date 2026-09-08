@@ -25,7 +25,7 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 		"CREATE TABLE IF NOT EXISTS fills",
 		"fill_id TEXT PRIMARY KEY",
 		"CREATE TABLE IF NOT EXISTS positions",
-		"PRIMARY KEY (condition_id, token_id)",
+		"PRIMARY KEY (condition_id, token_id, unique_tag)",
 		"CREATE TABLE IF NOT EXISTS reservations",
 	} {
 		if !strings.Contains(sql, fragment) {

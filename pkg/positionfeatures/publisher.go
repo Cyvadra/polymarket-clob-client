@@ -73,7 +73,7 @@ func (p *PublisherModule) Publish(ctx context.Context) error {
 	}
 	publishedAt := p.now().UTC()
 	for _, position := range positions {
-		key := position.ConditionID + ":" + position.TokenID
+		key := position.ConditionID + ":" + position.TokenID + ":" + position.UniqueTag
 		if p.wasPublished(key, position.SourceRevision) {
 			continue
 		}

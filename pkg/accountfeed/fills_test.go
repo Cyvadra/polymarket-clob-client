@@ -22,6 +22,13 @@ func (s *fakeFillStore) OrderByExchangeID(_ context.Context, orderID string) (st
 	return store.SignedOrderRecord{IntentID: "intent-1", ExchangeOrderID: orderID}, nil
 }
 
+func (s *fakeFillStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	if intentID != "intent-1" {
+		return store.OrderIntentRecord{}, store.ErrNotFound
+	}
+	return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a"}, nil
+}
+
 func (s *fakeFillStore) ApplyFill(_ context.Context, record store.FillRecord) (bool, error) {
 	if s.seen == nil {
 		s.seen = make(map[string]struct{})
@@ -46,7 +53,7 @@ func TestConsumeMapsValidatedFillToStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume fill: %v", err)
 	}
-	if !inserted || repository.record.FillID != "fill-1" || repository.record.ReceivedAt != now {
+	if !inserted || repository.record.FillID != "fill-1" || repository.record.UniqueTag != "lane-a" || repository.record.ReceivedAt != now {
 		t.Fatalf("unexpected persisted fill: inserted=%v record=%+v", inserted, repository.record)
 	}
 }

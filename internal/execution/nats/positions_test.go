@@ -41,9 +41,10 @@ func (f fakePositionStore) PositionFeatures(context.Context) ([]store.PositionRe
 
 func queryPositions() []store.PositionRecord {
 	return []store.PositionRecord{
-		{MarketID: "market-a", ConditionID: "condition-a", TokenID: "token-a", Outcome: "Up", PositionSize: "3", AvailableSize: "2", ReservedSize: "1", EntryPrice: "0.42", State: "open"},
-		{MarketID: "market-b", ConditionID: "condition-b", TokenID: "token-b", Outcome: "Down", PositionSize: "5", AvailableSize: "5", ReservedSize: "0", EntryPrice: "0.55", State: "open"},
-		{MarketID: "market-a", ConditionID: "condition-a", TokenID: "token-empty", Outcome: "Up", PositionSize: "0", AvailableSize: "0", ReservedSize: "0", State: "empty"},
+		{MarketID: "market-a", ConditionID: "condition-a", TokenID: "token-a", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "3", AvailableSize: "2", ReservedSize: "1", EntryPrice: "0.42", State: "open"},
+		{MarketID: "market-a", ConditionID: "condition-a", TokenID: "token-a", UniqueTag: "lane-b", Outcome: "Up", PositionSize: "4", AvailableSize: "4", ReservedSize: "0", EntryPrice: "0.43", State: "open"},
+		{MarketID: "market-b", ConditionID: "condition-b", TokenID: "token-b", UniqueTag: "lane-c", Outcome: "Down", PositionSize: "5", AvailableSize: "5", ReservedSize: "0", EntryPrice: "0.55", State: "open"},
+		{MarketID: "market-a", ConditionID: "condition-a", TokenID: "token-empty", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "0", AvailableSize: "0", ReservedSize: "0", State: "empty"},
 	}
 }
 
@@ -71,8 +72,8 @@ func TestSubscribePositionQuerySubscribesAndReturnsAllPositions(t *testing.T) {
 	if connector.replyTo != "reply.subject" {
 		t.Fatalf("expected reply on request subject, got %q", connector.replyTo)
 	}
-	if len(connector.response.Positions) != 2 {
-		t.Fatalf("expected two open positions, got %d", len(connector.response.Positions))
+	if len(connector.response.Positions) != 3 {
+		t.Fatalf("expected three open positions, got %d", len(connector.response.Positions))
 	}
 	for _, feature := range connector.response.Positions {
 		if feature.PositionSize == "0" || !feature.HasPosition {
@@ -91,8 +92,23 @@ func TestSubscribePositionQueryFiltersByCondition(t *testing.T) {
 	if err := deliverPositionQuery(t, connector, request); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if len(connector.response.Positions) != 1 || connector.response.Positions[0].ConditionID != "condition-a" {
+	if len(connector.response.Positions) != 2 || connector.response.Positions[0].ConditionID != "condition-a" || connector.response.Positions[1].ConditionID != "condition-a" {
 		t.Fatalf("expected condition-a only, got %+v", connector.response.Positions)
+	}
+}
+
+func TestSubscribePositionQueryFiltersByUniqueTag(t *testing.T) {
+	connector := &fakeReplyConnector{}
+	positions := fakePositionStore{records: queryPositions()}
+	if err := SubscribePositionQuery(connector, positions, time.Now); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	request := protocol.PositionQueryRequest{SchemaVersion: protocol.SchemaVersionV1, ConditionID: "condition-a", UniqueTag: "lane-b"}
+	if err := deliverPositionQuery(t, connector, request); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if len(connector.response.Positions) != 1 || connector.response.Positions[0].UniqueTag != "lane-b" {
+		t.Fatalf("expected lane-b only, got %+v", connector.response.Positions)
 	}
 }
 

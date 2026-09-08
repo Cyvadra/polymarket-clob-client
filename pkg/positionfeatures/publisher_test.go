@@ -46,7 +46,8 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 	entry := now.Add(-3 * time.Minute)
 	publisher := &fakePublisher{}
 	module, err := New(fakeStore{positions: []store.PositionRecord{
-		{ConditionID: "condition-1", TokenID: "token-up", Outcome: "Up", PositionSize: "12.5", AvailableSize: "10", ReservedSize: "2.5", EntryPrice: "0.42", EntryTime: entry, State: "open", SourceRevision: 8, UpdatedAt: now.Add(-time.Second)},
+		{ConditionID: "condition-1", TokenID: "token-up", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "12.5", AvailableSize: "10", ReservedSize: "2.5", EntryPrice: "0.42", EntryTime: entry, State: "open", SourceRevision: 8, UpdatedAt: now.Add(-time.Second)},
+		{ConditionID: "condition-1", TokenID: "token-up", UniqueTag: "lane-b", Outcome: "Up", PositionSize: "4", AvailableSize: "4", ReservedSize: "0", EntryPrice: "0.43", EntryTime: entry, State: "open", SourceRevision: 8, UpdatedAt: now.Add(-time.Second)},
 		{ConditionID: "condition-1", TokenID: "token-down", Outcome: "Down", PositionSize: "0", AvailableSize: "0", ReservedSize: "0", State: "empty", SourceRevision: 9, UpdatedAt: now.Add(-time.Second)},
 	}}, publisher, func() time.Time { return now }, 0)
 	if err != nil {
@@ -56,11 +57,11 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 	if err := module.Publish(context.Background()); err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
-	if len(publisher.messages) != 2 {
-		t.Fatalf("published messages = %d, want 2", len(publisher.messages))
+	if len(publisher.messages) != 3 {
+		t.Fatalf("published messages = %d, want 3", len(publisher.messages))
 	}
 	open := publisher.messages[0]
-	if open.subject != "position.features.condition-1.token-up" {
+	if open.subject != "position.features.condition-1.token-up" || open.value.UniqueTag != "lane-a" {
 		t.Errorf("open subject = %q", open.subject)
 	}
 	if !open.value.HasPosition || open.value.EntryPrice == nil || *open.value.EntryPrice != "0.42" {
@@ -73,15 +74,20 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 		t.Errorf("open feature metadata = %+v", open.value)
 	}
 
-	empty := publisher.messages[1]
+	secondLane := publisher.messages[1]
+	if secondLane.subject != "position.features.condition-1.token-up" || secondLane.value.UniqueTag != "lane-b" {
+		t.Errorf("second lane feature = %+v subject=%q", secondLane.value, secondLane.subject)
+	}
+
+	empty := publisher.messages[2]
 	if empty.subject != "position.features.condition-1.token-down" {
 		t.Errorf("empty subject = %q", empty.subject)
 	}
 	if empty.value.HasPosition || empty.value.EntryPrice != nil || empty.value.EntryTime != nil || empty.value.SecondsSinceEntry != 0 {
 		t.Errorf("empty feature position fields = %+v", empty.value)
 	}
-	if empty.value.Seq != 2 {
-		t.Errorf("empty feature sequence = %d, want 2", empty.value.Seq)
+	if empty.value.Seq != 3 {
+		t.Errorf("empty feature sequence = %d, want 3", empty.value.Seq)
 	}
 }
 

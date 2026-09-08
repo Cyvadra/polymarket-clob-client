@@ -53,6 +53,7 @@ const StrategyChildSequence = 1
 
 type OrderIntentRecord struct {
 	IntentID           string
+	UniqueTag          string
 	Strategy           string
 	Kind               IntentKind
 	MarketID           string
@@ -111,6 +112,7 @@ type FillRecord struct {
 	FillID          string
 	ExchangeOrderID string
 	IntentID        string
+	UniqueTag       string
 	MarketID        string
 	ConditionID     string
 	TokenID         string
@@ -130,6 +132,7 @@ type PositionRecord struct {
 	MarketID       string
 	ConditionID    string
 	TokenID        string
+	UniqueTag      string
 	Outcome        string
 	PositionSize   string
 	ActualShares   string
@@ -146,6 +149,7 @@ type ReservationRecord struct {
 	ReservationID string
 	IntentID      string
 	ChildSequence int
+	UniqueTag     string
 	MarketID      string
 	ConditionID   string
 	TokenID       string
@@ -196,6 +200,7 @@ type ExecutionStore interface {
 type AccountFillStore interface {
 	FillStore
 	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)
+	Intent(context.Context, string) (OrderIntentRecord, error)
 }
 
 type AccountOrderStore interface {

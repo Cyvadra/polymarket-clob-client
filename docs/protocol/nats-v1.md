@@ -27,7 +27,7 @@ Subject tokens must not be empty or include `*` or `>`.
 
 ## ExecutionOpenRequest
 
-Required fields are `schema_version`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. Signals are delivered at most once and never replayed, so no client-supplied idempotency key is required; executiond assigns each execution a server-side identity.
+Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
 
 | Field | Rules |
 | --- | --- |
@@ -45,6 +45,7 @@ Prices are aligned to tick size before signing. Share sizes are floored to excha
 ## ExecutionCloseRequest
 
 Close requests operate on `condition_id + asset_id` rather than an intent ID.
+Close requests also require `unique_tag` so the execution daemon can target the correct strategy lane.
 
 | Field | Rules |
 | --- | --- |
@@ -57,7 +58,7 @@ Close requests operate on `condition_id + asset_id` rather than an intent ID.
 
 ## Results
 
-Open and close results identify the affected position (`condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key. They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields.
+Open and close results identify the affected position (`unique_tag` + `condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key. They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields.
 
 Open results are emitted **only at terminal resolution** of an open — when the child order reaches a fill (any amount counts as success, including a partial fill) or is cancelled without any fill (failure). executiond never publishes an open `SUCCEEDED` merely because a resting order was accepted, so a success always means shares were actually bought. `filled_shares` is populated on terminal open results.
 
@@ -74,6 +75,7 @@ Close results report *dispatch*: `FORCE_CLOSE` reports `SUCCEEDED` once the 0.01
 ```json
 {
   "schema_version": "execution.v1",
+  "unique_tag": "late-gap",
   "strategy": "late-gap",
   "condition_id": "0xcondition",
   "token_id": "12345",
@@ -90,6 +92,7 @@ Close results report *dispatch*: `FORCE_CLOSE` reports `SUCCEEDED` once the 0.01
 ```json
 {
   "schema_version": "execution.v1",
+  "unique_tag": "late-gap",
   "strategy": "late-gap",
   "condition_id": "0xcondition",
   "asset_id": "12345",

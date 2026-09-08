@@ -142,18 +142,18 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 
 	commandTag, err := s.pool.Exec(ctx, `
 		INSERT INTO order_intents (
-			intent_id, strategy, kind, market_id, event_slug, condition_id,
+			intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, NULLIF($10, '')::numeric, $11,
-			$12, $13, $14, $15, $16,
-			$17, $18, $19, $20
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, NULLIF($11, '')::numeric, $12,
+			$13, $14, $15, $16, $17,
+			$18, $19, $20, $21
 		)
 		ON CONFLICT (intent_id) DO NOTHING
-	`, record.IntentID, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
+	`, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt)
@@ -168,7 +168,7 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 		return store.OrderIntentRecord{}, fmt.Errorf("intent ID is required")
 	}
 	row := s.pool.QueryRow(ctx, `
-		SELECT intent_id, strategy, kind, market_id, event_slug, condition_id,
+		SELECT intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at
@@ -419,7 +419,7 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = $2 WHERE fill_id = $1`, record.FillID, tradeStatus); err != nil {
 				return false, fmt.Errorf("update fill settlement: %w", err)
 			}
-			if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, tradeStatus); err != nil {
+			if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, tradeStatus); err != nil {
 				return false, err
 			}
 			if err := tx.Commit(ctx); err != nil {
@@ -427,7 +427,7 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			}
 			return false, nil
 		}
-		if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.MarketID, record.Outcome, priorSide, priorShares, priorPrice, priorTraderSide, true, receivedAt); err != nil {
+		if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, record.MarketID, record.Outcome, priorSide, priorShares, priorPrice, priorTraderSide, true, receivedAt); err != nil {
 			return false, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = 'FAILED' WHERE fill_id = $1`, record.FillID); err != nil {
@@ -440,14 +440,14 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 	}
 	commandTag, err := tx.Exec(ctx, `
 		INSERT INTO fills (
-			fill_id, exchange_order_id, intent_id, market_id, condition_id, token_id,
+			fill_id, exchange_order_id, intent_id, unique_tag, market_id, condition_id, token_id,
 			outcome, side, shares, price, fee, fee_rate_bps, trade_status, trader_side, exchange_time, received_at
 		) VALUES (
-			$1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6,
-			$7, $8, $9, $10, COALESCE(NULLIF($11, ''), '0'), COALESCE(NULLIF($12, ''), '0'), $13, $14, $15, $16
+			$1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6, $7,
+			$8, $9, $10, $11, COALESCE(NULLIF($12, ''), '0'), COALESCE(NULLIF($13, ''), '0'), $14, $15, $16, $17
 		)
 		ON CONFLICT (fill_id) DO NOTHING
-	`, record.FillID, record.ExchangeOrderID, record.IntentID, record.MarketID, record.ConditionID, record.TokenID,
+	`, record.FillID, record.ExchangeOrderID, record.IntentID, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
 		record.Outcome, record.Side, record.Shares, record.Price, record.Fee, record.FeeRateBps, tradeStatus, record.TraderSide, zeroTimeToNil(record.ExchangeTime), receivedAt)
 	if err != nil {
 		return false, fmt.Errorf("insert fill: %w", err)
@@ -464,10 +464,10 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		}
 		return true, nil
 	}
-	if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.MarketID, record.Outcome, string(record.Side), record.Shares, record.Price, record.TraderSide, false, receivedAt); err != nil {
+	if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, record.MarketID, record.Outcome, string(record.Side), record.Shares, record.Price, record.TraderSide, false, receivedAt); err != nil {
 		return false, err
 	}
-	if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, tradeStatus); err != nil {
+	if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, tradeStatus); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -495,17 +495,17 @@ func updateIntentStatus(ctx context.Context, tx pgx.Tx, intentID string, state s
 	return nil
 }
 
-func setPositionSettlementState(ctx context.Context, tx pgx.Tx, conditionID, tokenID, tradeStatus string) error {
+func setPositionSettlementState(ctx context.Context, tx pgx.Tx, conditionID, tokenID, uniqueTag, tradeStatus string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE positions SET state = CASE WHEN $1 = 'CONFIRMED' THEN CASE WHEN position_size = 0 THEN 'empty' ELSE 'open' END ELSE 'unsettled' END
-		WHERE condition_id = $2 AND token_id = $3
-	`, tradeStatus, conditionID, tokenID); err != nil {
+		WHERE condition_id = $2 AND token_id = $3 AND unique_tag = $4
+	`, tradeStatus, conditionID, tokenID, uniqueTag); err != nil {
 		return fmt.Errorf("set position settlement state: %w", err)
 	}
 	return nil
 }
 
-func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, marketID, outcome, side, shares, price, traderSide string, reverse bool, receivedAt time.Time) error {
+func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, uniqueTag, marketID, outcome, side, shares, price, traderSide string, reverse bool, receivedAt time.Time) error {
 	creditedShares, err := accounting.CreditedShares(side, shares, price, traderSide)
 	if err != nil {
 		return err
@@ -517,59 +517,59 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, ma
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO positions (
-			condition_id, token_id, market_id, outcome, position_size, actual_shares, available_size,
+			condition_id, token_id, unique_tag, market_id, outcome, position_size, actual_shares, available_size,
 			reserved_size, entry_price, entry_time, state, source_revision, updated_at
 		) VALUES (
-			$1, $2, $3, $4,
-			CASE WHEN $5 = 'BUY' THEN $6::numeric ELSE 0 END,
-			CASE WHEN $5 = 'BUY' THEN $6::numeric ELSE 0 END,
-			CASE WHEN $5 = 'BUY' THEN $6::numeric ELSE 0 END,
+			$1, $2, $3, $4, $5,
+			CASE WHEN $6 = 'BUY' THEN $7::numeric ELSE 0 END,
+			CASE WHEN $6 = 'BUY' THEN $7::numeric ELSE 0 END,
+			CASE WHEN $6 = 'BUY' THEN $7::numeric ELSE 0 END,
 			0,
-			CASE WHEN $5 = 'BUY' THEN $7::numeric ELSE NULL END,
-			CASE WHEN $5 = 'BUY' THEN $8 ELSE NULL END,
-			CASE WHEN $5 = 'BUY' THEN 'open' ELSE 'empty' END,
-			1, $8
+			CASE WHEN $6 = 'BUY' THEN $8::numeric ELSE NULL END,
+			CASE WHEN $6 = 'BUY' THEN $9 ELSE NULL END,
+			CASE WHEN $6 = 'BUY' THEN 'open' ELSE 'empty' END,
+			1, $9
 		)
-		ON CONFLICT (condition_id, token_id) DO UPDATE SET
+		ON CONFLICT (condition_id, token_id, unique_tag) DO UPDATE SET
 			market_id = EXCLUDED.market_id,
 			outcome = EXCLUDED.outcome,
 			position_size = CASE
-				WHEN $5 = 'BUY' THEN positions.position_size + $6::numeric
-				ELSE GREATEST(positions.position_size - $6::numeric, 0)
+				WHEN $6 = 'BUY' THEN positions.position_size + $7::numeric
+				ELSE GREATEST(positions.position_size - $7::numeric, 0)
 			END,
 			actual_shares = CASE
-				WHEN $5 = 'BUY' THEN positions.actual_shares + $6::numeric
-				ELSE GREATEST(positions.actual_shares - $6::numeric, 0)
+				WHEN $6 = 'BUY' THEN positions.actual_shares + $7::numeric
+				ELSE GREATEST(positions.actual_shares - $7::numeric, 0)
 			END,
 			available_size = CASE
-				WHEN $5 = 'BUY' THEN positions.available_size + $6::numeric
-				ELSE GREATEST(positions.available_size - GREATEST($6::numeric - positions.reserved_size, 0), 0)
+				WHEN $6 = 'BUY' THEN positions.available_size + $7::numeric
+				ELSE GREATEST(positions.available_size - GREATEST($7::numeric - positions.reserved_size, 0), 0)
 			END,
 			reserved_size = CASE
-				WHEN $5 = 'BUY' THEN positions.reserved_size
-				ELSE GREATEST(positions.reserved_size - $6::numeric, 0)
+				WHEN $6 = 'BUY' THEN positions.reserved_size
+				ELSE GREATEST(positions.reserved_size - $7::numeric, 0)
 			END,
 			entry_price = CASE
-				WHEN $5 = 'BUY' AND positions.position_size > 0 THEN
-					((positions.entry_price * positions.position_size) + ($7::numeric * $6::numeric)) /
-					(positions.position_size + $6::numeric)
-				WHEN $5 = 'BUY' THEN $7::numeric
-				WHEN positions.position_size <= $6::numeric THEN NULL
+				WHEN $6 = 'BUY' AND positions.position_size > 0 THEN
+					((positions.entry_price * positions.position_size) + ($8::numeric * $7::numeric)) /
+					(positions.position_size + $7::numeric)
+				WHEN $6 = 'BUY' THEN $8::numeric
+				WHEN positions.position_size <= $7::numeric THEN NULL
 				ELSE positions.entry_price
 			END,
 			entry_time = CASE
-				WHEN $5 = 'BUY' AND positions.position_size = 0 THEN $8
-				WHEN $5 = 'SELL' AND positions.position_size <= $6::numeric THEN NULL
+				WHEN $6 = 'BUY' AND positions.position_size = 0 THEN $9
+				WHEN $6 = 'SELL' AND positions.position_size <= $7::numeric THEN NULL
 				ELSE positions.entry_time
 			END,
 			state = CASE
-				WHEN $5 = 'BUY' THEN 'open'
-				WHEN positions.position_size <= $6::numeric THEN 'empty'
+				WHEN $6 = 'BUY' THEN 'open'
+				WHEN positions.position_size <= $7::numeric THEN 'empty'
 				ELSE 'open'
 			END,
 			source_revision = positions.source_revision + 1,
-			updated_at = $8
-	`, conditionID, tokenID, marketID, outcome, side,
+			updated_at = $9
+	`, conditionID, tokenID, uniqueTag, marketID, outcome, side,
 		creditedShares, price, receivedAt); err != nil {
 		return fmt.Errorf("update position from fill: %w", err)
 	}
@@ -610,8 +610,8 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 				reserved_size = reserved_size + $1::numeric,
 				source_revision = source_revision + 1,
 				updated_at = $2
-			WHERE condition_id = $3 AND token_id = $4 AND available_size >= $1::numeric
-		`, record.Shares, updatedAt, record.ConditionID, record.TokenID)
+			WHERE condition_id = $3 AND token_id = $4 AND unique_tag = $5 AND available_size >= $1::numeric
+		`, record.Shares, updatedAt, record.ConditionID, record.TokenID, record.UniqueTag)
 		if err != nil {
 			return fmt.Errorf("reserve sell position: %w", err)
 		}
@@ -623,13 +623,13 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO reservations (
-			reservation_id, intent_id, child_sequence, market_id, condition_id, token_id,
+			reservation_id, intent_id, child_sequence, unique_tag, market_id, condition_id, token_id,
 			outcome, side, shares, notional, state, reason, created_at, updated_at
 		) VALUES (
-			$1, $2, NULLIF($3, 0), $4, $5, $6,
-			$7, $8, $9, $10, $11, $12, $13, $14
+			$1, $2, NULLIF($3, 0), $4, $5, $6, $7,
+			$8, $9, $10, $11, $12, $13, $14, $15
 		)
-	`, record.ReservationID, record.IntentID, record.ChildSequence, record.MarketID, record.ConditionID, record.TokenID,
+	`, record.ReservationID, record.IntentID, record.ChildSequence, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
 		record.Outcome, record.Side, record.Shares, record.Notional, state, record.Reason, createdAt, updatedAt)
 	if err != nil {
 		if isUniqueConstraint(err, "reservations_one_active_sell_idx") {
@@ -654,11 +654,11 @@ func (s *Store) Reservation(ctx context.Context, reservationID string) (store.Re
 	var childSequence *int
 	err := s.pool.QueryRow(ctx, `
 		SELECT reservation_id, intent_id, child_sequence, market_id, condition_id, token_id,
-			outcome, side, shares::text, notional::text, state, reason, created_at, updated_at
+			unique_tag, outcome, side, shares::text, notional::text, state, reason, created_at, updated_at
 		FROM reservations
 		WHERE reservation_id = $1
 	`, reservationID).Scan(&record.ReservationID, &record.IntentID, &childSequence, &record.MarketID,
-		&record.ConditionID, &record.TokenID, &record.Outcome, &record.Side, &record.Shares,
+		&record.ConditionID, &record.TokenID, &record.UniqueTag, &record.Outcome, &record.Side, &record.Shares,
 		&record.Notional, &record.State, &record.Reason, &record.CreatedAt, &record.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.ReservationRecord{}, store.ErrNotFound
@@ -731,10 +731,10 @@ func deleteActiveReservation(ctx context.Context, tx pgx.Tx, reservationID strin
 	err := tx.QueryRow(ctx, `
 		DELETE FROM reservations
 		WHERE reservation_id = $1 AND state = 'active'
-		RETURNING intent_id, child_sequence, market_id, condition_id, token_id, outcome,
+		RETURNING intent_id, child_sequence, market_id, condition_id, token_id, unique_tag, outcome,
 			side, shares::text, notional::text, state, reason, created_at, updated_at
 	`, reservationID).Scan(&record.IntentID, &childSequence, &record.MarketID, &record.ConditionID,
-		&record.TokenID, &record.Outcome, &record.Side, &record.Shares, &record.Notional, &record.State,
+		&record.TokenID, &record.UniqueTag, &record.Outcome, &record.Side, &record.Shares, &record.Notional, &record.State,
 		&record.Reason, &record.CreatedAt, &record.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.ReservationRecord{}, store.ErrNotFound
@@ -758,15 +758,15 @@ func restoreReservationPosition(ctx context.Context, tx pgx.Tx, record store.Res
 			reserved_size = GREATEST(reserved_size - $1::numeric, 0),
 			source_revision = source_revision + 1,
 			updated_at = now()
-		WHERE condition_id = $2 AND token_id = $3
-	`, record.Shares, record.ConditionID, record.TokenID); err != nil {
+		WHERE condition_id = $2 AND token_id = $3 AND unique_tag = $4
+	`, record.Shares, record.ConditionID, record.TokenID, record.UniqueTag); err != nil {
 		return fmt.Errorf("restore sell position: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
-	rows, err := s.pool.Query(ctx, positionSelectSQL()+" ORDER BY condition_id, token_id")
+	rows, err := s.pool.Query(ctx, positionSelectSQL()+" ORDER BY condition_id, token_id, unique_tag")
 	if err != nil {
 		return nil, fmt.Errorf("query position features: %w", err)
 	}
@@ -827,7 +827,7 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	var policy []byte
 	var targetUSD *string
 	err := row.Scan(
-		&record.IntentID, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
+		&record.IntentID, &record.UniqueTag, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &record.FeatureCompletedAt, &record.ExpiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,
@@ -852,7 +852,7 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 	var entryPrice *string
 	var entryTime *time.Time
 	err := row.Scan(
-		&record.MarketID, &record.ConditionID, &record.TokenID, &record.Outcome,
+		&record.MarketID, &record.ConditionID, &record.TokenID, &record.UniqueTag, &record.Outcome,
 		&record.PositionSize, &record.ActualShares, &record.AvailableSize, &record.ReservedSize,
 		&entryPrice, &entryTime, &record.State, &record.SourceRevision, &record.UpdatedAt,
 	)
@@ -873,7 +873,7 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 
 func positionSelectSQL() string {
 	return `
-		SELECT market_id, condition_id, token_id, outcome,
+		SELECT market_id, condition_id, token_id, unique_tag, outcome,
 			position_size::text, actual_shares::text, available_size::text, reserved_size::text,
 			entry_price::text, entry_time, state, source_revision, updated_at
 		FROM positions
@@ -925,7 +925,7 @@ func scanReservation(row rowScanner) (store.ReservationRecord, error) {
 	var record store.ReservationRecord
 	var childSequence *int
 	err := row.Scan(&record.ReservationID, &record.IntentID, &childSequence, &record.MarketID, &record.ConditionID,
-		&record.TokenID, &record.Outcome, &record.Side, &record.Shares, &record.Notional, &record.State,
+		&record.TokenID, &record.UniqueTag, &record.Outcome, &record.Side, &record.Shares, &record.Notional, &record.State,
 		&record.Reason, &record.CreatedAt, &record.UpdatedAt)
 	if err != nil {
 		return store.ReservationRecord{}, fmt.Errorf("scan reservation: %w", err)

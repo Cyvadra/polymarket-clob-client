@@ -78,9 +78,10 @@ func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, e
 }
 
 type fakeCLOB struct {
-	submitErr error
-	response  *clobclient.OrderResponse
-	created   clobclient.UserOrder
+	submitErr       error
+	response        *clobclient.OrderResponse
+	created         clobclient.UserOrder
+	canceledOrderID string
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
@@ -91,7 +92,10 @@ func (c *fakeCLOB) CreateOrder(_ context.Context, order clobclient.UserOrder) (c
 func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrderV2, _ clobclient.OrderType, _ bool) (*clobclient.OrderResponse, error) {
 	return c.response, c.submitErr
 }
-func (c *fakeCLOB) CancelOrder(context.Context, string) error { return nil }
+func (c *fakeCLOB) CancelOrder(_ context.Context, orderID string) error {
+	c.canceledOrderID = orderID
+	return nil
+}
 
 type resultPublisher struct {
 	subject string
@@ -104,7 +108,7 @@ func (p *resultPublisher) PublishJSON(subject string, value any) error {
 }
 
 func openRequest() protocol.ExecutionOpenRequest {
-	return protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, ExpiresAt: time.Now().Add(time.Hour).UTC(), Policy: protocol.ExecutionPolicy{Style: protocol.ExecutionStyleLimit, CompleteWithinMillis: 1}}
+	return protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, ExpiresAt: time.Now().Add(time.Hour).UTC(), Policy: protocol.ExecutionPolicy{Style: protocol.ExecutionStyleLimit, CompleteWithinMillis: 1}}
 }
 
 func TestExecuteOpenPublishesResultOnValidationFailure(t *testing.T) {

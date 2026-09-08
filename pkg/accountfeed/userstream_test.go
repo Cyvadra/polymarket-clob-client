@@ -54,8 +54,11 @@ func (s *userStreamStore) WithIntentLock(ctx context.Context, _ string, fn func(
 func (s *userStreamStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
 	return false, nil
 }
-func (s *userStreamStore) Intent(context.Context, string) (store.OrderIntentRecord, error) {
-	return store.OrderIntentRecord{}, store.ErrNotFound
+func (s *userStreamStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	if s.order.IntentID != intentID {
+		return store.OrderIntentRecord{}, store.ErrNotFound
+	}
+	return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a"}, nil
 }
 func (s *userStreamStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return nil, nil
@@ -89,7 +92,7 @@ func TestUserStreamConsumesOrderAndMatchedTrade(t *testing.T) {
 	if err := stream.consume(context.Background(), []byte(`{"event_type":"trade","id":"fill-1","taker_order_id":"order-1","market":"condition","asset_id":"token","side":"BUY","size":"2","price":"0.5","outcome":"Up","status":"MATCHED","trader_side":"TAKER","timestamp":"1000"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.fills) != 1 || repository.fills[0].FillID != "fill-1" || !repository.fills[0].ExchangeTime.Equal(time.Unix(1, 0).UTC()) {
+	if len(repository.fills) != 1 || repository.fills[0].FillID != "fill-1" || repository.fills[0].UniqueTag != "lane-a" || !repository.fills[0].ExchangeTime.Equal(time.Unix(1, 0).UTC()) {
 		t.Fatalf("fills = %+v", repository.fills)
 	}
 }
@@ -102,7 +105,7 @@ func TestUserStreamOnlyConsumesOwnedMakerTrades(t *testing.T) {
 	if err := stream.consume(context.Background(), []byte(`{"event_type":"trade","id":"fill-1","taker_order_id":"other-taker","market":"condition","asset_id":"token","side":"BUY","size":"2","price":"0.5","outcome":"Up","status":"MATCHED","trader_side":"MAKER","owner":"key","timestamp":"1000","maker_orders":[{"order_id":"our-maker","owner":"key","matched_amount":"1","price":"0.5","asset_id":"token","outcome":"Up","side":"SELL"},{"order_id":"other-maker","owner":"someone-else","matched_amount":"1","price":"0.5","asset_id":"token","outcome":"Up","side":"SELL"}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "our-maker" || repository.fills[0].TraderSide != "MAKER" {
+	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "our-maker" || repository.fills[0].UniqueTag != "lane-a" || repository.fills[0].TraderSide != "MAKER" {
 		t.Fatalf("expected only owned maker fill, got %+v", repository.fills)
 	}
 }

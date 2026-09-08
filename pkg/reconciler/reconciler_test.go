@@ -59,7 +59,12 @@ func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(contex
 func (s *fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
 	return false, nil
 }
-func (s *fakeStore) Intent(context.Context, string) (store.OrderIntentRecord, error) {
+func (s *fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	for _, order := range s.orders {
+		if order.IntentID == intentID {
+			return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}, nil
+		}
+	}
 	return store.OrderIntentRecord{}, store.ErrNotFound
 }
 func (s *fakeStore) ApplyFill(_ context.Context, record store.FillRecord) (bool, error) {
@@ -198,7 +203,7 @@ func TestReconcileReplaysOwnedTradesBeforeOrders(t *testing.T) {
 	if err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "order-1" || repository.fills[0].IntentID != "intent-1" || repository.fills[0].Side != store.SideSell {
+	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "order-1" || repository.fills[0].IntentID != "intent-1" || repository.fills[0].UniqueTag != "lane-a" || repository.fills[0].Side != store.SideSell {
 		t.Fatalf("expected owned maker fill replay, got %+v", repository.fills)
 	}
 }

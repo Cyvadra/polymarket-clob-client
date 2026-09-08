@@ -37,7 +37,7 @@ func testStore(t *testing.T) *Store {
 func seedIntent(t *testing.T, s *Store, intentID string) {
 	t.Helper()
 	_, err := s.InsertIntent(context.Background(), store.OrderIntentRecord{
-		IntentID: intentID, Strategy: "test", Kind: store.IntentOpen,
+		IntentID: intentID, UniqueTag: "lane-a", Strategy: "test", Kind: store.IntentOpen,
 		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
 		TargetUSD: "1", LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
 	})
@@ -108,7 +108,7 @@ func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 
 	ctx := context.Background()
 	inserted, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-1", ExchangeOrderID: "intent-fill-exchange", IntentID: "intent-fill",
+		FillID: "fill-1", ExchangeOrderID: "intent-fill-exchange", IntentID: "intent-fill", UniqueTag: "lane-a",
 		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED", TraderSide: "TAKER",
 	})
@@ -124,7 +124,7 @@ func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 	}
 
 	reversed, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-1", ExchangeOrderID: "intent-fill-exchange", IntentID: "intent-fill",
+		FillID: "fill-1", ExchangeOrderID: "intent-fill-exchange", IntentID: "intent-fill", UniqueTag: "lane-a",
 		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "FAILED", TraderSide: "TAKER",
 	})
@@ -147,14 +147,14 @@ func TestReserveReleaseRestoresAvailableShares(t *testing.T) {
 
 	ctx := context.Background()
 	if _, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-2", ExchangeOrderID: "intent-reserve-exchange", IntentID: "intent-reserve",
+		FillID: "fill-2", ExchangeOrderID: "intent-reserve-exchange", IntentID: "intent-reserve", UniqueTag: "lane-a",
 		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED",
 	}); err != nil {
 		t.Fatalf("seed position: %v", err)
 	}
 	if err := s.Reserve(ctx, store.ReservationRecord{
-		ReservationID: "reserve-1", IntentID: "intent-reserve", ConditionID: "condition", TokenID: "token",
+		ReservationID: "reserve-1", IntentID: "intent-reserve", UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token",
 		Outcome: "Up", Side: store.SideSell, Shares: "3", Notional: "1.5", State: "active",
 	}); err != nil {
 		t.Fatalf("reserve: %v", err)
@@ -186,7 +186,7 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 
 	seedIntent(t, s, "intent-exposure")
 	within := store.ReservationRecord{
-		ReservationID: "intent-exposure:1", IntentID: "intent-exposure", ChildSequence: 1, MarketID: "market",
+		ReservationID: "intent-exposure:1", IntentID: "intent-exposure", ChildSequence: 1, UniqueTag: "lane-a", MarketID: "market",
 		ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
 		Shares: "10", Notional: "8", State: "active",
 	}

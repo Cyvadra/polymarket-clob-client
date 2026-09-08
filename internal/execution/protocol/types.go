@@ -79,6 +79,7 @@ type ExecutionPolicy struct {
 type ExecutionIntent struct {
 	SchemaVersion      string          `json:"schema_version"`
 	IntentID           string          `json:"intent_id"`
+	UniqueTag          string          `json:"unique_tag"`
 	Strategy           string          `json:"strategy"`
 	Kind               IntentKind      `json:"kind"`
 	MarketID           string          `json:"market_id,omitempty"`
@@ -100,6 +101,7 @@ type ExecutionIntent struct {
 
 type ExecutionOpenRequest struct {
 	SchemaVersion      string          `json:"schema_version"`
+	UniqueTag          string          `json:"unique_tag"`
 	Strategy           string          `json:"strategy"`
 	MarketID           string          `json:"market_id,omitempty"`
 	EventSlug          string          `json:"event_slug,omitempty"`
@@ -127,6 +129,7 @@ const (
 
 type ExecutionCloseRequest struct {
 	SchemaVersion string             `json:"schema_version"`
+	UniqueTag     string             `json:"unique_tag"`
 	Strategy      string             `json:"strategy"`
 	ConditionID   string             `json:"condition_id"`
 	AssetID       string             `json:"asset_id"`
@@ -161,6 +164,7 @@ const (
 
 type ExecutionOpenResult struct {
 	SchemaVersion string       `json:"schema_version"`
+	UniqueTag     string       `json:"unique_tag"`
 	ConditionID   string       `json:"condition_id"`
 	TokenID       string       `json:"token_id"`
 	Outcome       string       `json:"outcome"`
@@ -175,6 +179,7 @@ type ExecutionOpenResult struct {
 
 type ExecutionCloseResult struct {
 	SchemaVersion string       `json:"schema_version"`
+	UniqueTag     string       `json:"unique_tag"`
 	ConditionID   string       `json:"condition_id"`
 	AssetID       string       `json:"asset_id"`
 	Outcome       string       `json:"outcome"`
@@ -234,6 +239,7 @@ type PositionQueryRequest struct {
 	SchemaVersion string `json:"schema_version"`
 	ConditionID   string `json:"condition_id,omitempty"`
 	MarketID      string `json:"market_id,omitempty"`
+	UniqueTag     string `json:"unique_tag,omitempty"`
 }
 
 type PositionQueryResponse struct {
@@ -245,6 +251,7 @@ type PositionQueryResponse struct {
 type PositionFeature struct {
 	SchemaVersion     string     `json:"schema_version"`
 	Seq               int64      `json:"seq"`
+	UniqueTag         string     `json:"unique_tag,omitempty"`
 	MarketID          string     `json:"market_id,omitempty"`
 	ConditionID       string     `json:"condition_id"`
 	TokenID           string     `json:"token_id"`

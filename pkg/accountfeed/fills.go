@@ -55,12 +55,16 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	if err != nil {
 		return false, fmt.Errorf("lookup fill order: %w", err)
 	}
+	intent, err := c.store.Intent(ctx, order.IntentID)
+	if err != nil {
+		return false, fmt.Errorf("lookup fill intent: %w", err)
+	}
 	receivedAt := fill.ReceivedAt
 	if receivedAt.IsZero() {
 		receivedAt = c.now().UTC()
 	}
 	return c.store.ApplyFill(ctx, store.FillRecord{
-		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: order.IntentID,
+		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: order.IntentID, UniqueTag: intent.UniqueTag,
 		MarketID: fill.MarketID, ConditionID: fill.ConditionID, TokenID: fill.TokenID,
 		Outcome: fill.Outcome, Side: store.Side(fill.Side), Shares: fill.Shares, Price: fill.Price,
 		Fee: fill.Fee, FeeRateBps: fill.FeeRateBps, TradeStatus: fill.TradeStatus,

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -36,8 +37,8 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.SchemaVersion != protocol.SchemaVersionV1 {
 		return invalid("unsupported intent schema version %q", intent.SchemaVersion)
 	}
-	if intent.IntentID == "" || intent.Strategy == "" || intent.ConditionID == "" || intent.TokenID == "" || intent.Outcome == "" {
-		return invalid("intent ID, strategy, condition ID, token ID, and outcome are required")
+	if intent.IntentID == "" || strings.TrimSpace(intent.UniqueTag) == "" || intent.Strategy == "" || intent.ConditionID == "" || intent.TokenID == "" || intent.Outcome == "" {
+		return invalid("intent ID, unique tag, strategy, condition ID, token ID, and outcome are required")
 	}
 	if intent.Side != protocol.SideBuy && intent.Side != protocol.SideSell {
 		return invalid("invalid side %q", intent.Side)
@@ -122,7 +123,7 @@ func reservationRecord(intent protocol.ExecutionIntent, child plannedChild, rese
 		notional = product
 	}
 	return store.ReservationRecord{
-		ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: child.Sequence,
+		ReservationID: reservationID, IntentID: intent.IntentID, ChildSequence: child.Sequence, UniqueTag: intent.UniqueTag,
 		MarketID: intent.MarketID, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: store.Side(intent.Side), Shares: child.Shares, Notional: notional, State: "active",
 		Reason: child.ReservationReason, CreatedAt: now, UpdatedAt: now,

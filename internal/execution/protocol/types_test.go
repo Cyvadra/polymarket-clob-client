@@ -26,7 +26,7 @@ func TestPositionFeaturesSubjectRejectsInvalidTokens(t *testing.T) {
 }
 
 func TestPositionFeatureEmptyPositionUsesNullEntryFields(t *testing.T) {
-	feature := PositionFeature{SchemaVersion: SchemaVersionV1, Seq: 7, ConditionID: "condition", TokenID: "token", Outcome: "Up", UpdatedAt: time.Unix(10, 0).UTC(), PublishedAt: time.Unix(11, 0).UTC()}
+	feature := PositionFeature{SchemaVersion: SchemaVersionV1, Seq: 7, UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Outcome: "Up", UpdatedAt: time.Unix(10, 0).UTC(), PublishedAt: time.Unix(11, 0).UTC()}
 	payload, err := json.Marshal(feature)
 	if err != nil {
 		t.Fatalf("marshal position feature: %v", err)
@@ -38,7 +38,7 @@ func TestPositionFeatureEmptyPositionUsesNullEntryFields(t *testing.T) {
 }
 
 func TestExecutionOpenKeepsDecimalValuesAsStrings(t *testing.T) {
-	intent := ExecutionOpenRequest{SchemaVersion: SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetUSD: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
+	intent := ExecutionOpenRequest{SchemaVersion: SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetUSD: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal execution open request: %v", err)
@@ -89,7 +89,7 @@ func (p *recordingPublisher) PublishJSON(subject string, value any) error {
 
 func TestOpenResultPublishSetsSchemaAndSubject(t *testing.T) {
 	publisher := &recordingPublisher{}
-	result := ExecutionOpenResult{ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, Status: ResultSucceeded, Reason: "done", FilledShares: "1", OccurredAt: time.Unix(5, 0).UTC()}
+	result := ExecutionOpenResult{UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, Status: ResultSucceeded, Reason: "done", FilledShares: "1", OccurredAt: time.Unix(5, 0).UTC()}
 	if err := PublishExecutionOpenResult(publisher, result); err != nil {
 		t.Fatalf("publish open result: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestOpenResultPublishSetsSchemaAndSubject(t *testing.T) {
 }
 
 func TestCloseAndQueryMessagesRoundTrip(t *testing.T) {
-	closeReq := ExecutionCloseRequest{SchemaVersion: SchemaVersionV1, Strategy: "strategy", ConditionID: "condition", AssetID: "asset", Outcome: "Up", Mode: ExecutionCloseModeForce}
+	closeReq := ExecutionCloseRequest{SchemaVersion: SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", AssetID: "asset", Outcome: "Up", Mode: ExecutionCloseModeForce}
 	payload, err := json.Marshal(closeReq)
 	if err != nil {
 		t.Fatalf("marshal close request: %v", err)
@@ -115,11 +115,11 @@ func TestCloseAndQueryMessagesRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatalf("unmarshal close request: %v", err)
 	}
-	if decoded.Mode != closeReq.Mode || decoded.AssetID != closeReq.AssetID || decoded.ConditionID != closeReq.ConditionID {
+	if decoded.Mode != closeReq.Mode || decoded.AssetID != closeReq.AssetID || decoded.ConditionID != closeReq.ConditionID || decoded.UniqueTag != closeReq.UniqueTag {
 		t.Fatalf("close request round trip mismatch: %+v", decoded)
 	}
 
-	query := PositionQueryRequest{SchemaVersion: SchemaVersionV1, ConditionID: "condition-a"}
+	query := PositionQueryRequest{SchemaVersion: SchemaVersionV1, ConditionID: "condition-a", UniqueTag: "lane-a"}
 	payload, err = json.Marshal(query)
 	if err != nil {
 		t.Fatalf("marshal query request: %v", err)
@@ -128,7 +128,7 @@ func TestCloseAndQueryMessagesRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(payload, &decodedQuery); err != nil {
 		t.Fatalf("unmarshal query request: %v", err)
 	}
-	if decodedQuery.ConditionID != query.ConditionID || decodedQuery.MarketID != "" {
+	if decodedQuery.ConditionID != query.ConditionID || decodedQuery.UniqueTag != query.UniqueTag || decodedQuery.MarketID != "" {
 		t.Fatalf("query request round trip mismatch: %+v", decodedQuery)
 	}
 }

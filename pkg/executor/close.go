@@ -54,7 +54,7 @@ func (e *Executor) ExecuteClose(ctx context.Context, req protocol.ExecutionClose
 // always exits the whole position on the sell side.
 func (e *Executor) closeResult(req protocol.ExecutionCloseRequest, status protocol.ResultStatus, code, reason string) protocol.ExecutionCloseResult {
 	return protocol.ExecutionCloseResult{
-		ConditionID: req.ConditionID, AssetID: req.AssetID, Outcome: req.Outcome, Side: protocol.SideSell,
+		UniqueTag: req.UniqueTag, ConditionID: req.ConditionID, AssetID: req.AssetID, Outcome: req.Outcome, Side: protocol.SideSell,
 		Status: status, ReasonCode: code, Reason: reason, OccurredAt: e.now(),
 	}
 }
@@ -63,8 +63,8 @@ func validateCloseRequest(req protocol.ExecutionCloseRequest) error {
 	if req.SchemaVersion != protocol.SchemaVersionV1 {
 		return fmt.Errorf("close request requires schema_version %q", protocol.SchemaVersionV1)
 	}
-	if strings.TrimSpace(req.Strategy) == "" || strings.TrimSpace(req.ConditionID) == "" || strings.TrimSpace(req.AssetID) == "" || strings.TrimSpace(req.Outcome) == "" {
-		return fmt.Errorf("close request strategy, condition ID, asset ID, and outcome are required")
+	if strings.TrimSpace(req.UniqueTag) == "" || strings.TrimSpace(req.Strategy) == "" || strings.TrimSpace(req.ConditionID) == "" || strings.TrimSpace(req.AssetID) == "" || strings.TrimSpace(req.Outcome) == "" {
+		return fmt.Errorf("close request unique tag, strategy, condition ID, asset ID, and outcome are required")
 	}
 	if req.Mode != protocol.ExecutionCloseModeLimit && req.Mode != protocol.ExecutionCloseModeForce {
 		return fmt.Errorf("invalid close mode %q", req.Mode)
@@ -78,7 +78,7 @@ func validateCloseRequest(req protocol.ExecutionCloseRequest) error {
 }
 
 func (e *Executor) closeIntent(ctx context.Context, req protocol.ExecutionCloseRequest) (protocol.ExecutionIntent, error) {
-	position, found, err := e.positionFor(ctx, req.ConditionID, req.AssetID)
+	position, found, err := e.positionFor(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
 	if err != nil {
 		return protocol.ExecutionIntent{}, err
 	}
@@ -93,6 +93,7 @@ func (e *Executor) closeIntent(ctx context.Context, req protocol.ExecutionCloseR
 	intent := protocol.ExecutionIntent{
 		SchemaVersion: req.SchemaVersion,
 		IntentID:      newExecutionID(),
+		UniqueTag:     req.UniqueTag,
 		Strategy:      req.Strategy,
 		Kind:          protocol.IntentClose,
 		ConditionID:   req.ConditionID,
@@ -118,8 +119,8 @@ func (e *Executor) closeIntent(ctx context.Context, req protocol.ExecutionCloseR
 
 // cancelCloseableOpenOrder cancels the strategy's still-open child for a
 // condition/token, if any, so a close can proceed without a competing order.
-func (e *Executor) cancelCloseableOpenOrder(ctx context.Context, conditionID, tokenID string) error {
-	live, existing, err := e.findCloseableOpenOrder(ctx, conditionID, tokenID)
+func (e *Executor) cancelCloseableOpenOrder(ctx context.Context, conditionID, tokenID, uniqueTag string) error {
+	live, existing, err := e.findCloseableOpenOrder(ctx, conditionID, tokenID, uniqueTag)
 	if err != nil || !live {
 		return err
 	}
@@ -127,7 +128,7 @@ func (e *Executor) cancelCloseableOpenOrder(ctx context.Context, conditionID, to
 }
 
 func (e *Executor) executeClose(ctx context.Context, intent protocol.ExecutionIntent) error {
-	if err := e.cancelCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID); err != nil {
+	if err := e.cancelCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag); err != nil {
 		return err
 	}
 	return e.Execute(ctx, intent)
@@ -138,7 +139,7 @@ type closeableOrder struct {
 	order  store.SignedOrderRecord
 }
 
-func (e *Executor) findCloseableOpenOrder(ctx context.Context, conditionID, tokenID string) (bool, closeableOrder, error) {
+func (e *Executor) findCloseableOpenOrder(ctx context.Context, conditionID, tokenID, uniqueTag string) (bool, closeableOrder, error) {
 	orders, err := e.store.OpenOrders(ctx)
 	if err != nil {
 		return false, closeableOrder{}, fmt.Errorf("load open orders: %w", err)
@@ -154,7 +155,7 @@ func (e *Executor) findCloseableOpenOrder(ctx context.Context, conditionID, toke
 			}
 			return false, closeableOrder{}, fmt.Errorf("load order intent: %w", err)
 		}
-		if intent.ConditionID == conditionID && intent.TokenID == tokenID {
+		if intent.ConditionID == conditionID && intent.TokenID == tokenID && intent.UniqueTag == uniqueTag {
 			if order.State == statemachine.StateLive || order.State == statemachine.StatePartiallyFilled || order.State == statemachine.StateCancelRequested {
 				return true, closeableOrder{intent: intent, order: order}, nil
 			}
@@ -164,11 +165,12 @@ func (e *Executor) findCloseableOpenOrder(ctx context.Context, conditionID, toke
 }
 
 func (e *Executor) closeForce(ctx context.Context, intent protocol.ExecutionIntent) error {
-	if err := e.cancelCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID); err != nil {
+	if err := e.cancelCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag); err != nil {
 		return err
 	}
 	return e.forceClosePosition(ctx, store.OrderIntentRecord{
 		IntentID:    intent.IntentID,
+		UniqueTag:   intent.UniqueTag,
 		Strategy:    intent.Strategy,
 		Kind:        store.IntentClose,
 		ConditionID: intent.ConditionID,
@@ -189,7 +191,7 @@ func (e *Executor) closeForce(ctx context.Context, intent protocol.ExecutionInte
 // error. A vanished position or a competing active sell means there is nothing
 // left for us to exit, which is likewise treated as a completed close.
 func (e *Executor) forceClosePosition(ctx context.Context, intent store.OrderIntentRecord) error {
-	position, found, err := e.positionFor(ctx, intent.ConditionID, intent.TokenID)
+	position, found, err := e.positionFor(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag)
 	if err != nil {
 		return err
 	}
@@ -213,13 +215,13 @@ func (e *Executor) forceClosePosition(ctx context.Context, intent store.OrderInt
 	return nil
 }
 
-func (e *Executor) positionFor(ctx context.Context, conditionID, tokenID string) (store.PositionRecord, bool, error) {
+func (e *Executor) positionFor(ctx context.Context, conditionID, tokenID, uniqueTag string) (store.PositionRecord, bool, error) {
 	positions, err := e.store.PositionFeatures(ctx)
 	if err != nil {
 		return store.PositionRecord{}, false, fmt.Errorf("load positions: %w", err)
 	}
 	for _, candidate := range positions {
-		if candidate.ConditionID == conditionID && candidate.TokenID == tokenID {
+		if candidate.ConditionID == conditionID && candidate.TokenID == tokenID && candidate.UniqueTag == uniqueTag {
 			return candidate, true, nil
 		}
 	}
