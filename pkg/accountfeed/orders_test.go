@@ -19,15 +19,20 @@ type fakeOrderStore struct {
 }
 
 type recordedPublisher struct {
-	results []protocol.ExecutionOpenResult
+	results      []protocol.ExecutionOpenResult
+	closeResults []protocol.ExecutionCloseResult
 }
 
 func (p *recordedPublisher) PublishJSON(subject string, value any) error {
-	if subject != protocol.SubjectExecutionOpenResult {
-		return nil
-	}
-	if result, ok := value.(protocol.ExecutionOpenResult); ok {
-		p.results = append(p.results, result)
+	switch subject {
+	case protocol.SubjectExecutionOpenResult:
+		if result, ok := value.(protocol.ExecutionOpenResult); ok {
+			p.results = append(p.results, result)
+		}
+	case protocol.SubjectExecutionCloseResult:
+		if result, ok := value.(protocol.ExecutionCloseResult); ok {
+			p.closeResults = append(p.closeResults, result)
+		}
 	}
 	return nil
 }
@@ -121,7 +126,7 @@ func TestPublishTerminalResultSkipsInternalChildren(t *testing.T) {
 	}
 }
 
-func TestPublishTerminalResultSkipsCloseIntents(t *testing.T) {
+func TestPublishTerminalResultEmitsCloseResultForCloseIntent(t *testing.T) {
 	publisher := &recordedPublisher{}
 	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
 	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateFilled, MatchedShares: "2"}
@@ -130,6 +135,21 @@ func TestPublishTerminalResultSkipsCloseIntents(t *testing.T) {
 	}
 	if len(publisher.results) != 0 {
 		t.Fatalf("expected no open result for a close intent, got %+v", publisher.results)
+	}
+	if len(publisher.closeResults) != 1 || publisher.closeResults[0].Status != protocol.ResultSucceeded || publisher.closeResults[0].AssetID != "token" {
+		t.Fatalf("expected a successful close result carrying the asset ID, got %+v", publisher.closeResults)
+	}
+}
+
+func TestPublishTerminalResultSkipsCloseInternalChild(t *testing.T) {
+	publisher := &recordedPublisher{}
+	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}
+	if err := PublishTerminalResult(publisher, intent, order, "filled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish result: %v", err)
+	}
+	if len(publisher.closeResults) != 0 {
+		t.Fatalf("expected no close result for a force-close exit, got %+v", publisher.closeResults)
 	}
 }
 

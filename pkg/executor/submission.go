@@ -41,7 +41,7 @@ func newExecutionID() string {
 }
 
 func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRequest) error {
-	return e.Execute(ctx, protocol.ExecutionIntent{
+	intent := protocol.ExecutionIntent{
 		SchemaVersion:      req.SchemaVersion,
 		IntentID:           newExecutionID(),
 		Strategy:           req.Strategy,
@@ -61,24 +61,27 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		CreatedAt:          req.CreatedAt,
 		ExpiresAt:          req.ExpiresAt,
 		Policy:             req.Policy,
-	})
-}
-
-func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
-	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
+	}
+	if err := e.Execute(ctx, intent); err != nil {
 		e.publishOpenRejection(intent, err)
 		return err
 	}
-	err := e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
+	return nil
+}
+
+// Execute plans, reserves, signs, and submits an intent's child order. It
+// returns an error without publishing: each caller owns result publication so
+// open and close intents report on their own result subjects.
+func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
+	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
+		return err
+	}
+	return e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
 		if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC())); err != nil {
 			return fmt.Errorf("persist intent: %w", err)
 		}
 		return e.prepareAndSubmit(ctx, intent)
 	})
-	if err != nil {
-		e.publishOpenRejection(intent, err)
-	}
-	return err
 }
 
 func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err error) {

@@ -116,13 +116,19 @@ func (e *Executor) closeIntent(ctx context.Context, req protocol.ExecutionCloseR
 	return intent, nil
 }
 
-func (e *Executor) executeClose(ctx context.Context, intent protocol.ExecutionIntent) error {
-	if live, existing, err := e.findCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID); err != nil {
+// cancelCloseableOpenOrder cancels the strategy's still-open child for a
+// condition/token, if any, so a close can proceed without a competing order.
+func (e *Executor) cancelCloseableOpenOrder(ctx context.Context, conditionID, tokenID string) error {
+	live, existing, err := e.findCloseableOpenOrder(ctx, conditionID, tokenID)
+	if err != nil || !live {
 		return err
-	} else if live {
-		if err := e.cancelOpenOrder(ctx, existing.intent, existing.order); err != nil {
-			return err
-		}
+	}
+	return e.cancelOpenOrder(ctx, existing.intent, existing.order)
+}
+
+func (e *Executor) executeClose(ctx context.Context, intent protocol.ExecutionIntent) error {
+	if err := e.cancelCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID); err != nil {
+		return err
 	}
 	return e.Execute(ctx, intent)
 }
@@ -158,12 +164,8 @@ func (e *Executor) findCloseableOpenOrder(ctx context.Context, conditionID, toke
 }
 
 func (e *Executor) closeForce(ctx context.Context, intent protocol.ExecutionIntent) error {
-	if live, existing, err := e.findCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID); err != nil {
+	if err := e.cancelCloseableOpenOrder(ctx, intent.ConditionID, intent.TokenID); err != nil {
 		return err
-	} else if live {
-		if err := e.cancelOpenOrder(ctx, existing.intent, existing.order); err != nil {
-			return err
-		}
 	}
 	return e.forceClosePosition(ctx, store.OrderIntentRecord{
 		IntentID:    intent.IntentID,

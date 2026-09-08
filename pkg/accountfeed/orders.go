@@ -79,12 +79,17 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 }
 
 func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
-	result, ok := mapping.TerminalResult(order, intent, reason, occurredAt)
-	if !ok {
+	if result, ok := mapping.TerminalResult(order, intent, reason, occurredAt); ok {
+		if err := protocol.PublishExecutionOpenResult(publisher, result); err != nil {
+			return fmt.Errorf("publish terminal open result: %w", err)
+		}
 		return nil
 	}
-	if err := protocol.PublishExecutionOpenResult(publisher, result); err != nil {
-		return fmt.Errorf("publish terminal open result: %w", err)
+	if result, ok := mapping.TerminalCloseResult(order, intent, reason, occurredAt); ok {
+		if err := protocol.PublishExecutionCloseResult(publisher, result); err != nil {
+			return fmt.Errorf("publish terminal close result: %w", err)
+		}
+		return nil
 	}
 	return nil
 }

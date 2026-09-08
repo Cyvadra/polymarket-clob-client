@@ -61,7 +61,7 @@ Open and close results identify the affected position (`condition_id` + `token_i
 
 Open results are emitted **only at terminal resolution** of an open — when the child order reaches a fill (any amount counts as success, including a partial fill) or is cancelled without any fill (failure). executiond never publishes an open `SUCCEEDED` merely because a resting order was accepted, so a success always means shares were actually bought. `filled_shares` is populated on terminal open results.
 
-Close results report *dispatch*: `FORCE_CLOSE` reports `SUCCEEDED` once the 0.01 FAK exit is submitted (best effort — success even if the sell never fills), and `LIMIT_CLOSE` reports success once the limit sell is submitted.
+Close results report *dispatch*: `FORCE_CLOSE` reports `SUCCEEDED` once the 0.01 FAK exit is submitted (best effort — success even if the sell never fills), and `LIMIT_CLOSE` reports success once the limit sell is submitted. `LIMIT_CLOSE` additionally emits a **terminal** close result when its sell child order resolves: a fill (including a partial fill) reports `SUCCEEDED` with `filled_shares` populated, while a cancel/expiry with no fill reports `FAILED` — so the strategy can distinguish a submitted-but-unfilled take-profit from a completed close. `FORCE_CLOSE` emits no terminal result; its dispatch ack is its only close result.
 
 `average_price` is currently reserved and not populated on either result; the authoritative entry/exit price is conveyed on `position.features.*`.
 

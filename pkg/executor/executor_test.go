@@ -158,3 +158,42 @@ func TestExecuteOpenMarksUnknownWhenSubmissionTimesOut(t *testing.T) {
 		t.Fatalf("expected submit unknown state, got %s", storer.order.State)
 	}
 }
+
+type recordingPublisher struct {
+	publishes []publishRecord
+}
+
+type publishRecord struct {
+	subject string
+	value   any
+}
+
+func (p *recordingPublisher) PublishJSON(subject string, value any) error {
+	p.publishes = append(p.publishes, publishRecord{subject: subject, value: value})
+	return nil
+}
+
+func TestExecuteCloseValidationFailurePublishesOnlyCloseResult(t *testing.T) {
+	storer := &fakeStore{inserted: true, positions: []store.PositionRecord{{ConditionID: "condition", TokenID: "token", Outcome: "Up", PositionSize: "2", ActualShares: "2", AvailableSize: "2", State: "open"}}}
+	client := &fakeCLOB{}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	req := closeRequest(protocol.ExecutionCloseModeLimit)
+	req.TimeInForce = protocol.TimeInForce("IOC")
+	if err := exec.ExecuteClose(context.Background(), req); err == nil {
+		t.Fatal("expected invalid time-in-force failure")
+	}
+	if len(pub.publishes) != 1 {
+		t.Fatalf("expected exactly one result, got %d: %+v", len(pub.publishes), pub.publishes)
+	}
+	if pub.publishes[0].subject != protocol.SubjectExecutionCloseResult {
+		t.Fatalf("expected close result subject, got %q", pub.publishes[0].subject)
+	}
+	if result, ok := pub.publishes[0].value.(protocol.ExecutionCloseResult); !ok || result.Status != protocol.ResultFailed {
+		t.Fatalf("expected failed close result, got %+v", pub.publishes[0].value)
+	}
+}

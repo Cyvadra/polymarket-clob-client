@@ -60,6 +60,30 @@ func SameDecimal(left, right string) bool {
 	return leftRat.Cmp(rightRat) == 0
 }
 
+// terminalStatus maps a terminal order state onto the strategy-facing result
+// status and reason code. A still-working order (for example a partially
+// filled GTC order) returns ok=false so no result is produced until the order
+// actually resolves.
+func terminalStatus(state statemachine.State, matchedShares string) (protocol.ResultStatus, string, bool) {
+	switch state {
+	case statemachine.StateFilled:
+		return protocol.ResultSucceeded, "", true
+	case statemachine.StateCanceled:
+		if decimal.Positive(matchedShares) {
+			return protocol.ResultSucceeded, "", true
+		}
+		return protocol.ResultFailed, "", true
+	case statemachine.StateRejected:
+		return protocol.ResultFailed, protocol.ReasonOrderRejected, true
+	case statemachine.StateExpired:
+		return protocol.ResultFailed, "", true
+	case statemachine.StateFailed:
+		return protocol.ResultFailed, protocol.ReasonExecutionFailed, true
+	default:
+		return "", "", false
+	}
+}
+
 // TerminalResult derives the strategy-facing open result for an order of an
 // OPEN intent that reached a terminal state. Only the strategy child of an
 // open intent produces a result: internal children (a force-close exit) and
@@ -70,33 +94,34 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 	if order.ChildSequence != store.StrategyChildSequence || intent.Kind != store.IntentOpen {
 		return protocol.ExecutionOpenResult{}, false
 	}
-	result := protocol.ExecutionOpenResult{
-		ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
-		Side: protocol.Side(intent.Side), Reason: reason, FilledShares: order.MatchedShares, OccurredAt: occurredAt,
-	}
-	switch order.State {
-	case statemachine.StateFilled:
-		result.Status = protocol.ResultSucceeded
-	case statemachine.StateCanceled:
-		if decimal.Positive(order.MatchedShares) {
-			result.Status = protocol.ResultSucceeded
-		} else {
-			result.Status = protocol.ResultFailed
-		}
-	case statemachine.StateRejected:
-		result.Status = protocol.ResultFailed
-		result.ReasonCode = protocol.ReasonOrderRejected
-	case statemachine.StateExpired:
-		result.Status = protocol.ResultFailed
-	case statemachine.StateFailed:
-		result.Status = protocol.ResultFailed
-		result.ReasonCode = protocol.ReasonExecutionFailed
-	case statemachine.StatePartiallyFilled:
-		result.Status = protocol.ResultSucceeded
-	default:
+	status, reasonCode, ok := terminalStatus(order.State, order.MatchedShares)
+	if !ok {
 		return protocol.ExecutionOpenResult{}, false
 	}
-	return result, true
+	return protocol.ExecutionOpenResult{
+		ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
+		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
+		FilledShares: order.MatchedShares, OccurredAt: occurredAt,
+	}, true
+}
+
+// TerminalCloseResult derives the strategy-facing close result for the
+// strategy child of a CLOSE intent that reached a terminal state. A close
+// intent's force-close exit is an internal child (higher sequence) and is not
+// surfaced here; it already reported its outcome when it was dispatched.
+func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason string, occurredAt time.Time) (protocol.ExecutionCloseResult, bool) {
+	if order.ChildSequence != store.StrategyChildSequence || intent.Kind != store.IntentClose {
+		return protocol.ExecutionCloseResult{}, false
+	}
+	status, reasonCode, ok := terminalStatus(order.State, order.MatchedShares)
+	if !ok {
+		return protocol.ExecutionCloseResult{}, false
+	}
+	return protocol.ExecutionCloseResult{
+		ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
+		Side: protocol.SideSell, Status: status, ReasonCode: reasonCode, Reason: reason,
+		FilledShares: order.MatchedShares, OccurredAt: occurredAt,
+	}, true
 }
 
 // PositionFeature maps a durable position record onto the strategy-facing

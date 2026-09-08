@@ -143,3 +143,56 @@ func TestTerminalResultIgnoresInternalChildren(t *testing.T) {
 		t.Fatal("expected no terminal result for an internal child order")
 	}
 }
+
+// A partially filled order that is still working is not terminal and must not
+// produce a result; it resolves to a terminal state later.
+func TestTerminalResultPartiallyFilledIsNotTerminal(t *testing.T) {
+	openIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
+	if _, ok := TerminalResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: statemachine.StatePartiallyFilled, MatchedShares: "0.5"}, openIntent, "reason", time.Unix(100, 0).UTC()); ok {
+		t.Fatal("expected no terminal result for a still-working partially filled order")
+	}
+}
+
+func TestTerminalCloseResultMapsStates(t *testing.T) {
+	at := time.Unix(100, 0).UTC()
+	closeIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	cases := []struct {
+		state  statemachine.State
+		status protocol.ResultStatus
+		ok     bool
+	}{
+		{statemachine.StateFilled, protocol.ResultSucceeded, true},
+		{statemachine.StateCanceled, protocol.ResultFailed, true},
+		{statemachine.StateRejected, protocol.ResultFailed, true},
+		{statemachine.StateExpired, protocol.ResultFailed, true},
+		{statemachine.StateFailed, protocol.ResultFailed, true},
+		{statemachine.StateLive, "", false},
+	}
+	for _, tc := range cases {
+		result, ok := TerminalCloseResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: tc.state, MatchedShares: "0"}, closeIntent, "reason", at)
+		if ok != tc.ok {
+			t.Fatalf("state %s ok=%v want %v", tc.state, ok, tc.ok)
+		}
+		if !ok {
+			continue
+		}
+		if result.Status != tc.status {
+			t.Fatalf("state %s status=%s want %s", tc.state, result.Status, tc.status)
+		}
+		if result.AssetID != "token" || result.Side != protocol.SideSell {
+			t.Fatalf("unexpected close identity: %+v", result)
+		}
+	}
+}
+
+func TestTerminalCloseResultIgnoresOpenIntentAndInternalChild(t *testing.T) {
+	at := time.Unix(100, 0).UTC()
+	openIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
+	if _, ok := TerminalCloseResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: statemachine.StateFilled, MatchedShares: "2"}, openIntent, "reason", at); ok {
+		t.Fatal("expected no close result for an open intent")
+	}
+	closeIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	if _, ok := TerminalCloseResult(store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence + 1, State: statemachine.StateFilled, MatchedShares: "2"}, closeIntent, "reason", at); ok {
+		t.Fatal("expected no close result for a force-close exit")
+	}
+}
