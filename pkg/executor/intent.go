@@ -92,7 +92,7 @@ func validatePolicyDurations(policy protocol.ExecutionPolicy) error {
 		return invalid("execution policy max_reprices must not be negative")
 	}
 	if policy.RepriceIntervalMillis > 0 || policy.MaxReprices > 0 || policy.PostOnlyCrossRetry ||
-		policy.SoftCloseAfterMillis > 0 || policy.ForceCloseAfterMillis > 0 || policy.CancelReplaceTimeoutMillis > 0 {
+		policy.SoftCloseAfterMillis > 0 || policy.ForceCloseAfterMillis > 0 {
 		return reject(protocol.ReasonUnimplementedPolicy, "execution policy lifecycle controls are not implemented")
 	}
 	return nil

@@ -485,11 +485,28 @@ func oppositeSide(side string) string {
 
 // updateIntentStatus mirrors the child order lifecycle onto the parent intent
 // so order_intents.status reflects the latest observed state instead of the
-// write-once INTENT_RECEIVED sentinel.
+// write-once INTENT_RECEIVED sentinel. Superseded close intents keep their
+// marker even if the old order later reaches a terminal state.
 func updateIntentStatus(ctx context.Context, tx pgx.Tx, intentID string, state statemachine.State) error {
 	if _, err := tx.Exec(ctx, `
-		UPDATE order_intents SET status = $1, updated_at = now() WHERE intent_id = $2
-	`, string(state), intentID); err != nil {
+		UPDATE order_intents
+		SET status = CASE WHEN status = $1 THEN status ELSE $2 END, updated_at = now()
+		WHERE intent_id = $3
+	`, store.IntentStatusSuperseded, string(state), intentID); err != nil {
+		return fmt.Errorf("update intent status: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) UpdateIntentStatus(ctx context.Context, intentID string, status string) error {
+	if intentID == "" || status == "" {
+		return fmt.Errorf("intent ID and status are required")
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE order_intents
+		SET status = $1, updated_at = now()
+		WHERE intent_id = $2
+	`, status, intentID); err != nil {
 		return fmt.Errorf("update intent status: %w", err)
 	}
 	return nil

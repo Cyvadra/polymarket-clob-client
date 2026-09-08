@@ -59,6 +59,7 @@ func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(contex
 func (s *fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
 	return false, nil
 }
+func (s *fakeStore) UpdateIntentStatus(context.Context, string, string) error { return nil }
 func (s *fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
 	for _, order := range s.orders {
 		if order.IntentID == intentID {

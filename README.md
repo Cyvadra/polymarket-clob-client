@@ -26,7 +26,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 `pmm` 负责市场特征产出并发布行情快照；策略发布 open / close 请求。`executiond` 负责签名、提交、关闭、已认证账户事件、持久化订单状态、仓位记账，以及使用最新行情快照为高级执行风格规划初始 child 订单。
 
-服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。请求投递刻意采用 at-most-once 语义：过期或丢失的请求不会被重放。可解码但无效的请求会收到失败结果；无效 JSON 无法回应。每个钱包只能运行一个 `executiond` 实例。
+服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。请求投递刻意采用 at-most-once 语义：过期或丢失的请求不会被重放。开仓请求的可解码校验失败会收到失败结果；平仓请求不再发 ACK / SUCCESS，终态结果只在订单真正结束后回报。无效 JSON 无法回应。每个钱包只能运行一个 `executiond` 实例。
 
 ### NATS 契约
 
@@ -48,7 +48,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
 对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
 
-`strategy.execution.close` 用于关闭当前仓位：`LIMIT_CLOSE` 先撤掉同一 `condition_id` / `asset_id` / `unique_tag` 上仍挂单的开仓 child，再提交限价卖出；`FORCE_CLOSE` 会先撤单，再提交内部的 `0.01 SELL FAK` 强平。关闭结果通过 `execution.close.result` 回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id`、`market_id` 或 `unique_tag` 过滤，回复负载与 `PositionFeature` 一致。
+`strategy.execution.close` 用于关闭当前仓位：`LIMIT_CLOSE` 先撤掉同一 `condition_id` / `asset_id` / `unique_tag` 上仍挂单的开仓 child 与旧平仓 child，再提交新的限价卖出；`FORCE_CLOSE` 会先撤单，再提交内部的 `0.01 SELL FAK` 强平。若同一 lane 再收到新的平仓信号，旧平仓会被取消并且不再向外发出失败/取消反馈，新的平仓请求会按至少 `200ms` 的间隔重试提交，`policy.cancel_replace_timeout_ms` 用来限制这段替换等待。关闭结果只在平仓单真正终态后通过 `execution.close.result` 回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id`、`market_id` 或 `unique_tag` 过滤，回复负载与 `PositionFeature` 一致。
 
 ### 仓位记账
 

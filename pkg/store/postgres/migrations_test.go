@@ -5,15 +5,15 @@ import (
 	"testing"
 )
 
-func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
+func TestMigrationsEmbedSingleSchema(t *testing.T) {
 	migrations, err := Migrations()
 	if err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-	if len(migrations) != 4 {
-		t.Fatalf("expected four migrations, got %d", len(migrations))
+	if len(migrations) != 1 {
+		t.Fatalf("expected a single merged migration, got %d", len(migrations))
 	}
-	if migrations[0].Name != "000001_execution_state.sql" {
+	if migrations[0].Name != "000001_schema.sql" {
 		t.Fatalf("unexpected migration name %q", migrations[0].Name)
 	}
 
@@ -24,21 +24,18 @@ func TestMigrationsEmbedInitialExecutionState(t *testing.T) {
 		"signed_order_hash TEXT NOT NULL UNIQUE",
 		"CREATE TABLE IF NOT EXISTS fills",
 		"fill_id TEXT PRIMARY KEY",
+		// Fill-settlement columns (formerly migration 000002).
+		"fee_rate_bps NUMERIC(38, 18) NOT NULL DEFAULT 0",
+		"trade_status TEXT NOT NULL DEFAULT 'CONFIRMED'",
+		"trader_side TEXT NOT NULL DEFAULT ''",
 		"CREATE TABLE IF NOT EXISTS positions",
 		"PRIMARY KEY (condition_id, token_id, unique_tag)",
 		"CREATE TABLE IF NOT EXISTS reservations",
+		"reservations_one_active_sell_idx",
+		"(condition_id, token_id, unique_tag)",
 	} {
 		if !strings.Contains(sql, fragment) {
 			t.Fatalf("migration missing %q", fragment)
 		}
-	}
-	if migrations[1].Name != "000002_fill_settlement.sql" || !strings.Contains(migrations[1].SQL, "trade_status") {
-		t.Fatalf("unexpected settlement migration: %+v", migrations[1])
-	}
-	if migrations[2].Name != "000003_active_sell_reservation.sql" || !strings.Contains(migrations[2].SQL, "reservations_one_active_sell_idx") {
-		t.Fatalf("unexpected active sell reservation migration: %+v", migrations[2])
-	}
-	if migrations[3].Name != "000004_target_usd.sql" || !strings.Contains(migrations[3].SQL, "RENAME COLUMN") {
-		t.Fatalf("unexpected target usd migration: %+v", migrations[3])
 	}
 }

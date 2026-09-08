@@ -13,17 +13,24 @@ import (
 )
 
 type fakeStore struct {
-	inserted   bool
-	intentSeen bool
-	order      store.SignedOrderRecord
-	intent     store.OrderIntentRecord
-	positions  []store.PositionRecord
+	inserted        bool
+	intentSeen      bool
+	order           store.SignedOrderRecord
+	intent          store.OrderIntentRecord
+	positions       []store.PositionRecord
+	insertedIntents []store.OrderIntentRecord
+
+	// extraOrders/extraIntents let tests model multiple open children on one
+	// lane (e.g. a resting open next to a pending close).
+	extraOrders  []store.SignedOrderRecord
+	extraIntents map[string]store.OrderIntentRecord
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
 	return fn(ctx)
 }
-func (s *fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, error) {
+func (s *fakeStore) InsertIntent(_ context.Context, record store.OrderIntentRecord) (bool, error) {
+	s.insertedIntents = append(s.insertedIntents, record)
 	if s.intentSeen {
 		return false, nil
 	}
@@ -31,10 +38,25 @@ func (s *fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool
 	return s.inserted, nil
 }
 func (s *fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	if intent, ok := s.extraIntents[intentID]; ok {
+		return intent, nil
+	}
 	if s.intent.IntentID != intentID {
 		return store.OrderIntentRecord{}, store.ErrNotFound
 	}
 	return s.intent, nil
+}
+func (s *fakeStore) UpdateIntentStatus(_ context.Context, intentID, status string) error {
+	if intent, ok := s.extraIntents[intentID]; ok {
+		intent.Status = statemachine.State(status)
+		s.extraIntents[intentID] = intent
+		return nil
+	}
+	if s.intent.IntentID != intentID {
+		return store.ErrNotFound
+	}
+	s.intent.Status = statemachine.State(status)
+	return nil
 }
 func (s *fakeStore) PersistSignedOrder(_ context.Context, record store.SignedOrderRecord) error {
 	s.order = record
@@ -62,10 +84,12 @@ func (s *fakeStore) OrderByIntent(_ context.Context, intentID string, childSeque
 	return s.order, nil
 }
 func (s *fakeStore) OpenOrders(context.Context) ([]store.SignedOrderRecord, error) {
-	if s.order.IntentID == "" {
-		return nil, nil
+	orders := make([]store.SignedOrderRecord, 0, 1+len(s.extraOrders))
+	if s.order.IntentID != "" {
+		orders = append(orders, s.order)
 	}
-	return []store.SignedOrderRecord{s.order}, nil
+	orders = append(orders, s.extraOrders...)
+	return orders, nil
 }
 func (s *fakeStore) Reserve(context.Context, store.ReservationRecord) error { return nil }
 func (s *fakeStore) Reservation(context.Context, string) (store.ReservationRecord, error) {
@@ -78,10 +102,11 @@ func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, e
 }
 
 type fakeCLOB struct {
-	submitErr       error
-	response        *clobclient.OrderResponse
-	created         clobclient.UserOrder
-	canceledOrderID string
+	submitErr        error
+	response         *clobclient.OrderResponse
+	created          clobclient.UserOrder
+	canceledOrderID  string
+	canceledOrderIDs []string
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
@@ -94,6 +119,7 @@ func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrder
 }
 func (c *fakeCLOB) CancelOrder(_ context.Context, orderID string) error {
 	c.canceledOrderID = orderID
+	c.canceledOrderIDs = append(c.canceledOrderIDs, orderID)
 	return nil
 }
 
@@ -177,7 +203,7 @@ func (p *recordingPublisher) PublishJSON(subject string, value any) error {
 	return nil
 }
 
-func TestExecuteCloseValidationFailurePublishesOnlyCloseResult(t *testing.T) {
+func TestExecuteCloseValidationFailurePublishesNothing(t *testing.T) {
 	storer := &fakeStore{inserted: true, positions: []store.PositionRecord{{ConditionID: "condition", TokenID: "token", Outcome: "Up", PositionSize: "2", ActualShares: "2", AvailableSize: "2", State: "open"}}}
 	client := &fakeCLOB{}
 	exec, err := New(storer, client, time.Now)
@@ -191,13 +217,7 @@ func TestExecuteCloseValidationFailurePublishesOnlyCloseResult(t *testing.T) {
 	if err := exec.ExecuteClose(context.Background(), req); err == nil {
 		t.Fatal("expected invalid time-in-force failure")
 	}
-	if len(pub.publishes) != 1 {
-		t.Fatalf("expected exactly one result, got %d: %+v", len(pub.publishes), pub.publishes)
-	}
-	if pub.publishes[0].subject != protocol.SubjectExecutionCloseResult {
-		t.Fatalf("expected close result subject, got %q", pub.publishes[0].subject)
-	}
-	if result, ok := pub.publishes[0].value.(protocol.ExecutionCloseResult); !ok || result.Status != protocol.ResultFailed {
-		t.Fatalf("expected failed close result, got %+v", pub.publishes[0].value)
+	if len(pub.publishes) != 0 {
+		t.Fatalf("expected no immediate close result, got %+v", pub.publishes)
 	}
 }

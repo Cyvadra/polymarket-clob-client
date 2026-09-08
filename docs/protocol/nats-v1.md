@@ -38,7 +38,7 @@ Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, 
 | `policy.max_reprices` | Reserved; non-zero rejected. |
 | `policy.soft_close_after_ms` | Reserved; non-zero rejected. |
 | `policy.force_close_after_ms` | Reserved; non-zero rejected. |
-| `policy.cancel_replace_timeout_ms` | Reserved; non-zero rejected. |
+| `policy.cancel_replace_timeout_ms` | Used by repeated close replacement retries. |
 
 Prices are aligned to tick size before signing. Share sizes are floored to exchange precision.
 
@@ -54,7 +54,7 @@ Close requests also require `unique_tag` so the execution daemon can target the 
 | `limit_price` | Required for `LIMIT_CLOSE`. |
 | `asset_id` | The token/asset being closed. |
 
-`LIMIT_CLOSE` submits a normal sell close. `FORCE_CLOSE` submits a `SELL 0.01 FAK` exit for the remaining position.
+`LIMIT_CLOSE` submits a normal sell close. `FORCE_CLOSE` submits a `SELL 0.01 FAK` exit for the remaining position. If a new close arrives while one is still pending on the same lane, executiond cancels the old close, suppresses its terminal result, and retries the latest close after at least 200ms; `policy.cancel_replace_timeout_ms` bounds that replacement retry loop.
 
 ## Results
 
@@ -62,7 +62,9 @@ Open and close results identify the affected position (`unique_tag` + `condition
 
 Open results are emitted **only at terminal resolution** of an open — when the child order reaches a fill (any amount counts as success, including a partial fill) or is cancelled without any fill (failure). executiond never publishes an open `SUCCEEDED` merely because a resting order was accepted, so a success always means shares were actually bought. `filled_shares` is populated on terminal open results.
 
-Close results report *dispatch*: `FORCE_CLOSE` reports `SUCCEEDED` once the 0.01 FAK exit is submitted (best effort — success even if the sell never fills), and `LIMIT_CLOSE` reports success once the limit sell is submitted. `LIMIT_CLOSE` additionally emits a **terminal** close result when its sell child order resolves: a fill (including a partial fill) reports `SUCCEEDED` with `filled_shares` populated, while a cancel/expiry with no fill reports `FAILED` — so the strategy can distinguish a submitted-but-unfilled take-profit from a completed close. `FORCE_CLOSE` emits no terminal result; its dispatch ack is its only close result.
+Close results are emitted only at terminal resolution of the strategy close child. A fill (including a partial fill) reports `SUCCEEDED` with `filled_shares` populated, while a cancel/expiry with no fill reports `FAILED`. executiond does not publish a close ACK or dispatch success when a request is merely accepted. If a close intent has been superseded by a newer close on the same lane, its terminal result is suppressed.
+
+A `LIMIT_CLOSE` emits exactly one close result, when its strategy sell child resolves. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`. The same applies to a close that fails before any child order exists (e.g. a malformed request or a submission rejected by the exchange) — the strategy observes that the position never changed and re-closes.
 
 `average_price` is currently reserved and not populated on either result; the authoritative entry/exit price is conveyed on `position.features.*`.
 

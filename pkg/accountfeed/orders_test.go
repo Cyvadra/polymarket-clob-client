@@ -12,6 +12,7 @@ import (
 
 type fakeOrderStore struct {
 	order          store.SignedOrderRecord
+	intent         store.OrderIntentRecord
 	updated        statemachine.State
 	matchedShares  string
 	observedEvents []statemachine.Event
@@ -40,6 +41,17 @@ func (p *recordedPublisher) PublishJSON(subject string, value any) error {
 func (s *fakeOrderStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error {
 	return nil
 }
+func (s *fakeOrderStore) UpdateIntentStatus(_ context.Context, intentID, status string) error {
+	if s.intent.IntentID == intentID {
+		s.intent.Status = statemachine.State(status)
+		return nil
+	}
+	if s.order.IntentID == intentID {
+		s.intent = store.OrderIntentRecord{IntentID: intentID, Kind: store.IntentOpen, Status: statemachine.State(status)}
+		return nil
+	}
+	return store.ErrNotFound
+}
 func (s *fakeOrderStore) TransitionOrder(_ context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, _ string) (store.SignedOrderRecord, error) {
 	transition, _, err := statemachine.Apply(order.State, event)
 	if err != nil {
@@ -67,6 +79,9 @@ func (s *fakeOrderStore) OrderByExchangeID(_ context.Context, exchangeOrderID st
 	return s.order, nil
 }
 func (s *fakeOrderStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
+	if s.intent.IntentID == intentID {
+		return s.intent, nil
+	}
 	if s.order.IntentID == intentID {
 		return store.OrderIntentRecord{IntentID: intentID, Kind: store.IntentOpen}, nil
 	}
@@ -138,6 +153,18 @@ func TestPublishTerminalResultEmitsCloseResultForCloseIntent(t *testing.T) {
 	}
 	if len(publisher.closeResults) != 1 || publisher.closeResults[0].Status != protocol.ResultSucceeded || publisher.closeResults[0].AssetID != "token" {
 		t.Fatalf("expected a successful close result carrying the asset ID, got %+v", publisher.closeResults)
+	}
+}
+
+func TestPublishTerminalResultSkipsSupersededCloseIntent(t *testing.T) {
+	publisher := &recordedPublisher{}
+	intent := store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentClose, Status: store.IntentStatusSuperseded, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "0"}
+	if err := PublishTerminalResult(publisher, intent, order, "canceled", time.Unix(1, 0)); err != nil {
+		t.Fatalf("publish result: %v", err)
+	}
+	if len(publisher.closeResults) != 0 {
+		t.Fatalf("expected no close result for a superseded close intent, got %+v", publisher.closeResults)
 	}
 }
 

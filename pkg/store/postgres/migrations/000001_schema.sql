@@ -1,15 +1,30 @@
+-- executiond store schema: the single authoritative migration.
+--
+-- The execution daemon has never run against Postgres, so what was previously
+-- spread across 000001 (tables), 000002 (fill-settlement columns), and
+-- 000004 (target_usd rename) is folded into this one file:
+--   * fills.fee_rate_bps / trade_status / trader_side and order_intents.kind
+--     are declared directly here (000002 became a no-op once 000001 was edited
+--     in place);
+--   * order_intents.target_usd is declared nullable: it sizes BUY (open)
+--     intents and is NULL for CLOSE intents, which size by the position they
+--     exit (000004's legacy target_shares rename is not needed because no
+--     database predates this file).
+
 CREATE TABLE IF NOT EXISTS order_intents (
     intent_id TEXT PRIMARY KEY,
     unique_tag TEXT NOT NULL,
     strategy TEXT NOT NULL,
-	kind TEXT NOT NULL,
+    kind TEXT NOT NULL,
     market_id TEXT NOT NULL DEFAULT '',
     event_slug TEXT NOT NULL DEFAULT '',
     condition_id TEXT NOT NULL,
     token_id TEXT NOT NULL,
     outcome TEXT NOT NULL,
     side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
-    target_usd NUMERIC(38, 18) NOT NULL CHECK (target_usd > 0),
+    -- target_usd is set for BUY (open) intents and NULL for CLOSE intents,
+    -- which size by the position they exit instead.
+    target_usd NUMERIC(38, 18) CHECK (target_usd > 0),
     limit_price NUMERIC(38, 18) NOT NULL CHECK (limit_price > 0 AND limit_price < 1),
     time_in_force TEXT NOT NULL,
     post_only BOOLEAN NOT NULL DEFAULT FALSE,
@@ -122,4 +137,7 @@ CREATE TABLE IF NOT EXISTS reservations (
 
 CREATE INDEX IF NOT EXISTS reservations_position_idx ON reservations(condition_id, token_id, state);
 CREATE INDEX IF NOT EXISTS reservations_intent_idx ON reservations(intent_id);
+-- Canonical "one active SELL per lane" guard: positions are keyed by unique_tag,
+-- so independent lanes on the same token each hold their own position row and
+-- may each reserve a sell without serializing on one another.
 CREATE UNIQUE INDEX IF NOT EXISTS reservations_one_active_sell_idx ON reservations(condition_id, token_id, unique_tag) WHERE side = 'SELL' AND state = 'active';

@@ -70,19 +70,28 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 	return nil
 }
 
-// Execute plans, reserves, signs, and submits an intent's child order. It
-// returns an error without publishing: each caller owns result publication so
-// open and close intents report on their own result subjects.
+// Execute plans, reserves, signs, and submits an intent's child order under the
+// intent's advisory lock. It returns an error without publishing: each caller
+// owns result publication so open and close intents report on their own result
+// subjects.
 func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
 		return err
 	}
 	return e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-		if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC())); err != nil {
-			return fmt.Errorf("persist intent: %w", err)
-		}
-		return e.prepareAndSubmit(ctx, intent)
+		return e.persistAndSubmit(ctx, intent)
 	})
+}
+
+// persistAndSubmit durably persists the intent and then plans and submits its
+// strategy child. Callers that already hold an intent-scoped advisory lock (the
+// close lane lock in ExecuteClose) call this directly so the child is placed
+// without nesting a second lock transaction on a second pool connection.
+func (e *Executor) persistAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
+	if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC())); err != nil {
+		return fmt.Errorf("persist intent: %w", err)
+	}
+	return e.prepareAndSubmit(ctx, intent)
 }
 
 func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err error) {
@@ -97,12 +106,6 @@ func (e *Executor) publishOpenResult(intent protocol.ExecutionIntent, status pro
 		FilledShares: filledShares, AveragePrice: averagePrice, OccurredAt: e.now(),
 	}); err != nil && e.onError != nil {
 		e.onError(fmt.Errorf("publish open result: %w", err))
-	}
-}
-
-func (e *Executor) publishCloseResult(result protocol.ExecutionCloseResult) {
-	if err := protocol.PublishExecutionCloseResult(e.publish, result); err != nil && e.onError != nil {
-		e.onError(fmt.Errorf("publish close result: %w", err))
 	}
 }
 

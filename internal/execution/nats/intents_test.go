@@ -35,6 +35,7 @@ func (fakeStore) InsertIntent(context.Context, store.OrderIntentRecord) (bool, e
 func (fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
 	return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}, nil
 }
+func (fakeStore) UpdateIntentStatus(context.Context, string, string) error          { return nil }
 func (fakeStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error { return nil }
 func (fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRecord, event statemachine.Event, matched, exchangeID, _ string) (store.SignedOrderRecord, error) {
 	transition, _, err := statemachine.Apply(order.State, event)

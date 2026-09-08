@@ -106,9 +106,10 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 }
 
 // TerminalCloseResult derives the strategy-facing close result for the
-// strategy child of a CLOSE intent that reached a terminal state. A close
-// intent's force-close exit is an internal child (higher sequence) and is not
-// surfaced here; it already reported its outcome when it was dispatched.
+// strategy child of a CLOSE intent that reached a terminal state. Only the
+// strategy child (sequence 1) produces a close result: a close's force-close
+// exit is an internal child (higher sequence) that never emits one, so the
+// strategy reconciles a force close from position.features.* instead.
 func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason string, occurredAt time.Time) (protocol.ExecutionCloseResult, bool) {
 	if order.ChildSequence != store.StrategyChildSequence || intent.Kind != store.IntentClose {
 		return protocol.ExecutionCloseResult{}, false

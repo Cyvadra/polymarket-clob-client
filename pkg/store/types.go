@@ -46,6 +46,10 @@ const (
 	IntentClose IntentKind = "CLOSE"
 )
 
+// IntentStatusSuperseded marks a close intent that was replaced by a newer
+// close request on the same lane. Its terminal result must not be surfaced.
+const IntentStatusSuperseded = "SUPERSEDED"
+
 // StrategyChildSequence is the child order a strategy intent maps onto.
 // Higher sequences are internal children (such as a force-close exit) that the
 // strategy never acknowledged and must not receive intent acknowledgements for.
@@ -167,6 +171,7 @@ type IntentStore interface {
 	WithIntentLock(context.Context, string, func(context.Context) error) error
 	InsertIntent(context.Context, OrderIntentRecord) (inserted bool, err error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
+	UpdateIntentStatus(context.Context, string, string) error
 }
 
 type OrderStore interface {

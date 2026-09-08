@@ -47,8 +47,8 @@ func TestSubscribeCloseDecodesAndDispatches(t *testing.T) {
 	if err := subscriber.handler(context.Background(), payload); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	if len(publisher.values) != 1 || publisher.values[0].Status != protocol.ResultSucceeded || publisher.values[0].UniqueTag != "lane-a" || publisher.values[0].ConditionID != "condition" || publisher.values[0].AssetID != "token" {
-		t.Fatalf("expected close result publication, got %+v", publisher.values)
+	if len(publisher.values) != 0 {
+		t.Fatalf("expected no immediate close result publication, got %+v", publisher.values)
 	}
 }
 
