@@ -65,24 +65,42 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 ### 运行 `executiond`
 
-`executiond` 需要常规的已认证 CLOB 环境变量（`POLYMARKET_PRIVATE_KEY`、`POLYMARKET_API_KEY`、`POLYMARKET_API_SECRET` 与 `POLYMARKET_API_PASSPHRASE`），另外还需要：
-
-完整的环境变量说明和安全配置方式见 [docs/configuration.md](docs/configuration.md)；可使用 [.env.example](.env.example) 作为无秘密的变量名参考。
+`executiond` 只需要 `POLYMARKET_PRIVATE_KEY`：L2 API 凭证（key/secret/passphrase）
+在启动时由私钥自动派生（`GET /auth/derive-api-key`，签名者尚无凭证时才
+`POST /auth/api-key`），派生是幂等的，重启不会重复创建，无需也不应手工配置。
+另外还需要：
 
 | 变量 | 必填 | 默认值 |
 | --- | --- | --- |
-| `EXECUTION_NATS_URL` | 是 | - |
-| `EXECUTION_POSTGRES_URL` | 是 | - |
+| `EXECUTION_NATS_URL` | 否 | `nats://127.0.0.1:4222` |
+| `EXECUTION_POSTGRES_URL` | 否 | `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable` |
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | 否 | 不限制 |
-| `EXECUTION_POSITION_FEATURE_INTERVAL` | 否 | `500ms` |
-| `EXECUTION_RECONCILE_INTERVAL` | 否 | `30s` |
-| `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | 否 | `2m` |
-| `EXECUTION_CONNECT_TIMEOUT` | 否 | `10s` |
-| `EXECUTION_SHUTDOWN_GRACE_PERIOD` | 否 | `10s` |
+
+`executiond` 直接用环境变量构建 CLOB 客户端，不会自动发现代理钱包，默认按 EOA
+（`signature_type=0`）签名。**如果交易资金在 Polymarket 代理钱包（Safe/deposit
+wallet）中，必须同时设置 `POLYMARKET_MAKER_ADDRESS`（代理钱包地址）与
+`POLYMARKET_SIGNATURE_TYPE`（`1` Poly proxy 或 `2` Gnosis Safe）**，只设其中一个
+会导致下单被交易所拒绝。
+
+调优类变量（快照与对账间隔、各类超时）均有可用默认值，不必在部署时设置，
+说明见 [docs/configuration.md](docs/configuration.md)。完整的环境变量清单和安全配置方式
+同样见该文档；可使用 [.env.example](.env.example) 作为无秘密的变量名参考。
 
 ```sh
 go run ./cmd/executiond
 ```
+
+### 真实资金 NATS 黑盒验证
+
+`cmd/executiontest` 连接到预先启动的、专用的 `executiond`，通过 NATS
+执行最小的真实资金开仓与强平清理闭环，并保留 Markdown 证据报告。必填参数只有
+五个：`--condition-id`、`--asset-id`、`--outcome`、`--target-usd`、`--buy-limit`；
+NATS 地址取自 `EXECUTION_NATS_URL`，不再是命令行参数。
+
+**该工具没有二次确认开关，参数合法即立即下真实订单。** 本地校验只能拦下格式非法的
+取值，拦不住"格式正确但填错"的 asset ID 或金额。需要硬性敞口上限请在守护进程侧设置
+`EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD`。完整的前置条件、运行示例、资金风险和
+可验证边界见 [docs/execution-integration-test.md](docs/execution-integration-test.md)。
 
 ## 快速开始
 

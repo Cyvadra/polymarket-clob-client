@@ -2,8 +2,12 @@ package accountfeed
 
 import (
 	"context"
+	"net/http"
+	"net/url"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
@@ -135,5 +139,47 @@ func TestUserStreamIgnoresUnconfirmedTrade(t *testing.T) {
 	}
 	if len(repository.fills) != 0 {
 		t.Fatalf("unconfirmed fill persisted: %+v", repository.fills)
+	}
+}
+
+func TestUserStreamDialsThroughConfiguredProxy(t *testing.T) {
+	proxy, err := url.Parse("http://127.0.0.1:17894")
+	if err != nil {
+		t.Fatalf("parse proxy: %v", err)
+	}
+	repository := &userStreamStore{}
+	orders, _ := NewOrderConsumer(repository, time.Now)
+	fills, _ := NewFillConsumer(repository, time.Now)
+	credentials := clobclient.Credentials{APIKey: "key", Secret: "secret", Passphrase: "pass"}
+	stream, err := NewUserStream(UserStreamConfig{Credentials: credentials, ProxyURL: proxy}, orders, fills)
+	if err != nil {
+		t.Fatalf("new user stream: %v", err)
+	}
+	if stream.dialer.Proxy == nil {
+		t.Fatal("stream must dial through the configured proxy")
+	}
+	resolved, err := stream.dialer.Proxy(&http.Request{URL: &url.URL{Scheme: "https", Host: "ws-subscriptions-clob.polymarket.com"}})
+	if err != nil || resolved == nil || resolved.String() != proxy.String() {
+		t.Fatalf("proxy resolved to %v (err %v), want %s", resolved, err, proxy)
+	}
+
+	direct, err := NewUserStream(UserStreamConfig{Credentials: credentials}, orders, fills)
+	if err != nil {
+		t.Fatalf("new direct user stream: %v", err)
+	}
+	if direct.dialer == websocket.DefaultDialer {
+		t.Fatal("stream must not mutate the shared default dialer")
+	}
+}
+
+func TestUserStreamIgnoresNonJSONKeepalive(t *testing.T) {
+	repository := &userStreamStore{order: store.SignedOrderRecord{IntentID: "intent-1", ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 1}}
+	orders, _ := NewOrderConsumer(repository, time.Now)
+	fills, _ := NewFillConsumer(repository, time.Now)
+	stream, _ := NewUserStream(UserStreamConfig{Credentials: clobclient.Credentials{APIKey: "key", Secret: "secret", Passphrase: "pass"}}, orders, fills)
+	for _, payload := range []string{"PONG", "PING", ""} {
+		if err := stream.consume(context.Background(), []byte(payload)); err != nil {
+			t.Fatalf("consume(%q) = %v", payload, err)
+		}
 	}
 }

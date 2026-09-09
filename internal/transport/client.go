@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -14,6 +15,11 @@ import (
 
 	"golang.org/x/time/rate"
 )
+
+// ErrEmptyResponse marks a 2xx response with no JSON body. Some CLOB read
+// endpoints answer an unknown identifier this way instead of with a 404, so
+// callers that need to tell "missing" from "broken" match on this sentinel.
+var ErrEmptyResponse = errors.New("empty response")
 
 type HTTPError struct {
 	StatusCode   int
@@ -137,7 +143,7 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 			return nil
 		}
 		if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-			return fmt.Errorf("empty response for %s %s", spec.Method, requestPath)
+			return fmt.Errorf("%w for %s %s", ErrEmptyResponse, spec.Method, requestPath)
 		}
 		if err := json.Unmarshal(data, out); err != nil {
 			return fmt.Errorf("decode response for %s %s: %w", spec.Method, requestPath, err)

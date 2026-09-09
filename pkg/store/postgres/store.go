@@ -216,7 +216,7 @@ func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrder
 			post_only, state, revision, created_at, updated_at
 		) VALUES (
 			$1, $2, $3::jsonb, $4, $5,
-			NULLIF($6, ''), $7, COALESCE(NULLIF($8, ''), '0'), $9, $10,
+			NULLIF($6, ''), $7, COALESCE(NULLIF($8, ''), '0')::numeric, $9, $10,
 			$11, $12, $13, $14, $15
 		)
 	`, record.IntentID, record.ChildSequence, record.SignedPayload, record.SignedOrderHash, record.Salt,
@@ -444,7 +444,7 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			outcome, side, shares, price, fee, fee_rate_bps, trade_status, trader_side, exchange_time, received_at
 		) VALUES (
 			$1, NULLIF($2, ''), NULLIF($3, ''), $4, $5, $6, $7,
-			$8, $9, $10, $11, COALESCE(NULLIF($12, ''), '0'), COALESCE(NULLIF($13, ''), '0'), $14, $15, $16, $17
+			$8, $9, $10, $11, COALESCE(NULLIF($12, ''), '0')::numeric, COALESCE(NULLIF($13, ''), '0')::numeric, $14, $15, $16, $17
 		)
 		ON CONFLICT (fill_id) DO NOTHING
 	`, record.FillID, record.ExchangeOrderID, record.IntentID, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
@@ -843,10 +843,14 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	var record store.OrderIntentRecord
 	var policy []byte
 	var targetUSD *string
+	// feature_completed_at and expires_at are nullable, and insertIntent writes
+	// NULL for a zero time. They must be read back through pointers or every
+	// intent stored without them fails to scan.
+	var featureCompletedAt, expiresAt *time.Time
 	err := row.Scan(
 		&record.IntentID, &record.UniqueTag, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
-		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &record.FeatureCompletedAt, &record.ExpiresAt,
+		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &featureCompletedAt, &expiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -857,6 +861,12 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	}
 	if targetUSD != nil {
 		record.TargetUSD = *targetUSD
+	}
+	if featureCompletedAt != nil {
+		record.FeatureCompletedAt = *featureCompletedAt
+	}
+	if expiresAt != nil {
+		record.ExpiresAt = *expiresAt
 	}
 	if len(policy) > 0 {
 		record.Policy = policy

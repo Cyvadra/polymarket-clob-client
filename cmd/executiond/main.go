@@ -84,12 +84,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(clobConfig.PrivateKey) == "" {
+		return fmt.Errorf("POLYMARKET_PRIVATE_KEY is required for executiond")
+	}
 	clob, err := clobclient.New(clobConfig)
 	if err != nil {
 		return fmt.Errorf("create CLOB client: %w", err)
 	}
-	if clobConfig.Credentials == nil {
-		return fmt.Errorf("POLYMARKET_API_KEY, POLYMARKET_API_SECRET, and POLYMARKET_API_PASSPHRASE are required for executiond")
+	credentials, err := clob.EnsureCredentials(ctx)
+	if err != nil {
+		return err
 	}
 
 	execution, err := executor.New(store, clob, time.Now)
@@ -106,11 +110,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	accountStream, err := accountfeed.NewUserStream(accountfeed.UserStreamConfig{Credentials: *clobConfig.Credentials}, orders, fills)
+	accountStream, err := accountfeed.NewUserStream(accountfeed.UserStreamConfig{Credentials: *credentials, ProxyURL: clob.ProxyURL()}, orders, fills)
 	if err != nil {
 		return err
 	}
-	repair, err := reconciler.New(store, clob, fills, clobConfig.Credentials.APIKey, time.Now, cfg.ReconcileInterval)
+	repair, err := reconciler.New(store, clob, fills, credentials.APIKey, time.Now, cfg.ReconcileInterval)
 	if err != nil {
 		return err
 	}
@@ -222,17 +226,14 @@ func closeModules(ctx context.Context, modules []namedModule) error {
 
 func configFromEnv() (config, error) {
 	cfg := config{
-		NATSURL:               os.Getenv("EXECUTION_NATS_URL"),
-		PostgresURL:           os.Getenv("EXECUTION_POSTGRES_URL"),
+		NATSURL:               env("EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
+		PostgresURL:           env("EXECUTION_POSTGRES_URL", "postgres://user:password@127.0.0.1:5432/execution?sslmode=disable"),
 		MaxOpenBuyNotionalUSD: strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD")),
 		FeatureInterval:       durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
 		ReconcileInterval:     durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
 		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
 		ConnectTimeout:        durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		ShutdownGracePeriod:   durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
-	}
-	if cfg.NATSURL == "" || cfg.PostgresURL == "" {
-		return config{}, fmt.Errorf("EXECUTION_NATS_URL and EXECUTION_POSTGRES_URL are required")
 	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
@@ -241,6 +242,13 @@ func configFromEnv() (config, error) {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
 	return cfg, nil
+}
+
+func env(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func durationEnv(name string, fallback time.Duration) time.Duration {

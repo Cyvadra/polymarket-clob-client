@@ -32,6 +32,22 @@ func (c *Client) CreateOrDeriveCredentials(ctx context.Context) (*Credentials, e
 	return c.CreateCredentials(ctx)
 }
 
+// EnsureCredentials returns the client's L2 credentials, deriving them from the
+// private key on first use. Deriving is idempotent: the CLOB returns the
+// existing API key for the signer, and only creates one when none exists.
+// Call it before the client is shared across goroutines.
+func (c *Client) EnsureCredentials(ctx context.Context) (*Credentials, error) {
+	if c.cfg.Credentials != nil {
+		return c.cfg.Credentials, nil
+	}
+	credentials, err := c.CreateOrDeriveCredentials(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("derive CLOB API credentials from POLYMARKET_PRIVATE_KEY: %w", err)
+	}
+	c.cfg.Credentials = credentials
+	return credentials, nil
+}
+
 func (c *Client) ProxyWallets(ctx context.Context) ([]string, error) {
 	if c.key == nil {
 		return nil, fmt.Errorf("private key is required")

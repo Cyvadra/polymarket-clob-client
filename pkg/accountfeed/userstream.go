@@ -1,9 +1,12 @@
 package accountfeed
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -20,10 +23,15 @@ type UserStreamConfig struct {
 	ReconnectDelay time.Duration
 	MaxReconnect   time.Duration
 	PingInterval   time.Duration
+	// ProxyURL routes the stream through the same egress as the REST client.
+	// Without it the dialer falls back to the process proxy environment, so
+	// the account stream can leave from a different address than the orders.
+	ProxyURL *url.URL
 }
 
 type UserStream struct {
 	cfg     UserStreamConfig
+	dialer  *websocket.Dialer
 	orders  *OrderConsumer
 	fills   *FillConsumer
 	onError func(error)
@@ -48,7 +56,11 @@ func NewUserStream(cfg UserStreamConfig, orders *OrderConsumer, fills *FillConsu
 	if cfg.PingInterval <= 0 {
 		cfg.PingInterval = 10 * time.Second
 	}
-	return &UserStream{cfg: cfg, orders: orders, fills: fills}, nil
+	dialer := *websocket.DefaultDialer
+	if cfg.ProxyURL != nil {
+		dialer.Proxy = http.ProxyURL(cfg.ProxyURL)
+	}
+	return &UserStream{cfg: cfg, dialer: &dialer, orders: orders, fills: fills}, nil
 }
 
 func (s *UserStream) Init(context.Context) error  { return nil }
@@ -85,7 +97,7 @@ func (s *UserStream) Run(ctx context.Context) error {
 }
 
 func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, s.cfg.URL, nil)
+	conn, _, err := s.dialer.DialContext(ctx, s.cfg.URL, nil)
 	if err != nil {
 		return false, fmt.Errorf("dial user stream: %w", err)
 	}
@@ -125,6 +137,12 @@ func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
 }
 
 func (s *UserStream) consume(ctx context.Context, payload []byte) error {
+	// The stream answers our text PINGs with a bare "PONG" and sends other
+	// non-JSON keepalives, so anything that is not a JSON document is not an
+	// event and must not be reported as a decode failure.
+	if !isJSONPayload(payload) {
+		return nil
+	}
 	var envelope struct {
 		EventType string `json:"event_type"`
 	}
@@ -158,6 +176,12 @@ func (s *UserStream) consume(ctx context.Context, payload []byte) error {
 		return nil
 	}
 	return nil
+}
+
+// isJSONPayload reports whether the frame looks like a JSON object or array.
+func isJSONPayload(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	return len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')
 }
 
 func streamTime(value string) time.Time {

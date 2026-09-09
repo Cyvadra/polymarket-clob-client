@@ -52,6 +52,7 @@ func ConfigFromEnv() (Config, error) {
 		if proxyURL.Scheme == "" || proxyURL.Host == "" {
 			return Config{}, fmt.Errorf("POLYMARKET_PROXY_URL must be an absolute URL")
 		}
+		cfg.ProxyURL = proxyURL
 		cfg.HTTPClient = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext}, Timeout: 20 * time.Second}
 	}
 	return cfg, nil

@@ -58,3 +58,8 @@ func New(cfg Config) (*Client, error) {
 func (c *Client) Address() string      { return c.signer }
 func (c *Client) MakerAddress() string { return c.cfg.MakerAddress }
 func (c *Client) ChainID() int64       { return c.cfg.ChainID }
+
+// ProxyURL reports the configured outbound proxy, or nil when the client
+// connects directly. Callers that open their own connections to the exchange
+// use it to share the client's egress.
+func (c *Client) ProxyURL() *url.URL { return c.cfg.ProxyURL }

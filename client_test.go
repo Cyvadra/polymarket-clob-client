@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -233,5 +234,93 @@ func TestNewPreservesExplicitSignatureType(t *testing.T) {
 	}
 	if client.cfg.SignatureType != SignatureTypeEOA {
 		t.Fatalf("signature type changed to %d", client.cfg.SignatureType)
+	}
+}
+
+func TestEnsureCredentialsDerivesOnceAndFallsBackToCreate(t *testing.T) {
+	var paths []string
+	deriveFails := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.URL.Path == "/auth/derive-api-key" && deriveFails {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"apiKey":"derived","secret":"c2VjcmV0","passphrase":"phrase"}`))
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	client.cfg.Credentials = nil
+	client.cfg.Retry.MaxAttempts = 1
+	credentials, err := client.EnsureCredentials(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureCredentials: %v", err)
+	}
+	if credentials.APIKey != "derived" {
+		t.Fatalf("api key = %q", credentials.APIKey)
+	}
+	want := []string{"GET /auth/derive-api-key", "POST /auth/api-key"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths = %v, want %v", paths, want)
+	}
+
+	deriveFails = false
+	if _, err := client.EnsureCredentials(context.Background()); err != nil {
+		t.Fatalf("EnsureCredentials again: %v", err)
+	}
+	if len(paths) != len(want) {
+		t.Fatalf("second call issued requests: %v", paths)
+	}
+	if client.cfg.Credentials == nil || client.cfg.Credentials.APIKey != "derived" {
+		t.Fatalf("credentials not cached on client")
+	}
+}
+
+func TestPaginationStopsAtEndCursorSentinel(t *testing.T) {
+	var calls []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path+"?"+r.URL.RawQuery)
+		switch r.URL.Path {
+		case "/data/orders":
+			_, _ = io.WriteString(w, `{"data":[{"id":"o-1"}],"next_cursor":"LTE="}`)
+		case "/data/trades":
+			_, _ = io.WriteString(w, `{"data":[{"id":"t-1"}],"next_cursor":"LTE="}`)
+		default:
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	orders, err := client.AllOpenOrders(context.Background())
+	if err != nil || len(orders) != 1 {
+		t.Fatalf("open orders = %+v, err = %v", orders, err)
+	}
+	trades, err := client.AllTrades(context.Background())
+	if err != nil || len(trades) != 1 {
+		t.Fatalf("trades = %+v, err = %v", trades, err)
+	}
+	want := []string{"/data/orders?", "/data/trades?"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+	if _, next, err := client.Trades(context.Background(), "LTE="); err != nil || next != "LTE=" || len(calls) != 2 {
+		t.Fatalf("explicit end cursor issued a request: next=%q err=%v calls=%v", next, err, calls)
+	}
+}
+
+func TestOrderLookupTreatsEmptyBodyAsNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	if _, err := newTestClient(t, server.URL).Order(context.Background(), "0xabc"); err == nil {
+		t.Fatal("expected lookup error")
+	} else {
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("Order error = %v", err)
+		}
 	}
 }

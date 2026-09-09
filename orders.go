@@ -2,6 +2,7 @@ package clobclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -236,16 +237,31 @@ func (c *Client) CancelMarketOrders(ctx context.Context, market, tokenID string)
 	return c.transport.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-market-orders", Body: body, Headers: c.l2Headers}, nil)
 }
 
+// Order looks up a single order. The CLOB answers an unknown order ID with a
+// 200 and an empty body rather than a 404, so that shape is normalised into a
+// 404 APIError and callers can treat "missing" uniformly.
 func (c *Client) Order(ctx context.Context, orderID string) (*Order, error) {
+	path := "/data/order/" + url.PathEscape(orderID)
 	var out Order
-	err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/data/order/" + url.PathEscape(orderID), Headers: c.l2Headers}, &out)
+	err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: path, Headers: c.l2Headers}, &out)
+	if errors.Is(err, transport.ErrEmptyResponse) {
+		return nil, &APIError{StatusCode: http.StatusNotFound, Method: "GET", Path: path, Body: []byte("empty response")}
+	}
 	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
+// endCursor is the sentinel the CLOB returns (base64 of "-1") once a paginated
+// endpoint has no further pages. Sending it back is rejected as an invalid
+// cursor, so pagination loops must stop on it.
+const endCursor = "LTE="
+
 func (c *Client) OpenOrders(ctx context.Context, cursor string) ([]Order, string, error) {
+	if cursor == endCursor {
+		return nil, endCursor, nil
+	}
 	query := url.Values{}
 	if cursor != "" {
 		query.Set("next_cursor", cursor)
@@ -271,7 +287,7 @@ func (c *Client) AllOpenOrders(ctx context.Context) ([]Order, error) {
 			return nil, err
 		}
 		all = append(all, orders...)
-		if next == "" || next == cursor {
+		if next == "" || next == endCursor || next == cursor {
 			return all, nil
 		}
 		cursor = next
@@ -305,6 +321,9 @@ func (c *Client) UpdateBalanceAllowance(ctx context.Context, assetType, tokenID 
 }
 
 func (c *Client) Trades(ctx context.Context, nextCursor string) ([]Trade, string, error) {
+	if nextCursor == endCursor {
+		return nil, endCursor, nil
+	}
 	query := url.Values{}
 	if nextCursor != "" {
 		query.Set("next_cursor", nextCursor)
@@ -329,7 +348,7 @@ func (c *Client) AllTrades(ctx context.Context) ([]Trade, error) {
 			return nil, err
 		}
 		all = append(all, trades...)
-		if next == "" || next == cursor {
+		if next == "" || next == endCursor || next == cursor {
 			return all, nil
 		}
 		cursor = next

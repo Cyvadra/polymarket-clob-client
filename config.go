@@ -2,6 +2,7 @@ package clobclient
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -17,10 +18,15 @@ type Config struct {
 	MakerAddress  string
 	SignatureType SignatureType
 	HTTPClient    *http.Client
-	Timeout       time.Duration
-	QPS           int
-	Retry         RetryConfig
-	Now           func() time.Time
+	// ProxyURL is the outbound proxy the REST transport uses. It is kept
+	// separately so the websocket account stream can reach the exchange
+	// through the same egress instead of falling back to the process
+	// environment.
+	ProxyURL *url.URL
+	Timeout  time.Duration
+	QPS      int
+	Retry    RetryConfig
+	Now      func() time.Time
 }
 
 type RetryConfig struct {

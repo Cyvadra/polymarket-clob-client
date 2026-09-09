@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -302,9 +303,35 @@ func (e *Executor) resolveSubmitObservation(ctx context.Context, intent protocol
 	return nil
 }
 
+// isOrderRejected reports whether the exchange definitively refused the order.
+// A 200 response carrying success=false is one form; a 4xx is the other. The
+// CLOB does not book an order it answers with 4xx (a geoblocked region, a
+// malformed or unauthorized request), so treating those as an unknown outcome
+// strands the order in a submit-timeout state waiting for a reconciliation
+// that can never find it on the exchange. 408 and 429 are excluded: those may
+// have reached the matching engine before the response was produced.
 func isOrderRejected(err error) bool {
 	var rejected *clobclient.OrderRejectedError
-	return errors.As(err, &rejected)
+	if errors.As(err, &rejected) {
+		return true
+	}
+	var apiErr *clobclient.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 &&
+			apiErr.StatusCode != http.StatusRequestTimeout && apiErr.StatusCode != http.StatusTooManyRequests
+	}
+	return false
+}
+
+// rejectionReason keeps the exchange's own wording. For an HTTP rejection that
+// is the status, path, and response body, which is what an operator needs to
+// tell a geoblock apart from a malformed order.
+func rejectionReason(err error) string {
+	var rejected *clobclient.OrderRejectedError
+	if errors.As(err, &rejected) {
+		return rejected.Message
+	}
+	return err.Error()
 }
 
 func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrderRecord, reason string) error {
@@ -317,7 +344,7 @@ func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrde
 }
 
 func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, submitErr error) error {
-	_, _, reason := reasonFor(submitErr)
+	reason := rejectionReason(submitErr)
 	rejected, err := e.store.TransitionOrder(ctx, order, statemachine.EventRejectedObserved, order.MatchedShares, order.ExchangeOrderID, reason)
 	if err != nil {
 		return fmt.Errorf("mark submit rejected: %w", err)

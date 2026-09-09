@@ -4,6 +4,7 @@ package accountfeed
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
@@ -11,10 +12,20 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
+// unknownOrderReportLimit caps how many distinct out-of-band orders are
+// reported individually. A wallet that traded outside executiond before it was
+// deployed can carry hundreds of them, and one line each drowns the log
+// without telling an operator anything the first few lines did not.
+const unknownOrderReportLimit = 10
+
 type FillConsumer struct {
 	store   store.AccountFillStore
 	now     func() time.Time
 	onError func(error)
+
+	mu              sync.Mutex
+	unknownOrders   map[string]struct{}
+	unknownReported int
 }
 
 func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*FillConsumer, error) {
@@ -24,7 +35,7 @@ func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*
 	if now == nil {
 		now = time.Now
 	}
-	return &FillConsumer{store: repository, now: now}, nil
+	return &FillConsumer{store: repository, now: now, unknownOrders: map[string]struct{}{}}, nil
 }
 
 // SetErrorHandler receives non-fatal observations the consumer cannot recover
@@ -72,8 +83,41 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	})
 }
 
+// UnknownOrderCount reports how many distinct exchange orders have produced
+// dropped fills. It keeps growing after individual reporting is capped, so
+// operators can still see the size of the divergence.
+func (c *FillConsumer) UnknownOrderCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.unknownOrders)
+}
+
+// reportUnknownFill surfaces an out-of-band order once. The same order fills
+// many times and the reconciler replays the account trade history on every
+// pass, so reporting per fill repeats the same fact indefinitely; reporting
+// per order, up to unknownOrderReportLimit, keeps the signal without the
+// flood.
 func (c *FillConsumer) reportUnknownFill(fill AccountFill) {
 	if c.onError == nil {
+		return
+	}
+	c.mu.Lock()
+	if _, seen := c.unknownOrders[fill.ExchangeOrderID]; seen {
+		c.mu.Unlock()
+		return
+	}
+	c.unknownOrders[fill.ExchangeOrderID] = struct{}{}
+	total := len(c.unknownOrders)
+	c.unknownReported++
+	reported := c.unknownReported
+	c.mu.Unlock()
+
+	if reported > unknownOrderReportLimit {
+		return
+	}
+	if reported == unknownOrderReportLimit {
+		c.onError(fmt.Errorf("dropping fills for exchange order %s; %d distinct orders not placed by executiond have now been seen, suppressing further per-order reports",
+			fill.ExchangeOrderID, total))
 		return
 	}
 	c.onError(fmt.Errorf("dropping fill %s: exchange order %s is not known to executiond (condition=%s token=%s outcome=%s side=%s shares=%s)",
