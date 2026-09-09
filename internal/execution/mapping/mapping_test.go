@@ -12,7 +12,7 @@ import (
 func TestPositionFeatureOpenPosition(t *testing.T) {
 	entryTime := time.Unix(100, 0).UTC()
 	publishedAt := time.Unix(130, 0).UTC()
-	feature := PositionFeature(store.PositionRecord{
+	feature, err := PositionFeature(store.PositionRecord{
 		MarketID:       "market",
 		ConditionID:    "condition",
 		TokenID:        "token",
@@ -27,6 +27,9 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 		SourceRevision: 9,
 		UpdatedAt:      time.Unix(120, 0).UTC(),
 	}, 11, publishedAt)
+	if err != nil {
+		t.Fatalf("position feature: %v", err)
+	}
 
 	if !feature.HasPosition {
 		t.Fatal("expected open position")
@@ -34,7 +37,7 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 	if feature.UniqueTag != "lane-a" {
 		t.Fatalf("unique tag=%q", feature.UniqueTag)
 	}
-	if feature.EntryPrice == nil || *feature.EntryPrice != "0.42" {
+	if feature.EntryPrice == nil || *feature.EntryPrice != 0.42 {
 		t.Fatalf("entry price=%v", feature.EntryPrice)
 	}
 	if feature.EntryTime == nil || !feature.EntryTime.Equal(entryTime) {
@@ -43,13 +46,13 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 	if feature.SecondsSinceEntry != 30 {
 		t.Fatalf("seconds since entry=%v", feature.SecondsSinceEntry)
 	}
-	if feature.PositionSize != "5.5" || feature.AvailableSize != "4.5" || feature.ReservedSize != "1" {
+	if feature.PositionSize != 5.5 || feature.AvailableSize != 4.5 || feature.ReservedSize != 1 {
 		t.Fatalf("unexpected sizes: %+v", feature)
 	}
 }
 
 func TestPositionFeatureEmptyPosition(t *testing.T) {
-	feature := PositionFeature(store.PositionRecord{
+	feature, err := PositionFeature(store.PositionRecord{
 		ConditionID:   "condition",
 		TokenID:       "token",
 		Outcome:       "Down",
@@ -60,6 +63,9 @@ func TestPositionFeatureEmptyPosition(t *testing.T) {
 		EntryTime:     time.Unix(100, 0).UTC(),
 		UpdatedAt:     time.Unix(120, 0).UTC(),
 	}, 12, time.Unix(130, 0).UTC())
+	if err != nil {
+		t.Fatalf("position feature: %v", err)
+	}
 
 	if feature.HasPosition {
 		t.Fatal("expected empty position")

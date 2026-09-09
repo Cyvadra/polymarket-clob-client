@@ -64,7 +64,7 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 	if open.subject != "position.features.condition-1.token-up" || open.value.UniqueTag != "lane-a" {
 		t.Errorf("open subject = %q", open.subject)
 	}
-	if !open.value.HasPosition || open.value.EntryPrice == nil || *open.value.EntryPrice != "0.42" {
+	if !open.value.HasPosition || open.value.EntryPrice == nil || *open.value.EntryPrice != 0.42 {
 		t.Errorf("open feature position fields = %+v", open.value)
 	}
 	if open.value.EntryTime == nil || !open.value.EntryTime.Equal(entry) || open.value.SecondsSinceEntry != 180 {

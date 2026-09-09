@@ -37,6 +37,21 @@ func TestPositionFeatureEmptyPositionUsesNullEntryFields(t *testing.T) {
 	}
 }
 
+func TestPositionFeatureUsesNumericJSONFields(t *testing.T) {
+	entryPrice := 0.42
+	feature := PositionFeature{EntryPrice: &entryPrice, PositionSize: 5.5, ActualShares: 5.5, AvailableSize: 4.5, ReservedSize: 1}
+	payload, err := json.Marshal(feature)
+	if err != nil {
+		t.Fatalf("marshal position feature: %v", err)
+	}
+	body := string(payload)
+	for _, want := range []string{`"entry_price":0.42`, `"position_size":5.5`, `"actual_shares":5.5`, `"available_size":4.5`, `"reserved_size":1`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected numeric field %s, got %s", want, body)
+		}
+	}
+}
+
 func TestExecutionOpenKeepsDecimalValuesAsStrings(t *testing.T) {
 	intent := ExecutionOpenRequest{SchemaVersion: SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, TargetUSD: "12.3456", LimitPrice: "0.42", TimeInForce: TimeInForceGTC, ExpiresAt: time.Unix(12, 0).UTC()}
 	payload, err := json.Marshal(intent)
@@ -89,7 +104,7 @@ func (p *recordingPublisher) PublishJSON(subject string, value any) error {
 
 func TestOpenResultPublishSetsSchemaAndSubject(t *testing.T) {
 	publisher := &recordingPublisher{}
-	result := ExecutionOpenResult{UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, Status: ResultSucceeded, Reason: "done", FilledShares: "1", OccurredAt: time.Unix(5, 0).UTC()}
+	result := ExecutionOpenResult{UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: SideBuy, Status: ResultSucceeded, Reason: "done", FilledShares: 1, OccurredAt: time.Unix(5, 0).UTC()}
 	if err := PublishExecutionOpenResult(publisher, result); err != nil {
 		t.Fatalf("publish open result: %v", err)
 	}
@@ -102,6 +117,9 @@ func TestOpenResultPublishSetsSchemaAndSubject(t *testing.T) {
 	}
 	if !strings.Contains(string(payload), `"schema_version":"execution.v1"`) {
 		t.Fatalf("expected schema version in result payload, got %s", payload)
+	}
+	if !strings.Contains(string(payload), `"filled_shares":1`) {
+		t.Fatalf("expected numeric filled shares, got %s", payload)
 	}
 }
 

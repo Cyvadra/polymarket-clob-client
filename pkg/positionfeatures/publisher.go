@@ -81,7 +81,10 @@ func (p *PublisherModule) Publish(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("build position feature subject: %w", err)
 		}
-		feature := mapping.PositionFeature(position, p.nextSequence(), publishedAt)
+		feature, err := mapping.PositionFeature(position, p.nextSequence(), publishedAt)
+		if err != nil {
+			return fmt.Errorf("map position feature: %w", err)
+		}
 		if err := p.publisher.PublishJSON(subject, feature); err != nil {
 			return fmt.Errorf("publish position feature %s: %w", subject, err)
 		}

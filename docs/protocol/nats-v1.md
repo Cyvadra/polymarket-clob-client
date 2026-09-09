@@ -25,6 +25,10 @@ Subject tokens must not be empty or include `*` or `>`.
 
 `execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
 
+## PositionFeature
+
+`position.features.<condition_id>.<token_id>` and `PositionQueryResponse.positions` use JSON numbers for `entry_price`, `position_size`, `actual_shares`, `available_size`, `reserved_size`, and `seconds_since_entry`. An empty position has `entry_price: null` and `entry_time: null`; zero-valued numeric fields may be omitted. The storage layer may retain decimal text, but it is converted to rounded JSON floating-point values at this wire boundary.
+
 ## ExecutionOpenRequest
 
 Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
@@ -58,7 +62,7 @@ Close requests also require `unique_tag` so the execution daemon can target the 
 
 ## Results
 
-Open and close results identify the affected position (`unique_tag` + `condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key. They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields.
+Open and close results identify the affected position (`unique_tag` + `condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key. They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields. `filled_shares` and `average_price`, when present, are JSON numbers rather than decimal strings.
 
 Open results are emitted **only at terminal resolution** of an open — when the child order reaches a fill (any amount counts as success, including a partial fill) or is cancelled without any fill (failure). executiond never publishes an open `SUCCEEDED` merely because a resting order was accepted, so a success always means shares were actually bought. `filled_shares` is populated on terminal open results.
 
@@ -67,6 +71,8 @@ Close results are emitted only at terminal resolution of the strategy close chil
 A `LIMIT_CLOSE` emits exactly one close result, when its strategy sell child resolves. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`. The same applies to a close that fails before any child order exists (e.g. a malformed request or a submission rejected by the exchange) — the strategy observes that the position never changed and re-closes.
 
 `average_price` is currently reserved and not populated on either result; the authoritative entry/exit price is conveyed on `position.features.*`.
+
+Order events use the same numeric representation for `matched_shares` when the field is present.
 
 ## Reason codes
 

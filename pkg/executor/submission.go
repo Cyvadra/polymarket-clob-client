@@ -12,6 +12,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor/tactics"
@@ -100,10 +101,18 @@ func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err err
 }
 
 func (e *Executor) publishOpenResult(intent protocol.ExecutionIntent, status protocol.ResultStatus, code, reason, filledShares, averagePrice string) {
+	filled, err := decimal.NonNegativeFloat(filledShares)
+	if err != nil {
+		filled = 0
+	}
+	average, err := decimal.Price(averagePrice)
+	if err != nil {
+		average = 0
+	}
 	if err := protocol.PublishExecutionOpenResult(e.publish, protocol.ExecutionOpenResult{
 		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
 		Status: status, ReasonCode: code, Reason: reason,
-		FilledShares: filledShares, AveragePrice: averagePrice, OccurredAt: e.now(),
+		FilledShares: filled, AveragePrice: average, OccurredAt: e.now(),
 	}); err != nil && e.onError != nil {
 		e.onError(fmt.Errorf("publish open result: %w", err))
 	}

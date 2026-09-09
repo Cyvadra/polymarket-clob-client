@@ -3,6 +3,8 @@
 package protocol
 
 import (
+	"fmt"
+	"strconv"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -172,8 +174,8 @@ type ExecutionOpenResult struct {
 	Status        ResultStatus `json:"status"`
 	ReasonCode    string       `json:"reason_code,omitempty"`
 	Reason        string       `json:"reason,omitempty"`
-	FilledShares  string       `json:"filled_shares,omitempty"`
-	AveragePrice  string       `json:"average_price,omitempty"`
+	FilledShares  float64      `json:"filled_shares,omitempty"`
+	AveragePrice  float64      `json:"average_price,omitempty"`
 	OccurredAt    time.Time    `json:"occurred_at"`
 }
 
@@ -187,8 +189,8 @@ type ExecutionCloseResult struct {
 	Status        ResultStatus `json:"status"`
 	ReasonCode    string       `json:"reason_code,omitempty"`
 	Reason        string       `json:"reason,omitempty"`
-	FilledShares  string       `json:"filled_shares,omitempty"`
-	AveragePrice  string       `json:"average_price,omitempty"`
+	FilledShares  float64      `json:"filled_shares,omitempty"`
+	AveragePrice  float64      `json:"average_price,omitempty"`
 	OccurredAt    time.Time    `json:"occurred_at"`
 }
 
@@ -216,7 +218,7 @@ type ExecutionOrderEvent struct {
 	ExchangeOrderID string    `json:"exchange_order_id,omitempty"`
 	State           string    `json:"state"`
 	Reason          string    `json:"reason,omitempty"`
-	MatchedShares   string    `json:"matched_shares,omitempty"`
+	MatchedShares   float64   `json:"matched_shares,omitempty"`
 	OccurredAt      time.Time `json:"occurred_at"`
 }
 
@@ -224,13 +226,17 @@ func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID strin
 	if publisher == nil {
 		return nil
 	}
+	parsedShares, err := strconv.ParseFloat(matchedShares, 64)
+	if err != nil {
+		return fmt.Errorf("invalid matched_shares %q: %w", matchedShares, err)
+	}
 	return publisher.PublishJSON(SubjectExecutionOrderEvent, ExecutionOrderEvent{
 		SchemaVersion:   SchemaVersionV1,
 		IntentID:        intentID,
 		ExchangeOrderID: orderID,
 		State:           orderState,
 		Reason:          reason,
-		MatchedShares:   matchedShares,
+		MatchedShares:   parsedShares,
 		OccurredAt:      occurredAt.UTC(),
 	})
 }
@@ -257,13 +263,13 @@ type PositionFeature struct {
 	TokenID           string     `json:"token_id"`
 	Outcome           string     `json:"outcome"`
 	HasPosition       bool       `json:"has_position"`
-	EntryPrice        *string    `json:"entry_price"`
+	EntryPrice        *float64   `json:"entry_price"`
 	EntryTime         *time.Time `json:"entry_time"`
 	SecondsSinceEntry float64    `json:"seconds_since_entry"`
-	PositionSize      string     `json:"position_size,omitempty"`
-	ActualShares      string     `json:"actual_shares,omitempty"`
-	AvailableSize     string     `json:"available_size,omitempty"`
-	ReservedSize      string     `json:"reserved_size,omitempty"`
+	PositionSize      float64    `json:"position_size,omitempty"`
+	ActualShares      float64    `json:"actual_shares,omitempty"`
+	AvailableSize     float64    `json:"available_size,omitempty"`
+	ReservedSize      float64    `json:"reserved_size,omitempty"`
 	State             string     `json:"state,omitempty"`
 	SourceRevision    int64      `json:"source_revision,omitempty"`
 	UpdatedAt         time.Time  `json:"updated_at"`

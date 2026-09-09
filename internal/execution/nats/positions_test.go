@@ -76,7 +76,7 @@ func TestSubscribePositionQuerySubscribesAndReturnsAllPositions(t *testing.T) {
 		t.Fatalf("expected three open positions, got %d", len(connector.response.Positions))
 	}
 	for _, feature := range connector.response.Positions {
-		if feature.PositionSize == "0" || !feature.HasPosition {
+		if feature.PositionSize == 0 || !feature.HasPosition {
 			t.Fatalf("empty position leaked into response: %+v", feature)
 		}
 	}

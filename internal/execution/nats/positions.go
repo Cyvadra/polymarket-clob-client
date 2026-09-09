@@ -81,7 +81,11 @@ func positionQueryResponse(ctx context.Context, positions PositionStore, payload
 		if !decimal.Positive(record.PositionSize) {
 			continue
 		}
-		response.Positions = append(response.Positions, mapping.PositionFeature(record, 0, publishedAt))
+		feature, err := mapping.PositionFeature(record, 0, publishedAt)
+		if err != nil {
+			return protocol.PositionQueryResponse{}, fmt.Errorf("map position feature for query: %w", err)
+		}
+		response.Positions = append(response.Positions, feature)
 	}
 	return response, nil
 }

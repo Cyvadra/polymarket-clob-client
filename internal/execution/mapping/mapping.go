@@ -7,6 +7,7 @@ package mapping
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -98,10 +99,14 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 	if !ok {
 		return protocol.ExecutionOpenResult{}, false
 	}
+	filledShares, err := decimal.NonNegativeFloat(order.MatchedShares)
+	if err != nil {
+		return protocol.ExecutionOpenResult{}, false
+	}
 	return protocol.ExecutionOpenResult{
 		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
-		FilledShares: order.MatchedShares, OccurredAt: occurredAt,
+		FilledShares: filledShares, OccurredAt: occurredAt,
 	}, true
 }
 
@@ -118,19 +123,43 @@ func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntent
 	if !ok {
 		return protocol.ExecutionCloseResult{}, false
 	}
+	filledShares, err := decimal.NonNegativeFloat(order.MatchedShares)
+	if err != nil {
+		return protocol.ExecutionCloseResult{}, false
+	}
 	return protocol.ExecutionCloseResult{
 		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.SideSell, Status: status, ReasonCode: reasonCode, Reason: reason,
-		FilledShares: order.MatchedShares, OccurredAt: occurredAt,
+		FilledShares: filledShares, OccurredAt: occurredAt,
 	}, true
 }
 
 // PositionFeature maps a durable position record onto the strategy-facing
 // position feature published under position.features.<condition_id>.<token_id>.
-func PositionFeature(position store.PositionRecord, sequence int64, publishedAt time.Time) protocol.PositionFeature {
-	var entryPrice *string
+func PositionFeature(position store.PositionRecord, sequence int64, publishedAt time.Time) (protocol.PositionFeature, error) {
+	positionSize, err := wireNonNegative(position.PositionSize)
+	if err != nil {
+		return protocol.PositionFeature{}, fmt.Errorf("position_size: %w", err)
+	}
+	actualShares, err := wireNonNegative(position.ActualShares)
+	if err != nil {
+		return protocol.PositionFeature{}, fmt.Errorf("actual_shares: %w", err)
+	}
+	availableSize, err := wireNonNegative(position.AvailableSize)
+	if err != nil {
+		return protocol.PositionFeature{}, fmt.Errorf("available_size: %w", err)
+	}
+	reservedSize, err := wireNonNegative(position.ReservedSize)
+	if err != nil {
+		return protocol.PositionFeature{}, fmt.Errorf("reserved_size: %w", err)
+	}
+	var entryPrice *float64
 	if position.EntryPrice != "" && decimal.Positive(position.PositionSize) {
-		entryPrice = &position.EntryPrice
+		parsed, err := decimal.Price(position.EntryPrice)
+		if err != nil {
+			return protocol.PositionFeature{}, fmt.Errorf("entry_price: %w", err)
+		}
+		entryPrice = &parsed
 	}
 
 	var entryTime *time.Time
@@ -155,13 +184,20 @@ func PositionFeature(position store.PositionRecord, sequence int64, publishedAt 
 		EntryPrice:        entryPrice,
 		EntryTime:         entryTime,
 		SecondsSinceEntry: secondsSinceEntry,
-		PositionSize:      position.PositionSize,
-		ActualShares:      position.ActualShares,
-		AvailableSize:     position.AvailableSize,
-		ReservedSize:      position.ReservedSize,
+		PositionSize:      positionSize,
+		ActualShares:      actualShares,
+		AvailableSize:     availableSize,
+		ReservedSize:      reservedSize,
 		State:             position.State,
 		SourceRevision:    position.SourceRevision,
 		UpdatedAt:         position.UpdatedAt.UTC(),
 		PublishedAt:       publishedAt.UTC(),
+	}, nil
+}
+
+func wireNonNegative(value string) (float64, error) {
+	if strings.TrimSpace(value) == "" {
+		return 0, nil
 	}
+	return decimal.NonNegativeFloat(value)
 }
