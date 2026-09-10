@@ -40,6 +40,9 @@ Thumbs.db
 /tmp/
 *.tmp
 
+# Generated execution-test reports
+/reports/executiontest/
+
 # Example binaries
 examples/*/create_order
 examples/*/market_data

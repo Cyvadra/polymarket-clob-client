@@ -21,6 +21,7 @@ type Config struct {
 	Outcome        string
 	TargetUSD      string
 	BuyLimit       string
+	SellLimit      string
 	Strategy       string
 	ReportDir      string
 	CaseTimeout    time.Duration
@@ -39,6 +40,11 @@ func (c Config) Validate() error {
 	}
 	if _, err := decimal.Price(c.BuyLimit); err != nil {
 		return fmt.Errorf("buy limit must be a price in (0,1): %w", err)
+	}
+	if strings.TrimSpace(c.SellLimit) != "" {
+		if _, err := decimal.Price(c.SellLimit); err != nil {
+			return fmt.Errorf("sell limit must be a price in (0,1): %w", err)
+		}
 	}
 	if c.CaseTimeout <= 0 || c.CleanupTimeout <= 0 {
 		return fmt.Errorf("case and cleanup timeouts must be positive")

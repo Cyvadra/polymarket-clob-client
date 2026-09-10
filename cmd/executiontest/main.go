@@ -32,6 +32,7 @@ func run() error {
 	flag.StringVar(&config.Outcome, "outcome", "", "explicit outcome label, for example Up or Down")
 	flag.StringVar(&config.TargetUSD, "target-usd", "", "USD notional for the BUY")
 	flag.StringVar(&config.BuyLimit, "buy-limit", "", "BUY limit price in (0,1)")
+	flag.StringVar(&config.SellLimit, "sell-limit", "", "SELL limit price in (0,1) for the limit-close scenario; empty skips it")
 	flag.StringVar(&config.Strategy, "strategy", "executiontest", "strategy/lane namespace")
 	flag.StringVar(&config.ReportDir, "report-dir", "reports/executiontest", "directory for Markdown reports")
 	flag.DurationVar(&config.CaseTimeout, "case-timeout", 2*time.Minute, "maximum time for the BUY case")

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
@@ -77,7 +78,54 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	r.positionSeen = true
 	r.report.Scenario("position-after-buy", StatusPass, "visible position confirmed through NATS")
+	if err := r.limitSell(ctx, tag); err != nil {
+		return errors.Join(ctx.Err(), r.cleanup(ctx, tag))
+	}
 	return r.cleanup(ctx, tag)
+}
+
+// limitSell exits the lane with a LIMIT_CLOSE (SELL at the caller's limit) and
+// confirms the position clears through NATS. A marketable limit crosses the bid
+// and fills; a limit that does not cross rests LIVE with no terminal result, so
+// that outcome is reported INCONCLUSIVE. The force-close cleanup still runs
+// afterwards as a safety net. With no --sell-limit the scenario is skipped.
+func (r *Runner) limitSell(ctx context.Context, tag string) error {
+	if strings.TrimSpace(r.config.SellLimit) == "" {
+		r.report.Scenario("limit-sell", StatusInconclusive, "no --sell-limit supplied; skipped, leaving the exit to force-close cleanup")
+		return nil
+	}
+	request := protocol.ExecutionCloseRequest{
+		SchemaVersion: protocol.SchemaVersionV1, UniqueTag: tag, Strategy: r.config.strategy(),
+		ConditionID: r.config.ConditionID, AssetID: r.config.AssetID, Outcome: r.config.Outcome,
+		Mode: protocol.ExecutionCloseModeLimit, LimitPrice: r.config.SellLimit,
+		TimeInForce: protocol.TimeInForceGTC, CreatedAt: time.Now().UTC(),
+		Policy: protocol.ExecutionPolicy{Style: protocol.ExecutionStyleLimit, CompleteWithinMillis: r.config.CaseTimeout.Milliseconds()},
+	}
+	r.report.Command(protocol.SubjectStrategyExecutionClose, tag, "LIMIT_CLOSE", fmt.Sprintf("SELL limit_price=%s", r.config.SellLimit))
+	if err := r.observer.Publish(protocol.SubjectStrategyExecutionClose, request); err != nil {
+		r.report.Scenario("limit-sell", StatusFail, err.Error())
+		return err
+	}
+	message, err := r.observer.WaitFor(ctx, protocol.SubjectExecutionCloseResult, resultForTag(tag), r.config.CaseTimeout)
+	if err != nil {
+		r.report.Scenario("limit-sell", StatusInconclusive, err.Error()+"; a SELL whose limit does not cross the bid rests LIVE and has no terminal result")
+		return err
+	}
+	r.report.Evidence(message)
+	var result protocol.ExecutionCloseResult
+	if err := json.Unmarshal(message.Payload, &result); err != nil {
+		return err
+	}
+	if result.Status != protocol.ResultSucceeded || result.FilledShares <= 0 {
+		r.report.Scenario("limit-sell", StatusFail, fmt.Sprintf("status=%s reason_code=%s filled_shares=%.8f", result.Status, result.ReasonCode, result.FilledShares))
+		return fmt.Errorf("limit sell did not succeed")
+	}
+	if err := r.waitPosition(ctx, tag, false); err != nil {
+		r.report.Scenario("limit-sell", StatusFail, err.Error())
+		return err
+	}
+	r.report.Scenario("limit-sell", StatusPass, fmt.Sprintf("filled_shares=%.8f average_price=%.8f", result.FilledShares, result.AveragePrice))
+	return nil
 }
 
 func (r *Runner) publishBuy(ctx context.Context, request protocol.ExecutionOpenRequest) error {

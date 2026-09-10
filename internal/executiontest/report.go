@@ -50,7 +50,7 @@ func NewReport(dir string, cfg Config) (*Report, error) {
 }
 
 func (r *Report) writeHeader(cfg Config) {
-	r.write(fmt.Sprintf("# Execution NATS Integration Test\n\n- Run ID: `%s`\n- Started: `%s`\n- NATS URL: `%s`\n- Condition ID: `%s`\n- Asset ID: `%s`\n- Outcome: `%s`\n- Target USD per BUY: `%s`\n- Buy limit: `%s`\n\n> This report records NATS-visible evidence only. It does not prove signatures, database transactions, exchange fees, settlement, or that all account orders are absent.\n\n## Timeline\n\n", r.RunID, r.StartedAt.Format(time.RFC3339Nano), cfg.NATSURL, cfg.ConditionID, cfg.AssetID, cfg.Outcome, cfg.TargetUSD, cfg.BuyLimit))
+	r.write(fmt.Sprintf("# Execution NATS Integration Test\n\n- Run ID: `%s`\n- Started: `%s`\n- NATS URL: `%s`\n- Condition ID: `%s`\n- Asset ID: `%s`\n- Outcome: `%s`\n- Target USD per BUY: `%s`\n- Buy limit: `%s`\n- Sell limit: `%s`\n\n> This report records NATS-visible evidence only. It does not prove signatures, database transactions, exchange fees, settlement, or that all account orders are absent.\n\n## Timeline\n\n", r.RunID, r.StartedAt.Format(time.RFC3339Nano), cfg.NATSURL, cfg.ConditionID, cfg.AssetID, cfg.Outcome, cfg.TargetUSD, cfg.BuyLimit, cfg.SellLimit))
 }
 
 func (r *Report) Command(subject, lane, action, detail string) {
