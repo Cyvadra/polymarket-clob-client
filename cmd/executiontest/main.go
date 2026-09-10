@@ -44,6 +44,12 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Only the first interrupt is graceful (cleanup still runs). Once it has
+	// arrived, restore default signal handling so a second Ctrl-C exits.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	report, err := executiontest.NewReport(config.ReportDir, config)
 	if err != nil {
 		return err

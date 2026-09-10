@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor/tactics"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -284,7 +286,73 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 		return fmt.Errorf("mark order live: %w", err)
 	}
 	e.publishTransition(live, "submit acknowledged")
+	e.settleFromResponse(ctx, intent, child, live, response)
 	return nil
+}
+
+// settleFromResponse applies the match a submission response reports, so an
+// order that crossed the book on arrival does not sit LIVE until the user
+// stream or the next reconcile pass notices. A FAK or FOK order cannot rest:
+// its match is final, filled or canceled. A resting order matched in full is
+// filled; one matched in part is partially filled and its remainder rests.
+// Any status other than "matched" is left to those observers.
+//
+// "matched" is the CLOB's off-chain match, not on-chain settlement, which can
+// lag or fail. This only advances the order and its result; the position still
+// moves only with fills, which track their trade's settlement and are reversed
+// if it fails. The order is already acknowledged, so a failure here is
+// reported, not returned.
+func (e *Executor) settleFromResponse(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild, order store.SignedOrderRecord, response *clobclient.OrderResponse) {
+	if !strings.EqualFold(strings.TrimSpace(response.Status), "matched") {
+		return
+	}
+	// The maker amount is what the order gives and the taker amount what it
+	// receives, so shares are the maker amount of a SELL and the taker amount
+	// of a BUY.
+	matched := response.MakingAmount
+	if intent.Side == protocol.SideBuy {
+		matched = response.TakingAmount
+	}
+	if !decimal.Positive(matched) {
+		return
+	}
+	// Compare against the size actually signed, not the unfloored plan, or a
+	// complete fill of a floored order reads as partial.
+	requested, ok := decimal.FloorTo(child.Shares, clobclient.SharePrecisionDigits(intent.Side, child.TimeInForce))
+	if !ok {
+		requested = child.Shares
+	}
+	event, _ := statemachine.EventForOrderObservation("MATCHED", matched, requested, statemachine.Immediate(string(child.TimeInForce)))
+	const reason = "submit response MATCHED"
+	updated, err := e.store.TransitionOrder(ctx, order, event, matched, order.ExchangeOrderID, reason)
+	if errors.Is(err, store.ErrConflict) {
+		// A concurrent observer already advanced the order and reports it.
+		return
+	}
+	if err != nil {
+		e.reportError(fmt.Errorf("settle order %s from submit response: %w", order.ExchangeOrderID, err))
+		return
+	}
+	e.publishTransition(updated, reason)
+	if !statemachine.IsTerminal(updated.State) {
+		// A partly matched resting order is still working; its result comes
+		// when an observer sees it finish.
+		return
+	}
+	record, err := e.store.Intent(ctx, updated.IntentID)
+	if err != nil {
+		e.reportError(fmt.Errorf("load intent for submit response result: %w", err))
+		return
+	}
+	if err := accountfeed.PublishTerminalResult(e.publish, record, updated, reason, e.now()); err != nil {
+		e.reportError(err)
+	}
+}
+
+func (e *Executor) reportError(err error) {
+	if e.onError != nil {
+		e.onError(err)
+	}
 }
 
 // resolveSubmitObservation reconciles the case where a concurrent observer

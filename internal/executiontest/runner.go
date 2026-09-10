@@ -3,6 +3,7 @@ package executiontest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,6 +15,9 @@ type Runner struct {
 	observer *Observer
 	report   *Report
 	spent    string
+	// positionSeen records whether the lane's position was ever visible. An
+	// absent position after cleanup only proves the close worked if it was.
+	positionSeen bool
 }
 
 func NewRunner(config Config, observer *Observer, report *Report) *Runner {
@@ -21,7 +25,7 @@ func NewRunner(config Config, observer *Observer, report *Report) *Runner {
 }
 
 func (r *Runner) Run(ctx context.Context) error {
-	if err := r.invalidSchemaCase(); err != nil {
+	if err := r.invalidSchemaCase(ctx); err != nil {
 		r.report.Scenario("invalid-schema-rejection", StatusFail, err.Error())
 		return err
 	}
@@ -51,10 +55,10 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.report.Scenario("limit-buy", StatusFail, err.Error())
 		return err
 	}
-	message, err := r.observer.WaitFor(protocol.SubjectExecutionOpenResult, resultForTag(tag), r.config.CaseTimeout)
+	message, err := r.observer.WaitFor(ctx, protocol.SubjectExecutionOpenResult, resultForTag(tag), r.config.CaseTimeout)
 	if err != nil {
-		r.report.Scenario("limit-buy", StatusInconclusive, err.Error())
-		return r.cleanup(ctx, tag)
+		r.report.Scenario("limit-buy", StatusInconclusive, err.Error()+"; a GTC BUY whose limit does not cross the ask rests LIVE and has no terminal result")
+		return errors.Join(ctx.Err(), r.cleanup(ctx, tag))
 	}
 	r.report.Evidence(message)
 	var result protocol.ExecutionOpenResult
@@ -69,8 +73,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.report.Scenario("limit-buy", StatusPass, fmt.Sprintf("filled_shares=%.8f", result.FilledShares))
 	if err := r.waitPosition(ctx, tag, true); err != nil {
 		r.report.Scenario("position-after-buy", StatusFail, err.Error())
-		return r.cleanup(ctx, tag)
+		return errors.Join(ctx.Err(), r.cleanup(ctx, tag))
 	}
+	r.positionSeen = true
 	r.report.Scenario("position-after-buy", StatusPass, "visible position confirmed through NATS")
 	return r.cleanup(ctx, tag)
 }
@@ -89,6 +94,15 @@ func (r *Runner) publishBuy(ctx context.Context, request protocol.ExecutionOpenR
 }
 
 func (r *Runner) cleanup(ctx context.Context, tag string) error {
+	// Cleanup must still run after an interrupt because the BUY may be resting
+	// on the book, so it gets its own deadline instead of the run context.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.config.CleanupTimeout)
+	defer cancel()
+	if !r.positionSeen {
+		if response, err := r.query(ctx, "pre-cleanup"); err == nil && r.hasLanePosition(response, tag) {
+			r.positionSeen = true
+		}
+	}
 	request := protocol.ExecutionCloseRequest{
 		SchemaVersion: protocol.SchemaVersionV1, UniqueTag: tag, Strategy: r.config.strategy(),
 		ConditionID: r.config.ConditionID, AssetID: r.config.AssetID, Outcome: r.config.Outcome,
@@ -98,6 +112,10 @@ func (r *Runner) cleanup(ctx context.Context, tag string) error {
 	if err := r.observer.Publish(protocol.SubjectStrategyExecutionClose, request); err != nil {
 		r.report.Scenario("force-close-cleanup", StatusFail, err.Error())
 		return err
+	}
+	if !r.positionSeen {
+		r.report.Scenario("force-close-cleanup", StatusInconclusive, "close sent, but no position was ever visible for this lane, so an empty position proves nothing; confirm the BUY order was cancelled and no shares were bought")
+		return nil
 	}
 	if err := r.waitPosition(ctx, tag, false); err != nil {
 		r.report.Scenario("force-close-cleanup", StatusInconclusive, err.Error())
@@ -112,16 +130,8 @@ func (r *Runner) waitPosition(ctx context.Context, tag string, shouldExist bool)
 	defer deadline.Stop()
 	for {
 		response, err := r.query(ctx, "position")
-		if err == nil {
-			found := false
-			for _, position := range response.Positions {
-				if position.UniqueTag == tag && position.ConditionID == r.config.ConditionID && position.TokenID == r.config.AssetID && position.HasPosition {
-					found = true
-				}
-			}
-			if found == shouldExist {
-				return nil
-			}
+		if err == nil && r.hasLanePosition(response, tag) == shouldExist {
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -131,6 +141,15 @@ func (r *Runner) waitPosition(ctx context.Context, tag string, shouldExist bool)
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+func (r *Runner) hasLanePosition(response protocol.PositionQueryResponse, tag string) bool {
+	for _, position := range response.Positions {
+		if position.UniqueTag == tag && position.ConditionID == r.config.ConditionID && position.TokenID == r.config.AssetID && position.HasPosition {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) query(ctx context.Context, purpose string) (protocol.PositionQueryResponse, error) {
@@ -150,7 +169,7 @@ func resultForTag(tag string) func([]byte) bool {
 	}
 }
 
-func (r *Runner) invalidSchemaCase() error {
+func (r *Runner) invalidSchemaCase(ctx context.Context) error {
 	tag := fmt.Sprintf("%s-invalid-%d", r.config.strategy(), time.Now().UnixNano())
 	request := protocol.ExecutionOpenRequest{
 		SchemaVersion: "execution.invalid", UniqueTag: tag, Strategy: r.config.strategy(),
@@ -163,7 +182,7 @@ func (r *Runner) invalidSchemaCase() error {
 	if err := r.observer.Publish(protocol.SubjectStrategyExecutionOpen, request); err != nil {
 		return err
 	}
-	message, err := r.observer.WaitFor(protocol.SubjectExecutionOpenResult, resultForTag(tag), r.config.CaseTimeout)
+	message, err := r.observer.WaitFor(ctx, protocol.SubjectExecutionOpenResult, resultForTag(tag), r.config.CaseTimeout)
 	if err != nil {
 		return err
 	}

@@ -218,6 +218,7 @@ type ReconcileStore interface {
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OpenOrders(context.Context) ([]SignedOrderRecord, error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
+	FilledShares(context.Context, string) (string, error)
 }
 
 type Store interface {

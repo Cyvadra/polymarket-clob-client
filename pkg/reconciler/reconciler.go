@@ -10,6 +10,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
@@ -93,16 +94,17 @@ func (r *Reconciler) SetEventPublisher(publisher protocol.ExecutionEventPublishe
 func (r *Reconciler) Close(context.Context) error { return nil }
 
 func (r *Reconciler) Reconcile(ctx context.Context) error {
-	if err := r.replayTrades(ctx); err != nil {
-		return err
-	}
+	// A fill the store cannot apply must not stall order reconciliation. Order
+	// state comes from REST order lookups, not from fills, and an order left
+	// unresolved keeps its reservation and never reports a terminal result.
+	reconcileErr := r.replayTrades(ctx)
+	fillsCurrent := reconcileErr == nil
 	orders, err := r.store.OpenOrders(ctx)
 	if err != nil {
-		return fmt.Errorf("load unresolved orders: %w", err)
+		return errors.Join(reconcileErr, fmt.Errorf("load unresolved orders: %w", err))
 	}
-	var reconcileErr error
 	for _, order := range orders {
-		if err := r.reconcileOrder(ctx, order); err != nil {
+		if err := r.reconcileOrder(ctx, order, fillsCurrent); err != nil {
 			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("reconcile %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
 	}
@@ -147,7 +149,10 @@ func isSettled(tradeStatus string) bool {
 	}
 }
 
-func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord) error {
+// reconcileOrder repairs one unresolved order from its REST observation.
+// fillsCurrent reports whether this pass's trade replay succeeded, so the
+// store's fills can be trusted as the full record of what the order matched.
+func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord, fillsCurrent bool) error {
 	if order.ExchangeOrderID == "" {
 		if order.State == statemachine.StateSigned {
 			return nil
@@ -169,6 +174,15 @@ func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrder
 			}
 			return nil
 		}
+		if isMissingOrder(err) && isCancelling(order.State) {
+			if !r.missingOrderExpired(order) {
+				return nil
+			}
+			if !fillsCurrent {
+				return fmt.Errorf("lookup order %s: %w; not resolved from fills because trade replay failed", order.ExchangeOrderID, err)
+			}
+			return r.resolveMissingCancel(ctx, order)
+		}
 		return fmt.Errorf("lookup order %s: %w", order.ExchangeOrderID, err)
 	}
 	if remote == nil {
@@ -184,6 +198,39 @@ func isMissingOrder(err error) bool {
 
 func isUnresolvedSubmission(state statemachine.State) bool {
 	return state == statemachine.StateSubmitUnknown || state == statemachine.StateUnknownReconcile || state == statemachine.StateSubmitting
+}
+
+func isCancelling(state statemachine.State) bool {
+	return state == statemachine.StateCancelRequested || state == statemachine.StateCancelPending
+}
+
+// resolveMissingCancel settles a cancel whose order the exchange no longer
+// returns. The CLOB stops returning some finished orders (a filled order on a
+// closed market answers with an empty body), so once the grace period has
+// passed the order is gone and its recorded fills are the only account of how
+// it ended. Trades are replayed before orders, so those fills are current.
+func (r *Reconciler) resolveMissingCancel(ctx context.Context, order store.SignedOrderRecord) error {
+	filled, err := r.store.FilledShares(ctx, order.ExchangeOrderID)
+	if err != nil {
+		return fmt.Errorf("load fills for missing order %s: %w", order.ExchangeOrderID, err)
+	}
+	// RequestedShares is the planned size, but the signed order was floored to
+	// the exchange's share precision, and that is all its fills can reach.
+	requested := order.RequestedShares
+	intent, err := r.store.Intent(ctx, order.IntentID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("load intent for missing order %s: %w", order.ExchangeOrderID, err)
+	}
+	if err == nil {
+		if floored, ok := decimal.FloorTo(requested, clobclient.SharePrecisionDigits(clobclient.Side(intent.Side), clobclient.OrderType(order.OrderType))); ok {
+			requested = floored
+		}
+	}
+	// An order that is gone cannot rest, so it resolves like an immediate
+	// order: filled if its fills reach the requested size, otherwise canceled
+	// with whatever matched.
+	event, _ := statemachine.EventForOrderObservation("MATCHED", filled, requested, true)
+	return r.apply(ctx, order, event, filled, "REST order lookup returned 404 after cancel; resolved from recorded fills")
 }
 
 func (r *Reconciler) missingOrderExpired(order store.SignedOrderRecord) bool {

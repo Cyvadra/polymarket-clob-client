@@ -50,37 +50,43 @@ func NewReport(dir string, cfg Config) (*Report, error) {
 }
 
 func (r *Report) writeHeader(cfg Config) {
-	r.write(fmt.Sprintf("# Execution NATS Integration Test\n\n- Run ID: `%s`\n- Started: `%s`\n- NATS URL: `%s`\n- Condition ID: `%s`\n- Asset ID: `%s`\n- Outcome: `%s`\n- Target USD per BUY: `%s`\n- Buy limit: `%s`\n\n> This report records NATS-visible evidence only. It does not prove signatures, database transactions, exchange fees, settlement, or that all account orders are absent.\n\n## Commands\n\n| Time | Subject | Lane | Action | Detail |\n|---|---|---|---|---|\n\n## Scenarios\n\n| Scenario | Status | Detail |\n|---|---|---|\n", r.RunID, r.StartedAt.Format(time.RFC3339Nano), cfg.NATSURL, cfg.ConditionID, cfg.AssetID, cfg.Outcome, cfg.TargetUSD, cfg.BuyLimit))
+	r.write(fmt.Sprintf("# Execution NATS Integration Test\n\n- Run ID: `%s`\n- Started: `%s`\n- NATS URL: `%s`\n- Condition ID: `%s`\n- Asset ID: `%s`\n- Outcome: `%s`\n- Target USD per BUY: `%s`\n- Buy limit: `%s`\n\n> This report records NATS-visible evidence only. It does not prove signatures, database transactions, exchange fees, settlement, or that all account orders are absent.\n\n## Timeline\n\n", r.RunID, r.StartedAt.Format(time.RFC3339Nano), cfg.NATSURL, cfg.ConditionID, cfg.AssetID, cfg.Outcome, cfg.TargetUSD, cfg.BuyLimit))
 }
 
 func (r *Report) Command(subject, lane, action, detail string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.writeLocked(fmt.Sprintf("| `%s` | `%s` | `%s` | %s | %s |\n", time.Now().UTC().Format(time.RFC3339Nano), subject, lane, markdownCell(action), markdownCell(detail)))
+	r.writeLocked(fmt.Sprintf("- `%s` command `%s` lane `%s`: **%s** %s\n", time.Now().UTC().Format(time.RFC3339Nano), subject, lane, markdownCell(action), markdownCell(detail)))
 }
 
+// Scenario appends the result to the timeline as it happens, so a killed run
+// still leaves evidence; the Scenarios table is rendered once on Close.
 func (r *Report) Scenario(name string, status Status, detail string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.results = append(r.results, scenarioResult{Name: name, Status: status, Detail: detail})
-	r.writeLocked(fmt.Sprintf("| `%s` | **%s** | %s |\n", name, status, markdownCell(detail)))
+	r.writeLocked(fmt.Sprintf("- `%s` scenario `%s`: **%s** %s\n", time.Now().UTC().Format(time.RFC3339Nano), name, status, markdownCell(detail)))
 }
 
 func (r *Report) Evidence(message WireMessage) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.writeLocked(fmt.Sprintf("\n### NATS `%s` at `%s`\n\n```json\n%s\n```\n", message.Subject, message.ReceivedAt.Format(time.RFC3339Nano), strings.TrimSpace(string(message.Payload))))
+	r.writeLocked(fmt.Sprintf("\n#### NATS `%s` at `%s`\n\n```json\n%s\n```\n\n", message.Subject, message.ReceivedAt.Format(time.RFC3339Nano), strings.TrimSpace(string(message.Payload))))
 }
 
 func (r *Report) Note(title, detail string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.writeLocked(fmt.Sprintf("\n## %s\n\n%s\n", title, detail))
+	r.writeLocked(fmt.Sprintf("\n#### %s\n\n%s\n\n", title, detail))
 }
 
 func (r *Report) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.writeLocked("\n## Scenarios\n\n| Scenario | Status | Detail |\n|---|---|---|\n")
+	for _, result := range r.results {
+		r.writeLocked(fmt.Sprintf("| `%s` | **%s** | %s |\n", result.Name, result.Status, markdownCell(result.Detail)))
+	}
 	r.writeLocked("\n## Summary\n\n")
 	counts := make(map[Status]int)
 	for _, result := range r.results {

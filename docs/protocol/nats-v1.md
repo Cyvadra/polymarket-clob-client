@@ -29,6 +29,8 @@ Subject tokens must not be empty or include `*` or `>`.
 
 `position.features.<condition_id>.<token_id>` and `PositionQueryResponse.positions` use JSON numbers for `entry_price`, `position_size`, `actual_shares`, `available_size`, `reserved_size`, and `seconds_since_entry`. An empty position has `entry_price: null` and `entry_time: null`; zero-valued numeric fields may be omitted. The storage layer may retain decimal text, but it is converted to rounded JSON floating-point values at this wire boundary.
 
+`position_size` and `actual_shares` are the net (BUY − SELL) of the share counts the exchange reported for the lane's fills, with no estimated fee deducted. The fields of an open request (`target_usd`, `limit_price`, and the shares planned from them) describe intent only; they never set a position's size, which follows actual fills alone.
+
 ## ExecutionOpenRequest
 
 Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.

@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -119,8 +120,8 @@ func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("positions after buy: %v", err)
 	}
-	if len(positions) != 1 || positions[0].PositionSize != "9.650000000000000000" {
-		t.Fatalf("expected taker-buy credited position, got %+v", positions)
+	if len(positions) != 1 || positions[0].PositionSize != "10.000000000000000000" {
+		t.Fatalf("expected the position to equal the reported fill size, got %+v", positions)
 	}
 
 	reversed, err := s.ApplyFill(ctx, store.FillRecord{
@@ -135,8 +136,78 @@ func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("positions after reversal: %v", err)
 	}
-	if len(positions) != 1 || positions[0].PositionSize != "0" || positions[0].AvailableSize != "0" {
+	if len(positions) != 1 || positions[0].PositionSize != "0.000000000000000000" || positions[0].AvailableSize != "0.000000000000000000" {
 		t.Fatalf("expected fully reversed position, got %+v", positions)
+	}
+}
+
+func TestPositionsFromFillsMigrationRebuildsSizesFromFills(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	partial, bought := "lane-partial-"+suffix, "lane-bought-"+suffix
+	// Its own market keeps these rows out of the other tests, which share the
+	// database and read positions[0] of the "condition"/"token" market.
+	const conditionID, tokenID = "condition-rebuild", "token-rebuild"
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM fills WHERE unique_tag IN ($1, $2)`, partial, bought)
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM positions WHERE unique_tag IN ($1, $2)`, partial, bought)
+	})
+	// Both lanes as the old 7% taker-fee model left them: one credited
+	// 5.280366 for a 5.46 buy and then sold 5.28, one credited 2.2693708 for a
+	// 2.44 buy and never given an entry price.
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO fills (fill_id, unique_tag, condition_id, token_id, outcome, side, shares, price, trade_status, trader_side, received_at) VALUES
+			($1 || '-buy', $1, $3, $4, 'Down', 'BUY', 5.46, 0.53, 'CONFIRMED', 'TAKER', now() - interval '1 minute'),
+			($1 || '-sell', $1, $3, $4, 'Down', 'SELL', 5.28, 0.54, 'CONFIRMED', 'TAKER', now()),
+			($2 || '-buy', $2, $3, $4, 'Up', 'BUY', 2.44, 0.001, 'CONFIRMED', 'TAKER', now())
+	`, partial, bought, conditionID, tokenID); err != nil {
+		t.Fatalf("seed fills: %v", err)
+	}
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO positions (condition_id, token_id, unique_tag, outcome, position_size, actual_shares, available_size, entry_price, entry_time, state, source_revision) VALUES
+			($3, $4, $1, 'Down', 0.000366, 0.000366, 0.000366, 0.53, now(), 'open', 4),
+			($3, $4, $2, 'Up', 2.2693708, 2.2693708, 2.2693708, NULL, NULL, 'open', 1)
+	`, partial, bought, conditionID, tokenID); err != nil {
+		t.Fatalf("seed positions: %v", err)
+	}
+	migrations, err := Migrations()
+	if err != nil {
+		t.Fatalf("migrations: %v", err)
+	}
+	var rebuild string
+	for _, migration := range migrations {
+		if migration.Name == "000002_positions_from_fills.sql" {
+			rebuild = migration.SQL
+		}
+	}
+	if rebuild == "" {
+		t.Fatal("position rebuild migration not embedded")
+	}
+	if _, err := s.pool.Exec(ctx, rebuild); err != nil {
+		t.Fatalf("run position rebuild: %v", err)
+	}
+	positions, err := s.PositionFeatures(ctx)
+	if err != nil {
+		t.Fatalf("positions: %v", err)
+	}
+	want := map[string]struct{ size, entry string }{
+		partial: {"0.180000000000000000", "0.530000000000000000"},
+		bought:  {"2.440000000000000000", "0.001000000000000000"},
+	}
+	for _, position := range positions {
+		expected, ok := want[position.UniqueTag]
+		if !ok {
+			continue
+		}
+		delete(want, position.UniqueTag)
+		if position.PositionSize != expected.size || position.ActualShares != expected.size || position.AvailableSize != expected.size ||
+			position.EntryPrice != expected.entry || position.State != "open" {
+			t.Fatalf("lane %s not rebuilt from fills: %+v", position.UniqueTag, position)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing rebuilt lanes: %v", want)
 	}
 }
 
@@ -163,7 +234,7 @@ func TestReserveReleaseRestoresAvailableShares(t *testing.T) {
 	if err != nil {
 		t.Fatalf("positions after reserve: %v", err)
 	}
-	if positions[0].ReservedSize != "3" {
+	if positions[0].ReservedSize != "3.000000000000000000" {
 		t.Fatalf("expected reserved 3, got %+v", positions[0])
 	}
 	if err := s.Release(ctx, "reserve-1", "test release"); err != nil {
@@ -173,7 +244,7 @@ func TestReserveReleaseRestoresAvailableShares(t *testing.T) {
 	if err != nil {
 		t.Fatalf("positions after release: %v", err)
 	}
-	if positions[0].ReservedSize != "0" {
+	if positions[0].ReservedSize != "0.000000000000000000" {
 		t.Fatalf("expected reserved 0 after release, got %+v", positions[0])
 	}
 }
