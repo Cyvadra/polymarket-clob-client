@@ -15,17 +15,22 @@ const defaultStrategy = "executiontest"
 // The caller must provide market identity and limits explicitly; the runner
 // never discovers or guesses an asset from a condition ID.
 type Config struct {
-	NATSURL        string
-	ConditionID    string
-	AssetID        string
-	Outcome        string
-	TargetUSD      string
-	BuyLimit       string
-	SellLimit      string
-	Strategy       string
-	ReportDir      string
-	CaseTimeout    time.Duration
-	CleanupTimeout time.Duration
+	NATSURL         string
+	ConditionID     string
+	AssetID         string
+	Outcome         string
+	TargetUSD       string
+	BuyLimit        string
+	SellLimit       string
+	Strategy        string
+	ReportDir       string
+	CaseTimeout     time.Duration
+	CleanupTimeout  time.Duration
+	PositionTimeout time.Duration
+	QueryTimeout    time.Duration
+	Hold            time.Duration
+	CloseMode       string
+	Negative        bool
 }
 
 func (c Config) Validate() error {
@@ -46,8 +51,16 @@ func (c Config) Validate() error {
 			return fmt.Errorf("sell limit must be a price in (0,1): %w", err)
 		}
 	}
-	if c.CaseTimeout <= 0 || c.CleanupTimeout <= 0 {
-		return fmt.Errorf("case and cleanup timeouts must be positive")
+	if c.CaseTimeout <= 0 || c.CleanupTimeout <= 0 || c.PositionTimeout <= 0 || c.QueryTimeout <= 0 {
+		return fmt.Errorf("case, cleanup, position, and query timeouts must be positive")
+	}
+	if c.Hold < 0 {
+		return fmt.Errorf("hold must not be negative")
+	}
+	switch strings.TrimSpace(c.CloseMode) {
+	case "", "auto", "limit", "force":
+	default:
+		return fmt.Errorf("close mode must be one of auto, limit, force")
 	}
 	if strings.TrimSpace(c.ReportDir) == "" {
 		return fmt.Errorf("report directory is required")

@@ -19,9 +19,10 @@ type WireMessage struct {
 }
 
 type Observer struct {
-	conn     *nats.Conn
-	mu       sync.RWMutex
-	messages []WireMessage
+	conn         *nats.Conn
+	queryTimeout time.Duration
+	mu           sync.RWMutex
+	messages     []WireMessage
 	features map[string]protocol.PositionFeature
 	quotes   []marketquotes.Snapshot
 	subs     []*nats.Subscription
@@ -39,7 +40,7 @@ func NewObserver(ctx context.Context, cfg Config) (*Observer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect NATS: %w", err)
 	}
-	o := &Observer{conn: conn, features: make(map[string]protocol.PositionFeature)}
+	o := &Observer{conn: conn, queryTimeout: cfg.QueryTimeout, features: make(map[string]protocol.PositionFeature)}
 	for _, subject := range []string{
 		protocol.SubjectExecutionOpenResult,
 		protocol.SubjectExecutionCloseResult,
@@ -120,12 +121,69 @@ func (o *Observer) WaitFor(ctx context.Context, subject string, match func([]byt
 	}
 }
 
+// WaitForResult waits for a result message on subject whose unique_tag equals
+// tag and that arrived at or after `after`. The timestamp guard matters
+// because a run reuses one tag for the open and every close, so matching on
+// the tag alone would return a stale terminal result.
+func (o *Observer) WaitForResult(ctx context.Context, subject, tag string, after time.Time, timeout time.Duration) (WireMessage, error) {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		o.mu.RLock()
+		for _, message := range o.messages {
+			if message.Subject == subject && !message.ReceivedAt.Before(after) && payloadTag(message.Payload) == tag {
+				o.mu.RUnlock()
+				return message, nil
+			}
+		}
+		o.mu.RUnlock()
+		select {
+		case <-ctx.Done():
+			return WireMessage{}, fmt.Errorf("waiting for NATS subject %s tag %s: %w", subject, tag, ctx.Err())
+		case <-deadline.C:
+			return WireMessage{}, fmt.Errorf("timeout waiting for NATS subject %s tag %s", subject, tag)
+		case <-ticker.C:
+		}
+	}
+}
+
+// OrderEventsBetween returns the execution.order.event messages received in
+// [start, end], decoded and in arrival order.
+func (o *Observer) OrderEventsBetween(start, end time.Time) []protocol.ExecutionOrderEvent {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	var events []protocol.ExecutionOrderEvent
+	for _, message := range o.messages {
+		if message.Subject != protocol.SubjectExecutionOrderEvent {
+			continue
+		}
+		if message.ReceivedAt.Before(start) || (!end.IsZero() && message.ReceivedAt.After(end)) {
+			continue
+		}
+		var event protocol.ExecutionOrderEvent
+		if json.Unmarshal(message.Payload, &event) == nil {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func payloadTag(payload []byte) string {
+	var envelope struct {
+		UniqueTag string `json:"unique_tag"`
+	}
+	_ = json.Unmarshal(payload, &envelope)
+	return envelope.UniqueTag
+}
+
 func (o *Observer) Query(ctx context.Context, request protocol.PositionQueryRequest) (protocol.PositionQueryResponse, error) {
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return protocol.PositionQueryResponse{}, err
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, o.queryTimeout)
 	defer cancel()
 	message, err := o.conn.RequestWithContext(requestCtx, protocol.SubjectStrategyExecutionPositionQuery, payload)
 	if err != nil {

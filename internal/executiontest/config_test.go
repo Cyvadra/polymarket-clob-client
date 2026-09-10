@@ -36,10 +36,37 @@ func TestConfigValidateAcceptsExplicitSafeConfiguration(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsUnknownCloseMode(t *testing.T) {
+	config := validConfig()
+	config.CloseMode = "market"
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "close mode") {
+		t.Fatalf("Validate() error = %v, want close mode error", err)
+	}
+}
+
+func TestConfigValidateRejectsNegativeHold(t *testing.T) {
+	config := validConfig()
+	config.Hold = -time.Second
+	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "hold") {
+		t.Fatalf("Validate() error = %v, want hold error", err)
+	}
+}
+
+func TestConfigValidateAcceptsKnownCloseModes(t *testing.T) {
+	for _, mode := range []string{"", "auto", "limit", "force"} {
+		config := validConfig()
+		config.CloseMode = mode
+		if err := config.Validate(); err != nil {
+			t.Fatalf("Validate() close mode %q unexpected error: %v", mode, err)
+		}
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		NATSURL: "nats://127.0.0.1:4222", ConditionID: "0xcondition", AssetID: "123", Outcome: "Up",
 		TargetUSD: "1", BuyLimit: "0.42", ReportDir: "reports",
 		CaseTimeout: time.Minute, CleanupTimeout: time.Second,
+		PositionTimeout: time.Second, QueryTimeout: time.Second,
 	}
 }

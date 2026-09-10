@@ -16,6 +16,7 @@ const (
 	StatusFail         Status = "FAIL"
 	StatusSkip         Status = "SKIP"
 	StatusInconclusive Status = "INCONCLUSIVE"
+	StatusInfo         Status = "INFO"
 )
 
 type Report struct {
@@ -25,11 +26,20 @@ type Report struct {
 	mu        sync.Mutex
 	file      *os.File
 	results   []scenarioResult
+	phases    []phaseResult
 }
 
 type scenarioResult struct {
 	Name   string
 	Status Status
+	Detail string
+}
+
+type phaseResult struct {
+	Name   string
+	Status Status
+	Shares string
+	Price  string
 	Detail string
 }
 
@@ -68,6 +78,16 @@ func (r *Report) Scenario(name string, status Status, detail string) {
 	r.writeLocked(fmt.Sprintf("- `%s` scenario `%s`: **%s** %s\n", time.Now().UTC().Format(time.RFC3339Nano), name, status, markdownCell(detail)))
 }
 
+// Phase appends a life-cycle phase result to the timeline as it happens; the
+// Lifecycle table is rendered once on Close. shares and price are optional
+// and shown as a dash when empty.
+func (r *Report) Phase(name string, status Status, shares, price, detail string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.phases = append(r.phases, phaseResult{Name: name, Status: status, Shares: shares, Price: price, Detail: detail})
+	r.writeLocked(fmt.Sprintf("- `%s` phase `%s`: **%s** shares=%s price=%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), name, status, orDash(shares), orDash(price), markdownCell(detail)))
+}
+
 func (r *Report) Evidence(message WireMessage) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -83,6 +103,15 @@ func (r *Report) Note(title, detail string) {
 func (r *Report) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.phases) > 0 {
+		r.writeLocked("\n## Lifecycle\n\n| Phase | Status | Shares | Price | Detail |\n|---|---|---|---|---|\n")
+		phaseCounts := make(map[Status]int)
+		for _, phase := range r.phases {
+			phaseCounts[phase.Status]++
+			r.writeLocked(fmt.Sprintf("| `%s` | **%s** | %s | %s | %s |\n", phase.Name, phase.Status, orDash(phase.Shares), orDash(phase.Price), markdownCell(phase.Detail)))
+		}
+		r.writeLocked(fmt.Sprintf("\nLifecycle — PASS: %d, FAIL: %d, SKIP: %d, INCONCLUSIVE: %d, INFO: %d\n", phaseCounts[StatusPass], phaseCounts[StatusFail], phaseCounts[StatusSkip], phaseCounts[StatusInconclusive], phaseCounts[StatusInfo]))
+	}
 	r.writeLocked("\n## Scenarios\n\n| Scenario | Status | Detail |\n|---|---|---|\n")
 	for _, result := range r.results {
 		r.writeLocked(fmt.Sprintf("| `%s` | **%s** | %s |\n", result.Name, result.Status, markdownCell(result.Detail)))
@@ -112,6 +141,13 @@ func (r *Report) writeLocked(value string) {
 		_, _ = r.file.WriteString(value)
 		_ = r.file.Sync()
 	}
+}
+
+func orDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
 }
 
 func markdownCell(value string) string {
