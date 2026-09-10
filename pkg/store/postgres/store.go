@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Cyvadra/polymarket-clob-client/pkg/accounting"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 	"github.com/jackc/pgx/v5"
@@ -375,6 +374,23 @@ func (s *Store) OrderByIntent(ctx context.Context, intentID string, childSequenc
 	return order, err
 }
 
+// FilledShares sums the shares of every fill recorded against one exchange
+// order, leaving out fills whose trade failed on chain.
+func (s *Store) FilledShares(ctx context.Context, exchangeOrderID string) (string, error) {
+	if exchangeOrderID == "" {
+		return "", fmt.Errorf("exchange order ID is required")
+	}
+	var shares string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(shares), 0)::text
+		FROM fills
+		WHERE exchange_order_id = $1 AND trade_status <> 'FAILED'
+	`, exchangeOrderID).Scan(&shares); err != nil {
+		return "", fmt.Errorf("sum order fills: %w", err)
+	}
+	return shares, nil
+}
+
 func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, error) {
 	if record.FillID == "" || record.ConditionID == "" || record.TokenID == "" || record.Outcome == "" {
 		return false, fmt.Errorf("fill ID, condition ID, token ID, and outcome are required")
@@ -400,11 +416,11 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 	}
 	var priorStatus string
 	var priorSide string
-	var priorShares, priorPrice, priorTraderSide string
+	var priorShares, priorPrice string
 	err = tx.QueryRow(ctx, `
-		SELECT trade_status, side, shares::text, price::text, trader_side
+		SELECT trade_status, side, shares::text, price::text
 		FROM fills WHERE fill_id = $1 FOR UPDATE
-	`, record.FillID).Scan(&priorStatus, &priorSide, &priorShares, &priorPrice, &priorTraderSide)
+	`, record.FillID).Scan(&priorStatus, &priorSide, &priorShares, &priorPrice)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("lock existing fill: %w", err)
 	}
@@ -427,7 +443,7 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			}
 			return false, nil
 		}
-		if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, record.MarketID, record.Outcome, priorSide, priorShares, priorPrice, priorTraderSide, true, receivedAt); err != nil {
+		if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, record.MarketID, record.Outcome, priorSide, priorShares, priorPrice, true, receivedAt); err != nil {
 			return false, err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = 'FAILED' WHERE fill_id = $1`, record.FillID); err != nil {
@@ -464,7 +480,7 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		}
 		return true, nil
 	}
-	if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, record.MarketID, record.Outcome, string(record.Side), record.Shares, record.Price, record.TraderSide, false, receivedAt); err != nil {
+	if err := applyPositionDelta(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, record.MarketID, record.Outcome, string(record.Side), record.Shares, record.Price, false, receivedAt); err != nil {
 		return false, err
 	}
 	if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, tradeStatus); err != nil {
@@ -522,11 +538,12 @@ func setPositionSettlementState(ctx context.Context, tx pgx.Tx, conditionID, tok
 	return nil
 }
 
-func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, uniqueTag, marketID, outcome, side, shares, price, traderSide string, reverse bool, receivedAt time.Time) error {
-	creditedShares, err := accounting.CreditedShares(side, shares, price, traderSide)
-	if err != nil {
-		return err
-	}
+// applyPositionDelta moves a lane's position by one fill. Fills are the only
+// source of position quantities, and each is applied at exactly the share
+// count the exchange reported: no fee is estimated or deducted. What an open
+// request asked for (target USD, limit price, planned shares) records intent
+// only and never sizes a position.
+func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, uniqueTag, marketID, outcome, side, shares, price string, reverse bool, receivedAt time.Time) error {
 	// Reversing a fill means applying the opposite side: a reversed BUY
 	// reduces the position, a reversed SELL adds it back.
 	if reverse {
@@ -543,9 +560,9 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, un
 			CASE WHEN $6 = 'BUY' THEN $7::numeric ELSE 0 END,
 			0,
 			CASE WHEN $6 = 'BUY' THEN $8::numeric ELSE NULL END,
-			CASE WHEN $6 = 'BUY' THEN $9 ELSE NULL END,
+			CASE WHEN $6 = 'BUY' THEN $9::timestamptz ELSE NULL END,
 			CASE WHEN $6 = 'BUY' THEN 'open' ELSE 'empty' END,
-			1, $9
+			1, $9::timestamptz
 		)
 		ON CONFLICT (condition_id, token_id, unique_tag) DO UPDATE SET
 			market_id = EXCLUDED.market_id,
@@ -575,7 +592,7 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, un
 				ELSE positions.entry_price
 			END,
 			entry_time = CASE
-				WHEN $6 = 'BUY' AND positions.position_size = 0 THEN $9
+				WHEN $6 = 'BUY' AND positions.position_size = 0 THEN $9::timestamptz
 				WHEN $6 = 'SELL' AND positions.position_size <= $7::numeric THEN NULL
 				ELSE positions.entry_time
 			END,
@@ -585,9 +602,9 @@ func applyPositionDelta(ctx context.Context, tx pgx.Tx, conditionID, tokenID, un
 				ELSE 'open'
 			END,
 			source_revision = positions.source_revision + 1,
-			updated_at = $9
+			updated_at = $9::timestamptz
 	`, conditionID, tokenID, uniqueTag, marketID, outcome, side,
-		creditedShares, price, receivedAt); err != nil {
+		shares, price, receivedAt); err != nil {
 		return fmt.Errorf("update position from fill: %w", err)
 	}
 	return nil

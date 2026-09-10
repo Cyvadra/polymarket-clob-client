@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,9 @@ type fakeStore struct {
 	orders  []store.SignedOrderRecord
 	updates []update
 	fills   []store.FillRecord
+	fillErr error
+	// filled is the recorded fill total per exchange order ID.
+	filled map[string]string
 }
 
 type update struct {
@@ -69,8 +73,17 @@ func (s *fakeStore) Intent(_ context.Context, intentID string) (store.OrderInten
 	return store.OrderIntentRecord{}, store.ErrNotFound
 }
 func (s *fakeStore) ApplyFill(_ context.Context, record store.FillRecord) (bool, error) {
+	if s.fillErr != nil {
+		return false, s.fillErr
+	}
 	s.fills = append(s.fills, record)
 	return true, nil
+}
+func (s *fakeStore) FilledShares(_ context.Context, exchangeOrderID string) (string, error) {
+	if shares, ok := s.filled[exchangeOrderID]; ok {
+		return shares, nil
+	}
+	return "0", nil
 }
 func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return nil, nil
@@ -96,6 +109,65 @@ func (c *fakeCLOB) Order(_ context.Context, orderID string) (*clobclient.Order, 
 
 func (c *fakeCLOB) AllTrades(context.Context) ([]clobclient.Trade, error) {
 	return c.trades, nil
+}
+
+func TestReconcileResolvesMissingCancelFromRecordedFills(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		requested string
+		filled    string
+		state     statemachine.State
+	}{
+		{"fully filled", "2.44", "2.44", statemachine.StateFilled},
+		// Planned 5.280366, signed floored to 5.28: a complete fill is 5.28.
+		{"fully filled at the floored signed size", "5.280366", "5.28", statemachine.StateFilled},
+		{"partially filled", "2.44", "1", statemachine.StateCanceled},
+		{"never filled", "2.44", "0", statemachine.StateCanceled},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateCancelPending, RequestedShares: testCase.requested, MatchedShares: "0", OrderType: store.TimeInForceGTC, Revision: 4, UpdatedAt: time.Unix(100, 0).UTC()}
+			repository := &fakeStore{orders: []store.SignedOrderRecord{order}, filled: map[string]string{"order-1": testCase.filled}}
+			reconciler, _ := New(repository, &fakeCLOB{err: &clobclient.APIError{StatusCode: http.StatusNotFound}}, nil, "", func() time.Time { return time.Unix(1000, 0).UTC() }, time.Second)
+			if err := reconciler.Reconcile(context.Background()); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if len(repository.updates) != 1 || repository.updates[0].state != testCase.state {
+				t.Fatalf("expected %s, got %#v", testCase.state, repository.updates)
+			}
+		})
+	}
+}
+
+func TestReconcileWaitsOutGraceBeforeResolvingMissingCancel(t *testing.T) {
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateCancelRequested, RequestedShares: "2", Revision: 4, UpdatedAt: time.Unix(100, 0).UTC()}
+	repository := &fakeStore{orders: []store.SignedOrderRecord{order}}
+	reconciler, _ := New(repository, &fakeCLOB{err: &clobclient.APIError{StatusCode: http.StatusNotFound}}, nil, "", func() time.Time { return time.Unix(101, 0).UTC() }, time.Second)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile within grace: %v", err)
+	}
+	if len(repository.updates) != 0 {
+		t.Fatalf("expected no transition within grace, got %#v", repository.updates)
+	}
+}
+
+func TestReconcileKeepsMissingCancelWhenTradeReplayFails(t *testing.T) {
+	order := store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateCancelPending, RequestedShares: "2", Revision: 4, UpdatedAt: time.Unix(100, 0).UTC()}
+	repository := &fakeStore{orders: []store.SignedOrderRecord{order}, fillErr: errors.New("store unavailable")}
+	fills, err := accountfeed.NewFillConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	client := &fakeCLOB{
+		err:    &clobclient.APIError{StatusCode: http.StatusNotFound},
+		trades: []clobclient.Trade{{ID: "trade-1", TakerOrderID: "order-1", Market: "condition", AssetID: "token", Side: clobclient.SideBuy, Size: "2", Price: "0.5", Outcome: "Up", Status: "CONFIRMED", TraderSide: "TAKER", Owner: "key"}},
+	}
+	reconciler, _ := New(repository, client, fills, "key", func() time.Time { return time.Unix(1000, 0).UTC() }, time.Second)
+	if err := reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("expected the replay failure to be reported")
+	}
+	if len(repository.updates) != 0 {
+		t.Fatalf("a missing cancel must not resolve from fills a failed replay left stale, got %#v", repository.updates)
+	}
 }
 
 func TestReconcileMovesUnknownSubmitToLive(t *testing.T) {
@@ -206,6 +278,29 @@ func TestReconcileReplaysOwnedTradesBeforeOrders(t *testing.T) {
 	}
 	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "order-1" || repository.fills[0].IntentID != "intent-1" || repository.fills[0].UniqueTag != "lane-a" || repository.fills[0].Side != store.SideSell {
 		t.Fatalf("expected owned maker fill replay, got %+v", repository.fills)
+	}
+}
+
+func TestReconcileResolvesOrdersWhenTradeReplayFails(t *testing.T) {
+	repository := &fakeStore{
+		orders:  []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateCancelPending, Revision: 3}},
+		fillErr: errors.New("update position from fill: column type mismatch"),
+	}
+	fills, err := accountfeed.NewFillConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	client := &fakeCLOB{
+		orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "CANCELED"}},
+		trades: []clobclient.Trade{{ID: "trade-1", TakerOrderID: "other-taker", Market: "condition", AssetID: "token", Side: clobclient.SideBuy, Size: "2", Price: "0.5", Outcome: "Up", Status: "CONFIRMED", TraderSide: "MAKER", MakerOrders: []clobclient.MakerTrade{{OrderID: "order-1", Owner: "key", MatchedAmount: "2", Price: "0.5", AssetID: "token", Outcome: "Up", Side: clobclient.SideSell}}}},
+	}
+	reconciler, _ := New(repository, client, fills, "key", time.Now, time.Second)
+	err = reconciler.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "replay account trade trade-1") {
+		t.Fatalf("expected replay failure to be reported, got %v", err)
+	}
+	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StateCanceled {
+		t.Fatalf("expected order reconciliation despite replay failure, got %#v", repository.updates)
 	}
 }
 

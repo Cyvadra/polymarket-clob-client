@@ -26,4 +26,13 @@ func TestReportPersistsScenarioAndEvidence(t *testing.T) {
 			t.Errorf("report does not contain %q:\n%s", want, contents)
 		}
 	}
+	// The table must be contiguous: rows directly under the header, after
+	// the timeline, not scattered through later sections.
+	table := "## Scenarios\n\n| Scenario | Status | Detail |\n|---|---|---|\n| `limit-buy` | **PASS** | filled \\| confirmed |\n\n## Summary"
+	if !strings.Contains(string(contents), table) {
+		t.Errorf("report does not contain a contiguous scenarios table:\n%s", contents)
+	}
+	if strings.Index(string(contents), "## Timeline") > strings.Index(string(contents), "## Scenarios") {
+		t.Errorf("scenarios table must follow the timeline:\n%s", contents)
+	}
 }

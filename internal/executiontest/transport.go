@@ -96,7 +96,7 @@ func (o *Observer) Publish(subject string, value any) error {
 	return o.conn.Flush()
 }
 
-func (o *Observer) WaitFor(subject string, match func([]byte) bool, timeout time.Duration) (WireMessage, error) {
+func (o *Observer) WaitFor(ctx context.Context, subject string, match func([]byte) bool, timeout time.Duration) (WireMessage, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -111,6 +111,8 @@ func (o *Observer) WaitFor(subject string, match func([]byte) bool, timeout time
 		}
 		o.mu.RUnlock()
 		select {
+		case <-ctx.Done():
+			return WireMessage{}, fmt.Errorf("waiting for NATS subject %s: %w", subject, ctx.Err())
 		case <-deadline.C:
 			return WireMessage{}, fmt.Errorf("timeout waiting for NATS subject %s", subject)
 		case <-ticker.C:
@@ -123,7 +125,9 @@ func (o *Observer) Query(ctx context.Context, request protocol.PositionQueryRequ
 	if err != nil {
 		return protocol.PositionQueryResponse{}, err
 	}
-	message, err := o.conn.Request(protocol.SubjectStrategyExecutionPositionQuery, payload, 10*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	message, err := o.conn.RequestWithContext(requestCtx, protocol.SubjectStrategyExecutionPositionQuery, payload)
 	if err != nil {
 		return protocol.PositionQueryResponse{}, fmt.Errorf("position query: %w", err)
 	}
