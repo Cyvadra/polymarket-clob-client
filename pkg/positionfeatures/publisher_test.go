@@ -27,11 +27,19 @@ type publishedMessage struct {
 type fakePublisher struct {
 	messages []publishedMessage
 	err      error
+	// errs, when non-empty, scripts the error of each call in turn; once
+	// drained, calls fall back to err.
+	errs []error
 }
 
 func (p *fakePublisher) PublishJSON(subject string, value any) error {
-	if p.err != nil {
-		return p.err
+	callErr := p.err
+	if len(p.errs) > 0 {
+		callErr = p.errs[0]
+		p.errs = p.errs[1:]
+	}
+	if callErr != nil {
+		return callErr
 	}
 	feature, ok := value.(protocol.PositionFeature)
 	if !ok {
@@ -126,6 +134,33 @@ func TestPublishSkipsUnchangedPosition(t *testing.T) {
 	}
 	if len(publisher.messages) != 1 {
 		t.Fatalf("published messages = %d, want 1", len(publisher.messages))
+	}
+}
+
+func TestPublishContinuesAfterIndividualPositionErrors(t *testing.T) {
+	badErr := errors.New("subject a failed")
+	publisher := &fakePublisher{errs: []error{badErr, nil}}
+	module, err := New(fakeStore{positions: []store.PositionRecord{
+		{ConditionID: "condition-a", TokenID: "token-a", SourceRevision: 1},
+		{ConditionID: "condition-b", TokenID: "token-b", SourceRevision: 1},
+	}}, publisher, time.Now, time.Second)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := module.Publish(context.Background()); !errors.Is(err, badErr) {
+		t.Fatalf("Publish() error = %v, want to wrap %v", err, badErr)
+	}
+	if len(publisher.messages) != 1 || publisher.messages[0].subject != "position.features.condition-b.token-b" {
+		t.Fatalf("expected the second position to still publish despite the first failing, got %+v", publisher.messages)
+	}
+	// The failed position was never marked published, so it retries; the
+	// already-published one is deduped and does not republish.
+	publisher.errs = []error{nil}
+	if err := module.Publish(context.Background()); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+	if len(publisher.messages) != 2 || publisher.messages[1].subject != "position.features.condition-a.token-a" {
+		t.Fatalf("expected the previously failed position to retry, got %+v", publisher.messages)
 	}
 }
 

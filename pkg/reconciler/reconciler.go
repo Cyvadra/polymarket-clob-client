@@ -28,6 +28,10 @@ type CLOB interface {
 	AllTrades(context.Context) ([]clobclient.Trade, error)
 }
 
+type paginatedTrades interface {
+	Trades(context.Context, string) ([]clobclient.Trade, string, error)
+}
+
 type Reconciler struct {
 	store             store.ReconcileStore
 	clob              CLOB
@@ -127,17 +131,13 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 	if r.fills == nil {
 		return nil
 	}
-	trades, err := r.clob.AllTrades(ctx)
-	if err != nil {
-		return fmt.Errorf("load account trades for reconciliation: %w", err)
-	}
 	cutoff := time.Time{}
 	if r.maxTradeAge > 0 {
 		cutoff = r.now().UTC().Add(-r.maxTradeAge)
 	}
-	for _, trade := range trades {
+	process := func(trade clobclient.Trade) error {
 		if !cutoff.IsZero() && tradeTooOld(trade.Timestamp, cutoff) {
-			continue
+			return nil
 		}
 		for _, fill := range accountfeed.OwnedFillsFromTrade(trade, r.apiKey, r.now().UTC()) {
 			// Applying a fill is idempotent in the store, but the round trip is
@@ -152,6 +152,37 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 			if isSettled(fill.TradeStatus) {
 				r.replayedFills[fill.FillID] = struct{}{}
 			}
+		}
+		return nil
+	}
+	if paged, ok := r.clob.(paginatedTrades); ok {
+		for cursor := ""; ; {
+			trades, next, err := paged.Trades(ctx, cursor)
+			if err != nil {
+				return fmt.Errorf("load account trades for reconciliation: %w", err)
+			}
+			// Each trade is filtered by process, not by page position: the
+			// CLOB gives no ordering guarantee for this endpoint, so an old
+			// trade on one page must not be read as proof that every later
+			// page is old too.
+			for _, trade := range trades {
+				if err := process(trade); err != nil {
+					return err
+				}
+			}
+			if next == "" || next == cursor {
+				return nil
+			}
+			cursor = next
+		}
+	}
+	trades, err := r.clob.AllTrades(ctx)
+	if err != nil {
+		return fmt.Errorf("load account trades for reconciliation: %w", err)
+	}
+	for _, trade := range trades {
+		if err := process(trade); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -272,7 +303,7 @@ func (r *Reconciler) missingOrderExpired(order store.SignedOrderRecord) bool {
 }
 
 func (r *Reconciler) applyRemoteOrder(ctx context.Context, order store.SignedOrderRecord, remote clobclient.Order, reason string) error {
-	event, ok := statemachine.EventForOrderObservation(remote.Status, remote.SizeMatched, remote.OriginalSize, statemachine.Immediate(string(order.OrderType)))
+	event, ok := statemachine.EventForOrderStatus(remote.Status, remote.SizeMatched, remote.OriginalSize, statemachine.Immediate(string(order.OrderType)))
 	if !ok {
 		return fmt.Errorf("order %s has unsupported status %q", remote.ID, remote.Status)
 	}

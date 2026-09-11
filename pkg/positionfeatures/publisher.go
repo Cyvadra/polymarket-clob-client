@@ -3,6 +3,7 @@ package positionfeatures
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -66,12 +67,16 @@ func (p *PublisherModule) SetErrorHandler(handler func(error)) {
 
 // Publish emits the latest durable state for every known market/token position.
 // A frame is intentionally best-effort: the next configured frame supersedes it.
+// One position's error does not stop the batch: every position is attempted,
+// only the ones that actually publish are marked, and a failed position simply
+// retries on the next tick instead of starving every position sorted after it.
 func (p *PublisherModule) Publish(ctx context.Context) error {
 	positions, err := p.store.PositionFeatures(ctx)
 	if err != nil {
 		return fmt.Errorf("load position features: %w", err)
 	}
 	publishedAt := p.now().UTC()
+	var errs error
 	for _, position := range positions {
 		key := position.ConditionID + ":" + position.TokenID + ":" + position.UniqueTag
 		if p.wasPublished(key, position.SourceRevision) {
@@ -79,18 +84,21 @@ func (p *PublisherModule) Publish(ctx context.Context) error {
 		}
 		subject, err := protocol.PositionFeaturesSubject(position.ConditionID, position.TokenID)
 		if err != nil {
-			return fmt.Errorf("build position feature subject: %w", err)
+			errs = errors.Join(errs, fmt.Errorf("build position feature subject for %s/%s: %w", position.ConditionID, position.TokenID, err))
+			continue
 		}
 		feature, err := mapping.PositionFeature(position, p.nextSequence(), publishedAt)
 		if err != nil {
-			return fmt.Errorf("map position feature: %w", err)
+			errs = errors.Join(errs, fmt.Errorf("map position feature %s: %w", subject, err))
+			continue
 		}
 		if err := p.publisher.PublishJSON(subject, feature); err != nil {
-			return fmt.Errorf("publish position feature %s: %w", subject, err)
+			errs = errors.Join(errs, fmt.Errorf("publish position feature %s: %w", subject, err))
+			continue
 		}
 		p.markPublished(key, position.SourceRevision)
 	}
-	return nil
+	return errs
 }
 
 func (p *PublisherModule) wasPublished(key string, revision int64) bool {

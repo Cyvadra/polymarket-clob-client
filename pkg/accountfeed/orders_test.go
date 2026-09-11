@@ -203,13 +203,13 @@ func TestOrderConsumerClosesPartiallyMatchedImmediateOrder(t *testing.T) {
 	}
 }
 
-func TestOrderConsumerKeepsPartiallyMatchedRestingOrderOpen(t *testing.T) {
+func TestOrderConsumerKeepsLivePartiallyFilledRestingOrderOpen(t *testing.T) {
 	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceGTC}}
 	consumer, err := NewOrderConsumer(repository, time.Now)
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
 	}
-	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "MATCHED", MatchedShares: "2"}); err != nil {
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "LIVE", MatchedShares: "2"}); err != nil {
 		t.Fatalf("consume order event: %v", err)
 	}
 	if repository.updated != statemachine.StatePartiallyFilled {
@@ -217,12 +217,36 @@ func TestOrderConsumerKeepsPartiallyMatchedRestingOrderOpen(t *testing.T) {
 	}
 }
 
-func TestAveragePriceFallsBackToLimitOnlyForRestingOrders(t *testing.T) {
-	// No recorded fill price. A GTC order could only have filled by resting,
-	// where the maker takes its own limit, so the limit is the exact price.
-	resting := store.SignedOrderRecord{ExchangeOrderID: "o1", State: statemachine.StateFilled, MatchedShares: "3", Price: "0.55", OrderType: store.TimeInForceGTC}
+// The exchange reports MATCHED once a resting order is closed, even when maker
+// rounding leaves size_matched just under the signed size. Keeping it open
+// withheld the open result and looped cancels until the order aged out of REST.
+func TestOrderConsumerClosesMatchedRestingOrderShortOfSize(t *testing.T) {
+	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StatePartiallyFilled, Revision: 2, RequestedShares: "38.88", OrderType: store.TimeInForceGTC}}
+	consumer, err := NewOrderConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new order consumer: %v", err)
+	}
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "MATCHED", MatchedShares: "38.8767"}); err != nil {
+		t.Fatalf("consume order event: %v", err)
+	}
+	if repository.updated != statemachine.StateCanceled {
+		t.Fatalf("expected the matched order to be terminal, got %s", repository.updated)
+	}
+}
+
+func TestAveragePriceFallsBackToLimitOnlyForPostOnlyRestingOrders(t *testing.T) {
+	// No recorded fill price. A post-only GTC order can never cross, so a
+	// maker fill is exactly at its own limit.
+	resting := store.SignedOrderRecord{ExchangeOrderID: "o1", State: statemachine.StateFilled, MatchedShares: "3", Price: "0.55", OrderType: store.TimeInForceGTC, PostOnly: true}
 	if got := AveragePrice(context.Background(), &fakeOrderStore{}, resting); got != "0.55" {
-		t.Fatalf("expected the resting limit 0.55, got %q", got)
+		t.Fatalf("expected the post-only resting limit 0.55, got %q", got)
+	}
+	// A plain GTC without post-only can cross immediately at a better price on
+	// arrival, so its limit is not necessarily what it filled at; no fallback.
+	crossing := resting
+	crossing.PostOnly = false
+	if got := AveragePrice(context.Background(), &fakeOrderStore{}, crossing); got != "" {
+		t.Fatalf("expected no fallback for a non-post-only GTC order, got %q", got)
 	}
 	// A taker order (FAK) that crossed on arrival is priced by the executor
 	// from the submit response, not here; no fallback.

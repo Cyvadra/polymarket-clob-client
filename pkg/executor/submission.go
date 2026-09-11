@@ -68,7 +68,10 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		Policy:             req.Policy,
 	}
 	if err := e.Execute(ctx, intent); err != nil {
-		e.publishOpenRejection(intent, err)
+		var unresolved unresolvedSubmission
+		if !errors.As(err, &unresolved) {
+			e.publishOpenRejection(intent, err)
+		}
 		return err
 	}
 	return nil
@@ -415,8 +418,18 @@ func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrde
 		return fmt.Errorf("mark submit unknown: %w", err)
 	}
 	e.publishTransition(unknown, uniqueTag, reason)
-	return fmt.Errorf("order submission outcome is unknown: %s", reason)
+	return unresolvedSubmission{cause: fmt.Errorf("order submission outcome is unknown: %s", reason)}
 }
+
+// unresolvedSubmission marks an error whose order may in fact have reached
+// the exchange despite the response indicating otherwise. The order is left
+// in SUBMIT_UNKNOWN for the reconciler to resolve from REST truth, so no
+// result is published for it here: a premature FAILED would contradict a
+// SUCCEEDED the reconciler later reports once it learns the real outcome.
+type unresolvedSubmission struct{ cause error }
+
+func (e unresolvedSubmission) Error() string { return e.cause.Error() }
+func (e unresolvedSubmission) Unwrap() error { return e.cause }
 
 func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, uniqueTag string, submitErr error) error {
 	reason := rejectionReason(submitErr)
