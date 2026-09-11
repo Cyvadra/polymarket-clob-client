@@ -193,11 +193,18 @@ func TestExecuteOpenMarksUnknownWhenSubmissionTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new executor: %v", err)
 	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
 	if err := exec.ExecuteOpen(context.Background(), openRequest()); err == nil {
 		t.Fatal("expected unknown outcome error")
 	}
 	if storer.order.State != statemachine.StateSubmitUnknown {
 		t.Fatalf("expected submit unknown state, got %s", storer.order.State)
+	}
+	for _, record := range pub.publishes {
+		if record.subject == protocol.SubjectExecutionOpenResult {
+			t.Fatalf("expected no open result while the submission outcome is unknown, got %+v", record.value)
+		}
 	}
 }
 

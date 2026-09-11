@@ -86,10 +86,11 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 // result. It is best effort: fills can land after the order event, and a
 // failed lookup must not hold back the result, so either yields "" and the
 // result simply omits average_price. When no fill price is on record yet it
-// falls back to the order's own limit for an order that could only have
-// rested (GTC/GTD): a resting maker fills at its own price, so the limit is
-// exact. A taker order (FAK/FOK) that crossed on arrival is priced by the
-// executor from the submission response, not here, so no fallback applies.
+// falls back to the order's own limit only for a post-only resting order
+// (GTC/GTD): post-only can never cross, so a maker fill is exactly at the
+// limit. A plain GTC/GTD without post-only can cross immediately at a better
+// price on arrival, and a taker order (FAK/FOK) is priced by the executor
+// from the submission response, not here, so neither gets this fallback.
 func AveragePrice(ctx context.Context, prices store.OrderPriceStore, order store.SignedOrderRecord) string {
 	if prices == nil || order.ExchangeOrderID == "" || !statemachine.IsTerminal(order.State) {
 		return ""
@@ -98,7 +99,7 @@ func AveragePrice(ctx context.Context, prices store.OrderPriceStore, order store
 	if err == nil && price != "" {
 		return price
 	}
-	if decimal.Positive(order.MatchedShares) && decimal.Positive(order.Price) && restingOrderType(order.OrderType) {
+	if order.PostOnly && decimal.Positive(order.MatchedShares) && decimal.Positive(order.Price) && restingOrderType(order.OrderType) {
 		return order.Price
 	}
 	return ""

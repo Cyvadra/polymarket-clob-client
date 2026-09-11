@@ -52,7 +52,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 ### 仓位记账
 
-已认证的 CLOB 用户流是 `executiond` 中唯一的账户事件入口。Fill ID 使重复投递具备幂等性。成交生命周期状态（`MATCHED`、`MINED`、`CONFIRMED`、`FAILED`）会被持久化。taker BUY 会按所配置的 Polymarket 手续费公式计入净结果份额；如果该成交随后变为 `FAILED`，其仓位影响会按相同的计入份额数量被反向冲销。
+已认证的 CLOB 用户流是 `executiond` 中唯一的账户事件入口。Fill ID 使重复投递具备幂等性。成交生命周期状态（`MATCHED`、`MINED`、`CONFIRMED`、`FAILED`）会被持久化。仓位按交易所报告的原始成交份额计入，不做手续费估算或扣减；如果该成交随后变为 `FAILED`，其仓位影响会按相同的份额数量被反向冲销。
 
 发布的仓位状态是执行视图，而非结算或赎回引擎。订单状态对账由 CLOB REST 修复未知提交结果；链上结算、赎回与跨系统资金核对不属于 `executiond` 的当前职责。
 

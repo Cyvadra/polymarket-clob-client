@@ -307,6 +307,97 @@ func TestReconcileSkipsTradesOlderThanMaxTradeAge(t *testing.T) {
 	}
 }
 
+// tradePage is one page a fakePagedCLOB serves from Trades.
+type tradePage struct {
+	trades []clobclient.Trade
+	next   string
+}
+
+// fakePagedCLOB implements the reconciler's optional paginatedTrades path and
+// deliberately does not delegate to a real AllTrades implementation, so a
+// test using it only passes if the paginated branch is actually exercised.
+type fakePagedCLOB struct {
+	orders map[string]*clobclient.Order
+	pages  []tradePage
+	calls  int
+}
+
+func (c *fakePagedCLOB) Order(_ context.Context, orderID string) (*clobclient.Order, error) {
+	return c.orders[orderID], nil
+}
+
+func (c *fakePagedCLOB) AllTrades(context.Context) ([]clobclient.Trade, error) {
+	return nil, errors.New("AllTrades must not be called when Trades pagination is available")
+}
+
+func (c *fakePagedCLOB) Trades(context.Context, string) ([]clobclient.Trade, string, error) {
+	if c.calls >= len(c.pages) {
+		return nil, "", nil
+	}
+	page := c.pages[c.calls]
+	c.calls++
+	return page.trades, page.next, nil
+}
+
+func TestReconcileReplaysEveryPageRegardlessOfTradeOrder(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
+	now := time.Unix(1_000_000, 0).UTC()
+	fills, err := accountfeed.NewFillConsumer(repository, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	oldTimestamp := strconv.FormatInt(now.Add(-48*time.Hour).UnixMilli(), 10)
+	newTimestamp := strconv.FormatInt(now.UnixMilli(), 10)
+	client := &fakePagedCLOB{
+		orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE"}},
+		pages: []tradePage{
+			// The CLOB gives no ordering guarantee for this endpoint: the first
+			// page here is older than the cutoff, but a later page still has a
+			// fill that must be applied. An ordering-dependent early exit would
+			// wrongly abort the whole replay on this first page.
+			{trades: []clobclient.Trade{{ID: "trade-old", Timestamp: oldTimestamp, Market: "condition", AssetID: "token", Outcome: "Up", Status: "CONFIRMED", TraderSide: "MAKER", MakerOrders: []clobclient.MakerTrade{{OrderID: "order-1", Owner: "key", MatchedAmount: "2", Price: "0.5", AssetID: "token", Outcome: "Up", Side: clobclient.SideSell}}}}, next: "cursor-1"},
+			{trades: []clobclient.Trade{{ID: "trade-new", Timestamp: newTimestamp, Market: "condition", AssetID: "token", Outcome: "Up", Status: "CONFIRMED", TraderSide: "MAKER", MakerOrders: []clobclient.MakerTrade{{OrderID: "order-1", Owner: "key", MatchedAmount: "3", Price: "0.6", AssetID: "token", Outcome: "Up", Side: clobclient.SideSell}}}}, next: ""},
+		},
+	}
+	reconciler, _ := New(repository, client, fills, "key", func() time.Time { return now }, time.Second)
+	reconciler.SetMaxTradeAge(24 * time.Hour)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.fills) != 1 || repository.fills[0].FillID != "trade-new:order-1" {
+		t.Fatalf("expected only the new-page fill to be applied, got %+v", repository.fills)
+	}
+}
+
+func TestReconcilePaginatesUntilTerminalCursor(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
+	fills, err := accountfeed.NewFillConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	trade := func(id string) clobclient.Trade {
+		return clobclient.Trade{ID: id, Market: "condition", AssetID: "token", Outcome: "Up", Status: "CONFIRMED", TraderSide: "MAKER", MakerOrders: []clobclient.MakerTrade{{OrderID: "order-1", Owner: "key", MatchedAmount: "1", Price: "0.5", AssetID: "token", Outcome: "Up", Side: clobclient.SideSell}}}
+	}
+	client := &fakePagedCLOB{
+		orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE"}},
+		pages: []tradePage{
+			{trades: []clobclient.Trade{trade("trade-1")}, next: "cursor-1"},
+			{trades: []clobclient.Trade{trade("trade-2")}, next: "cursor-2"},
+			{trades: []clobclient.Trade{trade("trade-3")}, next: ""},
+		},
+	}
+	reconciler, _ := New(repository, client, fills, "key", time.Now, time.Second)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if client.calls != 3 {
+		t.Fatalf("expected exactly 3 page fetches, got %d", client.calls)
+	}
+	if len(repository.fills) != 3 {
+		t.Fatalf("expected a fill from every page, got %+v", repository.fills)
+	}
+}
+
 func TestReconcileResolvesOrdersWhenTradeReplayFails(t *testing.T) {
 	repository := &fakeStore{
 		orders:  []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateCancelPending, Revision: 3}},

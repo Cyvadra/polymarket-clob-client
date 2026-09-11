@@ -217,12 +217,19 @@ func TestOrderConsumerKeepsPartiallyMatchedRestingOrderOpen(t *testing.T) {
 	}
 }
 
-func TestAveragePriceFallsBackToLimitOnlyForRestingOrders(t *testing.T) {
-	// No recorded fill price. A GTC order could only have filled by resting,
-	// where the maker takes its own limit, so the limit is the exact price.
-	resting := store.SignedOrderRecord{ExchangeOrderID: "o1", State: statemachine.StateFilled, MatchedShares: "3", Price: "0.55", OrderType: store.TimeInForceGTC}
+func TestAveragePriceFallsBackToLimitOnlyForPostOnlyRestingOrders(t *testing.T) {
+	// No recorded fill price. A post-only GTC order can never cross, so a
+	// maker fill is exactly at its own limit.
+	resting := store.SignedOrderRecord{ExchangeOrderID: "o1", State: statemachine.StateFilled, MatchedShares: "3", Price: "0.55", OrderType: store.TimeInForceGTC, PostOnly: true}
 	if got := AveragePrice(context.Background(), &fakeOrderStore{}, resting); got != "0.55" {
-		t.Fatalf("expected the resting limit 0.55, got %q", got)
+		t.Fatalf("expected the post-only resting limit 0.55, got %q", got)
+	}
+	// A plain GTC without post-only can cross immediately at a better price on
+	// arrival, so its limit is not necessarily what it filled at; no fallback.
+	crossing := resting
+	crossing.PostOnly = false
+	if got := AveragePrice(context.Background(), &fakeOrderStore{}, crossing); got != "" {
+		t.Fatalf("expected no fallback for a non-post-only GTC order, got %q", got)
 	}
 	// A taker order (FAK) that crossed on arrival is priced by the executor
 	// from the submit response, not here; no fallback.

@@ -78,11 +78,12 @@ deviate from the default.
 | `EXECUTION_POSITION_FEATURE_INTERVAL` | `500ms` | Position snapshot publish frequency. |
 | `EXECUTION_RECONCILE_INTERVAL` | `30s` | REST reconciliation frequency. |
 | `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | `2m` | How long an unresolved submitted order may return REST 404 before it is failed. |
+| `EXECUTION_RECONCILE_MAX_TRADE_AGE` | `24h` | How far back trade replay looks on each reconciliation pass. Trades older than this are skipped rather than replayed. |
 | `EXECUTION_CONNECT_TIMEOUT` | `10s` | NATS and PostgreSQL connection timeout. |
 | `EXECUTION_SHUTDOWN_GRACE_PERIOD` | `10s` | Graceful shutdown deadline. |
 
 Durations accept Go duration strings such as `500ms` and `30s`; positive
-integer values are interpreted as milliseconds. All five must be positive or
+integer values are interpreted as milliseconds. All six must be positive or
 startup fails.
 
 ## Advanced client variables
