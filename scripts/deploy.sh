@@ -7,17 +7,27 @@ if (( $# > 1 )); then
 fi
 HOST=${1:-${EXECUTIOND_DEPLOY_HOST:-${PMM_DEPLOY_HOST:-}}}
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
+PRIVATE_DIR="$SCRIPT_DIR/private/$HOST"
+
+# Optional per-host deploy overrides (EXECUTIOND_PM2_BIN, etc.); see
+# scripts/deploy.env.example.
+if [[ -n $HOST && -f "$PRIVATE_DIR/deploy.env" ]]; then
+	# shellcheck disable=SC1091
+	source "$PRIVATE_DIR/deploy.env"
+fi
+
 TARGET=${EXECUTIOND_DEPLOY_TARGET:-root}
 ARCH=${EXECUTIOND_DEPLOY_ARCH:-amd64}
 OS=${EXECUTIOND_DEPLOY_OS:-linux}
 PM2_BIN=${EXECUTIOND_PM2_BIN:-/root/.nvm/versions/node/v24.21.0/bin/pm2}
+APP_USER=executiond
+APP_GROUP=executiond
 INSTALL_ROOT=/opt/executiond
 CONFIG_ROOT=/etc/executiond
 DATA_ROOT=/var/lib/executiond
 RELEASE_ID=${EXECUTIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
-PRIVATE_DIR="$SCRIPT_DIR/private/$HOST"
 STAGE_DIR=
 
 log() {
@@ -91,7 +101,7 @@ upload_and_activate() {
 	scp "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256" \
 		"$PRIVATE_DIR/executiond.env" \
 		"$TARGET@$HOST:$remote_stage/"
-	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' bash -s" <<'REMOTE'
+	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 
 release_dir="$INSTALL_ROOT/releases/$RELEASE_ID"
@@ -143,14 +153,22 @@ rollback() {
 }
 
 command -v "$PM2_BIN" >/dev/null || { echo "[executiond] ERROR: pm2 not found at $PM2_BIN (set EXECUTIOND_PM2_BIN)" >&2; exit 1; }
+command -v runuser >/dev/null || { echo "[executiond] ERROR: runuser not found; required to drop to $APP_USER" >&2; exit 1; }
 
 if ! systemctl is-active --quiet pmm-nats.service 2>/dev/null; then
 	echo "[executiond] WARNING: pmm-nats.service is not active; executiond needs a NATS server at its EXECUTION_NATS_URL" >&2
 fi
 
+if ! getent group "$APP_GROUP" >/dev/null; then
+	groupadd --system "$APP_GROUP"
+fi
+if ! getent passwd "$APP_USER" >/dev/null; then
+	useradd --system --gid "$APP_GROUP" --home-dir "$DATA_ROOT" --shell /usr/sbin/nologin "$APP_USER"
+fi
+
 install -d -o root -g root -m 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"
 install -d -o root -g root -m 0750 "$CONFIG_ROOT"
-install -d -o root -g root -m 0750 "$DATA_ROOT"
+install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750 "$DATA_ROOT"
 (cd "$REMOTE_STAGE" && sha256sum -c "executiond-$RELEASE_ID.tar.gz.sha256")
 tar -C "$REMOTE_STAGE" -xzf "$REMOTE_STAGE/executiond-$RELEASE_ID.tar.gz"
 install -d -o root -g root -m 0755 "$release_dir"
@@ -167,13 +185,17 @@ fi
 activation_started=1
 trap rollback ERR
 
+# pm2 (and this wrapper) run as root so it can read binaries under /root and
+# manage a single system-wide daemon; the wrapper drops to the unprivileged
+# $APP_USER before execing the actual executiond binary, mirroring the old
+# systemd unit's User=executiond isolation.
 cat > "$run_script" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
 set -a
 source "$CONFIG_ROOT/executiond.env"
 set +a
-exec "$current_link/executiond"
+exec runuser -u "$APP_USER" -p -- "$current_link/executiond"
 EOF
 chmod 0755 "$run_script"
 
