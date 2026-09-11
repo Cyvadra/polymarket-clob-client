@@ -303,7 +303,7 @@ func (r *Reconciler) missingOrderExpired(order store.SignedOrderRecord) bool {
 }
 
 func (r *Reconciler) applyRemoteOrder(ctx context.Context, order store.SignedOrderRecord, remote clobclient.Order, reason string) error {
-	event, ok := statemachine.EventForOrderObservation(remote.Status, remote.SizeMatched, remote.OriginalSize, statemachine.Immediate(string(order.OrderType)))
+	event, ok := statemachine.EventForOrderStatus(remote.Status, remote.SizeMatched, remote.OriginalSize, statemachine.Immediate(string(order.OrderType)))
 	if !ok {
 		return fmt.Errorf("order %s has unsupported status %q", remote.ID, remote.Status)
 	}

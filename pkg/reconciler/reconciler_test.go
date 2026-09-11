@@ -199,6 +199,20 @@ func TestReconcileMovesCancelPendingToCanceled(t *testing.T) {
 	}
 }
 
+// A resting order the exchange reports MATCHED is closed even when maker
+// rounding leaves size_matched under the original size. Treating it as still
+// working bounced it between CANCEL_PENDING and PARTIALLY_FILLED every pass.
+func TestReconcileResolvesMatchedOrderShortOfSizeDuringCancel(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateCancelPending, Revision: 3, MatchedShares: "38.8767", OrderType: store.TimeInForceGTC}}}
+	reconciler, _ := New(repository, &fakeCLOB{orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "MATCHED", SizeMatched: "38.8767", OriginalSize: "38.88"}}}, nil, "", time.Now, time.Second)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StateCanceled {
+		t.Fatalf("expected the matched order to resolve terminally, got %#v", repository.updates)
+	}
+}
+
 func TestReconcilePersistsMatchedSharesFromRepeatedLiveObservation(t *testing.T) {
 	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3, MatchedShares: "1"}}}
 	reconciler, _ := New(repository, &fakeCLOB{orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE", SizeMatched: "2"}}}, nil, "", time.Now, time.Second)

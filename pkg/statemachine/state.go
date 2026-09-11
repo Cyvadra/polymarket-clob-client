@@ -101,6 +101,22 @@ func EventForOrderObservation(status, matchedShares, requestedShares string, imm
 	}
 }
 
+// EventForOrderStatus maps an order's own exchange status, as the user stream's
+// order events and REST order lookups report it. There MATCHED means the
+// exchange has closed the order: a resting order still working reports LIVE,
+// and rounding on maker fills can leave size_matched a hair under the original
+// size (38.8767 of 38.88) with nothing left on the book, which a cancel cannot
+// change. So a MATCHED order is terminal like an immediate one. A submission
+// response is different, since its "matched" can leave a remainder resting, and
+// keeps EventForOrderObservation.
+func EventForOrderStatus(status, matchedShares, requestedShares string, immediate bool) (Event, bool) {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "FILLED", "MATCHED":
+		immediate = true
+	}
+	return EventForOrderObservation(status, matchedShares, requestedShares, immediate)
+}
+
 // Immediate reports whether a time-in-force cannot rest on the book.
 func Immediate(timeInForce string) bool {
 	switch strings.ToUpper(strings.TrimSpace(timeInForce)) {

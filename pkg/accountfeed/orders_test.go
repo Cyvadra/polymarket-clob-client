@@ -203,17 +203,34 @@ func TestOrderConsumerClosesPartiallyMatchedImmediateOrder(t *testing.T) {
 	}
 }
 
-func TestOrderConsumerKeepsPartiallyMatchedRestingOrderOpen(t *testing.T) {
+func TestOrderConsumerKeepsLivePartiallyFilledRestingOrderOpen(t *testing.T) {
 	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2, RequestedShares: "5", OrderType: store.TimeInForceGTC}}
 	consumer, err := NewOrderConsumer(repository, time.Now)
 	if err != nil {
 		t.Fatalf("new order consumer: %v", err)
 	}
-	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "MATCHED", MatchedShares: "2"}); err != nil {
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "LIVE", MatchedShares: "2"}); err != nil {
 		t.Fatalf("consume order event: %v", err)
 	}
 	if repository.updated != statemachine.StatePartiallyFilled {
 		t.Fatalf("expected a resting order to stay open, got %s", repository.updated)
+	}
+}
+
+// The exchange reports MATCHED once a resting order is closed, even when maker
+// rounding leaves size_matched just under the signed size. Keeping it open
+// withheld the open result and looped cancels until the order aged out of REST.
+func TestOrderConsumerClosesMatchedRestingOrderShortOfSize(t *testing.T) {
+	repository := &fakeOrderStore{order: store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StatePartiallyFilled, Revision: 2, RequestedShares: "38.88", OrderType: store.TimeInForceGTC}}
+	consumer, err := NewOrderConsumer(repository, time.Now)
+	if err != nil {
+		t.Fatalf("new order consumer: %v", err)
+	}
+	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "MATCHED", MatchedShares: "38.8767"}); err != nil {
+		t.Fatalf("consume order event: %v", err)
+	}
+	if repository.updated != statemachine.StateCanceled {
+		t.Fatalf("expected the matched order to be terminal, got %s", repository.updated)
 	}
 }
 

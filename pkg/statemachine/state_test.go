@@ -132,6 +132,28 @@ func TestImmediateOrderPartialMatchIsTerminal(t *testing.T) {
 	}
 }
 
+// A MATCHED order status closes even a resting order: maker-fill rounding can
+// leave size_matched just under the original size with nothing left to fill.
+// A submission response's "matched" still leaves a resting remainder working.
+func TestOrderStatusMatchedClosesRestingOrder(t *testing.T) {
+	event, ok := EventForOrderStatus("MATCHED", "38.8767", "38.88", false)
+	if !ok || event != EventCancelObserved {
+		t.Fatalf("expected a matched resting order short of size to be terminal, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderStatus("MATCHED", "38.88", "38.88", false)
+	if !ok || event != EventFillObserved {
+		t.Fatalf("expected a fully matched order to be filled, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderStatus("LIVE", "2", "5", false)
+	if !ok || event != EventPartialFillObserved {
+		t.Fatalf("expected a live partial fill to keep working, got %q ok=%v", event, ok)
+	}
+	event, ok = EventForOrderObservation("MATCHED", "2", "5", false)
+	if !ok || event != EventPartialFillObserved {
+		t.Fatalf("expected a partly matched submission to keep resting, got %q ok=%v", event, ok)
+	}
+}
+
 func TestImmediateRecognizesNonRestingTimeInForce(t *testing.T) {
 	for _, timeInForce := range []string{"FOK", "FAK", "fak"} {
 		if !Immediate(timeInForce) {
