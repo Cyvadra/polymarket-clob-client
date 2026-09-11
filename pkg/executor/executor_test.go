@@ -102,7 +102,11 @@ func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, e
 }
 
 type fakeCLOB struct {
-	submitErr        error
+	submitErr error
+	// submitErrs, when set, script the error of each submission in turn;
+	// once drained, submissions fall back to response/submitErr.
+	submitErrs       []error
+	submissions      int
 	response         *clobclient.OrderResponse
 	created          clobclient.UserOrder
 	canceledOrderID  string
@@ -115,6 +119,14 @@ func (c *fakeCLOB) CreateOrder(_ context.Context, order clobclient.UserOrder) (c
 	return clobclient.SignedOrderV2{OrderID: "order-1", Salt: 1}, nil
 }
 func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrderV2, _ clobclient.OrderType, _ bool) (*clobclient.OrderResponse, error) {
+	c.submissions++
+	if len(c.submitErrs) > 0 {
+		err := c.submitErrs[0]
+		c.submitErrs = c.submitErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	return c.response, c.submitErr
 }
 func (c *fakeCLOB) CancelOrder(_ context.Context, orderID string) error {

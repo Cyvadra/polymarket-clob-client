@@ -260,19 +260,22 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	if err != nil {
 		return fmt.Errorf("persist reconciliation observation for %s/%d: %w", order.IntentID, order.ChildSequence, err)
 	}
-	if err := protocol.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, r.now()); err != nil {
-		return fmt.Errorf("publish reconciliation event: %w", err)
-	}
-	// Terminal open results carry identity from the parent intent; skip if the
-	// intent is gone (nothing meaningful to report).
+	// The order event and the terminal result both carry the lane tag from the
+	// parent intent, so load it first. If the intent is gone, publish the
+	// event with no tag and skip the result (nothing meaningful to report).
 	intent, err := r.store.Intent(ctx, updated.IntentID)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
+		intent = store.OrderIntentRecord{}
+	} else if err != nil {
 		return fmt.Errorf("load reconciliation intent: %w", err)
 	}
-	if err := accountfeed.PublishTerminalResult(r.publish, intent, updated, reason, r.now()); err != nil {
+	if err := protocol.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, intent.UniqueTag, updated.MatchedShares, reason, r.now()); err != nil {
+		return fmt.Errorf("publish reconciliation event: %w", err)
+	}
+	if intent.IntentID == "" {
+		return nil
+	}
+	if err := accountfeed.PublishTerminalResult(r.publish, intent, updated, reason, accountfeed.AveragePrice(ctx, r.store, updated), r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation open result: %w", err)
 	}
 	return nil

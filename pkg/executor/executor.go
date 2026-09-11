@@ -109,8 +109,8 @@ func (e *Executor) SetEventPublisher(publisher protocol.ExecutionEventPublisher)
 	e.publish = publisher
 }
 
-func (e *Executor) publishTransition(order store.SignedOrderRecord, reason string) {
-	if err := protocol.PublishExecutionOrderEvent(e.publish, order.ExchangeOrderID, string(order.State), order.IntentID, order.MatchedShares, reason, e.now()); err != nil && e.onError != nil {
+func (e *Executor) publishTransition(order store.SignedOrderRecord, uniqueTag, reason string) {
+	if err := protocol.PublishExecutionOrderEvent(e.publish, order.ExchangeOrderID, string(order.State), order.IntentID, uniqueTag, order.MatchedShares, reason, e.now()); err != nil && e.onError != nil {
 		e.onError(fmt.Errorf("publish order transition: %w", err))
 	}
 }

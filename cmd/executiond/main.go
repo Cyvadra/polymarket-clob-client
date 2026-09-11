@@ -71,7 +71,8 @@ func run() error {
 		return fmt.Errorf("migrate execution store: %w", err)
 	}
 
-	bus, err := natsbus.New(natsbus.Config{URL: cfg.NATSURL, Name: "polymarket-executiond", ConnectTimeout: cfg.ConnectTimeout, OnHandlerError: func(err error) { log.Printf("NATS handler error: %v", err) }})
+	onHandlerError := func(err error) { log.Printf("NATS handler error: %v", err) }
+	bus, err := natsbus.New(natsbus.Config{URL: cfg.NATSURL, Name: "polymarket-executiond", ConnectTimeout: cfg.ConnectTimeout, OnHandlerError: onHandlerError})
 	if err != nil {
 		return err
 	}
@@ -138,7 +139,7 @@ func run() error {
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {
 		return err
 	}
-	if err := nats.SubscribeClose(bus, execution); err != nil {
+	if err := nats.SubscribeClose(ctx, bus, execution, onHandlerError); err != nil {
 		return err
 	}
 	if err := nats.SubscribePositionQuery(bus, store, time.Now); err != nil {

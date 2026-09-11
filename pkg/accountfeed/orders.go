@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
@@ -60,35 +61,64 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	if err != nil {
 		return fmt.Errorf("persist account order observation: %w", err)
 	}
-	if err := protocol.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, updated.MatchedShares, reason, c.now()); err != nil {
-		return fmt.Errorf("publish account order event: %w", err)
-	}
-	// Terminal open results carry position identity from the parent intent. A
-	// missing intent is abnormal for an order we track; skip rather than error.
+	// The order event and the terminal result both carry the lane tag from the
+	// parent intent, so load it first. A missing intent is abnormal for an
+	// order we track; publish the event with no tag and skip the result.
 	intent, err := c.store.Intent(ctx, updated.IntentID)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
+		intent = store.OrderIntentRecord{}
+	} else if err != nil {
 		return fmt.Errorf("load order intent for result: %w", err)
 	}
-	if err := PublishTerminalResult(c.publish, intent, updated, reason, c.now()); err != nil {
+	if err := protocol.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, intent.UniqueTag, updated.MatchedShares, reason, c.now()); err != nil {
+		return fmt.Errorf("publish account order event: %w", err)
+	}
+	if intent.IntentID == "" {
+		return nil
+	}
+	if err := PublishTerminalResult(c.publish, intent, updated, reason, AveragePrice(ctx, c.store, updated), c.now()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason string, occurredAt time.Time) error {
+// AveragePrice looks up the recorded fill price of a terminal order for its
+// result. It is best effort: fills can land after the order event, and a
+// failed lookup must not hold back the result, so either yields "" and the
+// result simply omits average_price. When no fill price is on record yet it
+// falls back to the order's own limit for an order that could only have
+// rested (GTC/GTD): a resting maker fills at its own price, so the limit is
+// exact. A taker order (FAK/FOK) that crossed on arrival is priced by the
+// executor from the submission response, not here, so no fallback applies.
+func AveragePrice(ctx context.Context, prices store.OrderPriceStore, order store.SignedOrderRecord) string {
+	if prices == nil || order.ExchangeOrderID == "" || !statemachine.IsTerminal(order.State) {
+		return ""
+	}
+	price, err := prices.OrderAveragePrice(ctx, order.ExchangeOrderID)
+	if err == nil && price != "" {
+		return price
+	}
+	if decimal.Positive(order.MatchedShares) && decimal.Positive(order.Price) && restingOrderType(order.OrderType) {
+		return order.Price
+	}
+	return ""
+}
+
+func restingOrderType(tif store.TimeInForce) bool {
+	return tif == store.TimeInForceGTC || tif == store.TimeInForceGTD
+}
+
+func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason, averagePrice string, occurredAt time.Time) error {
 	if intent.Kind == store.IntentClose && intent.Status == store.IntentStatusSuperseded {
 		return nil
 	}
-	if result, ok := mapping.TerminalResult(order, intent, reason, occurredAt); ok {
+	if result, ok := mapping.TerminalResult(order, intent, reason, averagePrice, occurredAt); ok {
 		if err := protocol.PublishExecutionOpenResult(publisher, result); err != nil {
 			return fmt.Errorf("publish terminal open result: %w", err)
 		}
 		return nil
 	}
-	if result, ok := mapping.TerminalCloseResult(order, intent, reason, occurredAt); ok {
+	if result, ok := mapping.TerminalCloseResult(order, intent, reason, averagePrice, occurredAt); ok {
 		if err := protocol.PublishExecutionCloseResult(publisher, result); err != nil {
 			return fmt.Errorf("publish terminal close result: %w", err)
 		}

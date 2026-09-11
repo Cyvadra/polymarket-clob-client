@@ -211,6 +211,41 @@ func TestPositionsFromFillsMigrationRebuildsSizesFromFills(t *testing.T) {
 	}
 }
 
+func TestOrderAveragePriceWeightsFillsAndIgnoresFailed(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	priced, empty := "order-priced-"+suffix, "order-empty-"+suffix
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM fills WHERE exchange_order_id IN ($1, $2)`, priced, empty)
+	})
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO fills (fill_id, exchange_order_id, unique_tag, condition_id, token_id, outcome, side, shares, price, trade_status, trader_side, received_at) VALUES
+			($1 || '-a', $1, 'lane-avg', 'condition-avg', 'token-avg', 'Up', 'SELL', 3, 0.60, 'CONFIRMED', 'TAKER', now()),
+			($1 || '-b', $1, 'lane-avg', 'condition-avg', 'token-avg', 'Up', 'SELL', 1, 0.80, 'CONFIRMED', 'TAKER', now()),
+			($1 || '-c', $1, 'lane-avg', 'condition-avg', 'token-avg', 'Up', 'SELL', 5, 0.10, 'FAILED', 'TAKER', now())
+	`, priced); err != nil {
+		t.Fatalf("seed fills: %v", err)
+	}
+
+	price, err := s.OrderAveragePrice(ctx, priced)
+	if err != nil {
+		t.Fatalf("average price: %v", err)
+	}
+	// (3*0.60 + 1*0.80) / 4 = 0.65; the FAILED fill is excluded.
+	if price != "0.650000000000000000" {
+		t.Fatalf("expected weighted average 0.65, got %q", price)
+	}
+
+	price, err = s.OrderAveragePrice(ctx, empty)
+	if err != nil {
+		t.Fatalf("average price for order with no fills: %v", err)
+	}
+	if price != "" {
+		t.Fatalf("expected empty string for an order with no fills, got %q", price)
+	}
+}
+
 func TestReserveReleaseRestoresAvailableShares(t *testing.T) {
 	s := testStore(t)
 	seedIntent(t, s, "intent-reserve")

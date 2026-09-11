@@ -25,6 +25,7 @@ type Config struct {
 	Strategy        string
 	ReportDir       string
 	CaseTimeout     time.Duration
+	ResultGrace     time.Duration
 	CleanupTimeout  time.Duration
 	PositionTimeout time.Duration
 	QueryTimeout    time.Duration
@@ -54,6 +55,9 @@ func (c Config) Validate() error {
 	if c.CaseTimeout <= 0 || c.CleanupTimeout <= 0 || c.PositionTimeout <= 0 || c.QueryTimeout <= 0 {
 		return fmt.Errorf("case, cleanup, position, and query timeouts must be positive")
 	}
+	if c.ResultGrace < 0 {
+		return fmt.Errorf("result grace must not be negative")
+	}
 	if c.Hold < 0 {
 		return fmt.Errorf("hold must not be negative")
 	}
@@ -73,4 +77,13 @@ func (c Config) strategy() string {
 		return strategy
 	}
 	return defaultStrategy
+}
+
+// resultWait is how long to wait for an OPEN or CLOSE terminal result. It runs
+// past CaseTimeout because executiond only cancels a resting order once its
+// own complete_within_ms deadline (which the runner sets to CaseTimeout)
+// passes, and that cancel plus the FAILED result it produces take a few more
+// seconds to arrive.
+func (c Config) resultWait() time.Duration {
+	return c.CaseTimeout + c.ResultGrace
 }

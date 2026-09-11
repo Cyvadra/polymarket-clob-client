@@ -21,7 +21,19 @@ const (
 	forceClosePrice         = "0.01"
 	closeRetryInterval      = 200 * time.Millisecond
 	defaultCloseTimeout     = 5 * time.Second
+	// settlementRetryWindow bounds how long a sell rejected for missing token
+	// balance is retried. A position is booked from the CLOB match, but the
+	// exchange only lets the tokens be sold once the trade settles on chain,
+	// so a close sent right after a fill is refused for a few seconds. The
+	// close subject is dispatched per lane (see internal/execution/nats), so a
+	// lane retrying here does not hold up closes on other lanes.
+	settlementRetryWindow = 30 * time.Second
 )
+
+// settlementRetryInterval spaces the retries of a sell refused for missing
+// balance; each one signs and submits a fresh order, so it is slower than the
+// reservation-conflict retry. A variable so tests need not wait.
+var settlementRetryInterval = time.Second
 
 // ExecuteClose replaces any still-pending close on the request's lane with a
 // fresh close for the whole position. The lane advisory lock serializes
@@ -84,15 +96,43 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 		}
 	}
 	timeout := closeRetryTimeout(req.Policy)
-	decide := func(err error) (bool, bool, error) { return e.closeRetryDecision(ctx, intent, err) }
+	decide := func(err error) (closeRetry, error) { return e.closeRetryDecision(ctx, intent, err) }
+	// A retry after an exchange rejection needs a fresh intent: the rejected
+	// child is terminal under the old intent ID and cannot be placed again.
+	renew := func(fresh bool) {
+		if fresh {
+			intent.IntentID = newExecutionID()
+		}
+	}
 	if req.Mode == protocol.ExecutionCloseModeForce {
-		return e.retryClosePlacement(ctx, timeout, func() error {
+		return e.retryClosePlacement(ctx, timeout, func(fresh bool) error {
+			renew(fresh)
 			return e.forceClosePosition(ctx, forceCloseIntentRecord(intent, e.now().UTC()))
 		}, decide)
 	}
-	return e.retryClosePlacement(ctx, timeout, func() error {
+	err = e.retryClosePlacement(ctx, timeout, func(fresh bool) error {
+		renew(fresh)
 		return e.persistAndSubmit(ctx, intent)
 	}, decide)
+	// A LIMIT_CLOSE that placement refused has no child to report its outcome,
+	// so report the refusal itself. Other errors (a store failure, an unknown
+	// submission outcome) are not published: the order may still be live and
+	// will report through its own terminal result.
+	var declared rejection
+	if err != nil && errors.As(err, &declared) {
+		e.publishCloseRejection(intent, declared)
+	}
+	return err
+}
+
+func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declared rejection) {
+	if err := protocol.PublishExecutionCloseResult(e.publish, protocol.ExecutionCloseResult{
+		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
+		Side: protocol.SideSell, Status: protocol.ResultFailed, ReasonCode: declared.code, Reason: declared.reason,
+		OccurredAt: e.now(),
+	}); err != nil {
+		e.reportError(fmt.Errorf("publish close rejection: %w", err))
+	}
 }
 
 // replaceStaleChild retires one still-open strategy child that a fresh close
@@ -189,58 +229,96 @@ func (e *Executor) laneActiveOrders(ctx context.Context, conditionID, tokenID, u
 	return lane, nil
 }
 
+// closeRetry is the verdict on one failed close-placement attempt.
+type closeRetry struct {
+	// done means nothing is left to exit, so the close is complete.
+	done bool
+	// retry means the failure is transient and the attempt runs again.
+	retry bool
+	// fresh means the next attempt must use a new intent ID, because the
+	// failed attempt left a terminal child under the current one.
+	fresh bool
+	// window extends the overall retry deadline to at least this long after
+	// the first attempt; zero keeps the caller's timeout.
+	window time.Duration
+	// delay overrides closeRetryInterval before the next attempt.
+	delay time.Duration
+}
+
 // retryClosePlacement runs one close-placement attempt until it succeeds, is
-// decided done (nothing left to exit), or hits a permanent error, polling every
-// closeRetryInterval up to timeout while the lane lock is held. Only reservation
-// conflicts are retried; once a child order is durably persisted the loop never
-// retries, so an order is never submitted twice.
-func (e *Executor) retryClosePlacement(ctx context.Context, timeout time.Duration, attempt func() error, decide func(error) (retry, done bool, decisionErr error)) error {
+// decided done (nothing left to exit), or hits a permanent error, retrying up
+// to timeout while the lane lock is held. Reservation conflicts are retried
+// without persisting anything new. A sell the exchange refused for missing
+// balance is retried with a fresh intent (see settlementRetryWindow); the
+// refused order is terminal on the exchange, so nothing is submitted twice.
+func (e *Executor) retryClosePlacement(ctx context.Context, timeout time.Duration, attempt func(fresh bool) error, decide func(error) (closeRetry, error)) error {
 	if timeout <= 0 {
 		timeout = defaultCloseTimeout
 	}
-	deadline := e.now().UTC().Add(timeout)
+	start := e.now().UTC()
+	deadline := start.Add(timeout)
+	fresh := false
 	for {
-		err := attempt()
+		err := attempt(fresh)
 		if err == nil {
 			return nil
 		}
-		retry, done, decisionErr := decide(err)
+		verdict, decisionErr := decide(err)
 		if decisionErr != nil {
 			return decisionErr
 		}
-		if done {
+		if verdict.done {
 			return nil
 		}
-		if !retry {
+		if !verdict.retry {
 			return err
+		}
+		if extended := start.Add(verdict.window); extended.After(deadline) {
+			deadline = extended
 		}
 		if !e.now().UTC().Before(deadline) {
 			return fmt.Errorf("close placement timed out: %w", err)
 		}
-		if err := sleepContext(ctx, closeRetryInterval); err != nil {
+		delay := closeRetryInterval
+		if verdict.delay > 0 {
+			delay = verdict.delay
+		}
+		if err := sleepContext(ctx, delay); err != nil {
 			return err
 		}
+		fresh = verdict.fresh
 	}
 }
 
-func (e *Executor) closeRetryDecision(ctx context.Context, intent protocol.ExecutionIntent, err error) (retry bool, done bool, retryErr error) {
+func (e *Executor) closeRetryDecision(ctx context.Context, intent protocol.ExecutionIntent, err error) (closeRetry, error) {
 	var declared rejection
 	if !errors.As(err, &declared) {
-		return false, false, nil
+		return closeRetry{}, nil
 	}
-	switch declared.code {
-	case protocol.ReasonActiveSellReservation, protocol.ReasonNoPosition:
-		position, found, posErr := e.positionFor(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag)
-		if posErr != nil {
-			return false, false, posErr
-		}
-		if !found || !decimal.Positive(position.ActualShares) {
-			return false, true, nil
-		}
-		return true, false, nil
+	var retry closeRetry
+	switch {
+	case declared.code == protocol.ReasonActiveSellReservation, declared.code == protocol.ReasonNoPosition:
+		retry = closeRetry{retry: true}
+	case declared.code == protocol.ReasonOrderRejected && isUnsettledBalance(declared):
+		retry = closeRetry{retry: true, fresh: true, window: settlementRetryWindow, delay: settlementRetryInterval}
 	default:
-		return false, false, nil
+		return closeRetry{}, nil
 	}
+	position, found, posErr := e.positionFor(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag)
+	if posErr != nil {
+		return closeRetry{}, posErr
+	}
+	if !found || !decimal.Positive(position.ActualShares) {
+		return closeRetry{done: true}, nil
+	}
+	return retry, nil
+}
+
+// isUnsettledBalance reports whether the exchange refused a sell because the
+// wallet does not hold the tokens yet, the signature of a fill that has not
+// settled on chain. The CLOB gives no structured code for it, only this text.
+func isUnsettledBalance(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "not enough balance")
 }
 
 func forceCloseIntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderIntentRecord {

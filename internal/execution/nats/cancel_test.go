@@ -3,65 +3,162 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
-	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
-type recordedClosePublisher struct {
-	values []protocol.ExecutionCloseResult
+// fakeCloseExecutor records the close requests it is handed. When entered and
+// release are non-nil, each call announces itself on entered and then blocks
+// until it receives on release, so a test can hold a call open and observe
+// what the dispatcher does with concurrent lanes.
+type fakeCloseExecutor struct {
+	entered chan protocol.ExecutionCloseRequest
+	release chan struct{}
+	err     error
+
+	mu    sync.Mutex
+	calls []protocol.ExecutionCloseRequest
 }
 
-func (p *recordedClosePublisher) PublishJSON(subject string, value any) error {
-	if subject != protocol.SubjectExecutionCloseResult {
-		return nil
+func (f *fakeCloseExecutor) ExecuteClose(_ context.Context, req protocol.ExecutionCloseRequest) error {
+	if f.entered != nil {
+		f.entered <- req
 	}
-	if result, ok := value.(protocol.ExecutionCloseResult); ok {
-		p.values = append(p.values, result)
+	if f.release != nil {
+		<-f.release
 	}
-	return nil
+	f.mu.Lock()
+	f.calls = append(f.calls, req)
+	f.mu.Unlock()
+	return f.err
 }
 
-func TestSubscribeCloseDecodesAndDispatches(t *testing.T) {
-	execution, err := executor.New(fakeStore{positions: []store.PositionRecord{{ConditionID: "condition", TokenID: "token", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "1", ActualShares: "1", AvailableSize: "1", State: "open"}}}, fakeCLOB{}, time.Now)
-	if err != nil {
-		t.Fatalf("new executor: %v", err)
+func (f *fakeCloseExecutor) recorded() []protocol.ExecutionCloseRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]protocol.ExecutionCloseRequest(nil), f.calls...)
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	publisher := &recordedClosePublisher{}
-	execution.SetEventPublisher(publisher)
+	t.Fatal("condition not met within 2s")
+}
+
+func closeReq(tag, mode string) protocol.ExecutionCloseRequest {
+	return protocol.ExecutionCloseRequest{
+		SchemaVersion: protocol.SchemaVersionV1, UniqueTag: tag, Strategy: "strategy",
+		ConditionID: "condition", AssetID: "token", Outcome: "Up",
+		Mode: protocol.ExecutionCloseMode(mode),
+	}
+}
+
+func TestSubscribeCloseWiresTheSubject(t *testing.T) {
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeClose(subscriber, execution); err != nil {
+	if err := SubscribeClose(context.Background(), subscriber, &fakeCloseExecutor{}, nil); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if subscriber.subject != protocol.SubjectStrategyExecutionClose || subscriber.handler == nil {
 		t.Fatalf("subscription=%+v", subscriber)
 	}
-	request := protocol.ExecutionCloseRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", AssetID: "token", Outcome: "Up", Mode: protocol.ExecutionCloseModeForce}
-	payload, err := json.Marshal(request)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if err := subscriber.handler(context.Background(), payload); err != nil {
-		t.Fatalf("deliver: %v", err)
-	}
-	if len(publisher.values) != 0 {
-		t.Fatalf("expected no immediate close result publication, got %+v", publisher.values)
+}
+
+func TestCloseDispatcherRejectsMalformedJSON(t *testing.T) {
+	d := newCloseDispatcher(context.Background(), &fakeCloseExecutor{}, nil)
+	if err := d.handle(context.Background(), []byte(`{not json`)); err == nil {
+		t.Fatal("expected malformed JSON to be rejected synchronously")
 	}
 }
 
-func TestSubscribeCloseRejectsMalformedJSON(t *testing.T) {
-	execution, err := executor.New(fakeStore{}, fakeCLOB{}, time.Now)
-	if err != nil {
-		t.Fatalf("new executor: %v", err)
+func TestCloseDispatcherRunsOneLaneInOrderAndKeepsOnlyLatestPending(t *testing.T) {
+	exec := &fakeCloseExecutor{entered: make(chan protocol.ExecutionCloseRequest, 1), release: make(chan struct{})}
+	d := newCloseDispatcher(context.Background(), exec, nil)
+
+	d.enqueue(closeReq("lane-a", "A"))
+	got := <-exec.entered // the worker is now inside ExecuteClose(A)
+	if got.Mode != "A" {
+		t.Fatalf("expected the first close to run first, got %q", got.Mode)
 	}
-	subscriber := &fakeSubscriber{}
-	if err := SubscribeClose(subscriber, execution); err != nil {
-		t.Fatalf("subscribe: %v", err)
+	// B then C arrive while A is still running; C must supersede B.
+	d.enqueue(closeReq("lane-a", "B"))
+	d.enqueue(closeReq("lane-a", "C"))
+	exec.release <- struct{}{} // let A finish
+
+	got = <-exec.entered
+	if got.Mode != "C" {
+		t.Fatalf("expected the latest pending close to run next, got %q", got.Mode)
 	}
-	if err := subscriber.handler(context.Background(), []byte(`{not json`)); err == nil {
-		t.Fatal("expected malformed JSON to fail")
+	exec.release <- struct{}{}
+
+	waitFor(t, d.idle)
+	modes := []string{}
+	for _, c := range exec.recorded() {
+		modes = append(modes, string(c.Mode))
+	}
+	if len(modes) != 2 || modes[0] != "A" || modes[1] != "C" {
+		t.Fatalf("expected [A C], got %v", modes)
+	}
+}
+
+func TestCloseDispatcherRunsDifferentLanesConcurrently(t *testing.T) {
+	exec := &fakeCloseExecutor{entered: make(chan protocol.ExecutionCloseRequest, 2), release: make(chan struct{})}
+	d := newCloseDispatcher(context.Background(), exec, nil)
+
+	d.enqueue(closeReq("lane-a", "A"))
+	d.enqueue(closeReq("lane-b", "B"))
+
+	// Both calls must be inside ExecuteClose at the same time; if the
+	// dispatcher were serial across lanes the second read would block here
+	// until the test's 2s deadline.
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case req := <-exec.entered:
+			seen[req.UniqueTag] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only one lane ran; the dispatcher serialized across lanes")
+		}
+	}
+	if !seen["lane-a"] || !seen["lane-b"] {
+		t.Fatalf("expected both lanes running, saw %v", seen)
+	}
+	exec.release <- struct{}{}
+	exec.release <- struct{}{}
+	waitFor(t, d.idle)
+}
+
+func TestCloseDispatcherReportsExecuteErrorThroughOnError(t *testing.T) {
+	exec := &fakeCloseExecutor{err: fmt.Errorf("boom")}
+	var mu sync.Mutex
+	var got error
+	d := newCloseDispatcher(context.Background(), exec, func(err error) {
+		mu.Lock()
+		got = err
+		mu.Unlock()
+	})
+
+	payload, _ := json.Marshal(closeReq("lane-a", string(protocol.ExecutionCloseModeForce)))
+	if err := d.handle(context.Background(), payload); err != nil {
+		t.Fatalf("handle should not return the async error: %v", err)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return got != nil
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if got == nil || got.Error() != "handle NATS subject strategy.execution.close: boom" {
+		t.Fatalf("unexpected reported error: %v", got)
 	}
 }

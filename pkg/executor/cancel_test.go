@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,122 @@ import (
 
 func closeRequest(mode protocol.ExecutionCloseMode) protocol.ExecutionCloseRequest {
 	return protocol.ExecutionCloseRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", AssetID: "token", Outcome: "Up", Mode: mode, LimitPrice: "0.55", TimeInForce: protocol.TimeInForceGTC}
+}
+
+func lanePosition() []store.PositionRecord {
+	return []store.PositionRecord{{ConditionID: "condition", TokenID: "token", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "2", ActualShares: "2", AvailableSize: "2", State: "open"}}
+}
+
+func unsettledBalanceError() error {
+	return &clobclient.APIError{StatusCode: 400, Method: "POST", Path: "/order", Body: []byte(`{"error":"not enough balance / allowance: the balance is not enough -> balance: 0, order amount: 2000000"}`)}
+}
+
+func closeResults(pub *recordingPublisher) []protocol.ExecutionCloseResult {
+	var results []protocol.ExecutionCloseResult
+	for _, record := range pub.publishes {
+		if result, ok := record.value.(protocol.ExecutionCloseResult); ok && record.subject == protocol.SubjectExecutionCloseResult {
+			results = append(results, result)
+		}
+	}
+	return results
+}
+
+func TestExecuteCloseLimitRejectedPublishesFailedResult(t *testing.T) {
+	storer := &fakeStore{inserted: true, positions: lanePosition()}
+	client := &fakeCLOB{submitErr: &clobclient.APIError{StatusCode: 400, Method: "POST", Path: "/order", Body: []byte(`{"error":"invalid order"}`)}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err == nil {
+		t.Fatal("expected the exchange rejection to be returned")
+	}
+	results := closeResults(pub)
+	if len(results) != 1 || results[0].Status != protocol.ResultFailed || results[0].ReasonCode != protocol.ReasonOrderRejected || results[0].UniqueTag != "lane-a" || results[0].AssetID != "token" {
+		t.Fatalf("expected one FAILED ORDER_REJECTED close result for the lane, got %+v", results)
+	}
+	if client.submissions != 1 {
+		t.Fatalf("expected a non-balance rejection not to be retried, got %d submissions", client.submissions)
+	}
+}
+
+func TestExecuteCloseRetriesUnsettledBalanceWithFreshIntent(t *testing.T) {
+	previous := settlementRetryInterval
+	settlementRetryInterval = time.Millisecond
+	t.Cleanup(func() { settlementRetryInterval = previous })
+	storer := &fakeStore{inserted: true, positions: lanePosition()}
+	client := &fakeCLOB{submitErrs: []error{unsettledBalanceError()}, response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err != nil {
+		t.Fatalf("expected the retried close to be placed, got %v", err)
+	}
+	if client.submissions != 2 {
+		t.Fatalf("expected one retry after the balance rejection, got %d submissions", client.submissions)
+	}
+	if len(storer.insertedIntents) != 2 || storer.insertedIntents[0].IntentID == storer.insertedIntents[1].IntentID {
+		t.Fatalf("expected the retry under a fresh intent ID, got %+v", storer.insertedIntents)
+	}
+	if results := closeResults(pub); len(results) != 0 {
+		t.Fatalf("expected no close result while the retried close rests, got %+v", results)
+	}
+}
+
+func TestExecuteCloseUnsettledBalanceGivesUpWithFailedResult(t *testing.T) {
+	previous := settlementRetryInterval
+	settlementRetryInterval = time.Millisecond
+	t.Cleanup(func() { settlementRetryInterval = previous })
+	// Each clock read advances 10s, so the settlement window passes after
+	// the first retry decision.
+	start, reads := time.Now(), 0
+	clock := func() time.Time {
+		reads++
+		return start.Add(time.Duration(reads) * 10 * time.Second)
+	}
+	storer := &fakeStore{inserted: true, positions: lanePosition()}
+	client := &fakeCLOB{submitErr: unsettledBalanceError()}
+	exec, err := New(storer, client, clock)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err == nil {
+		t.Fatal("expected the close to give up once the settlement window passed")
+	}
+	results := closeResults(pub)
+	if len(results) != 1 || results[0].Status != protocol.ResultFailed || results[0].ReasonCode != protocol.ReasonOrderRejected || !strings.Contains(results[0].Reason, "not enough balance") {
+		t.Fatalf("expected one FAILED ORDER_REJECTED result carrying the exchange reason, got %+v", results)
+	}
+}
+
+func TestExecuteCloseForceRetriesUnsettledBalanceWithoutResult(t *testing.T) {
+	previous := settlementRetryInterval
+	settlementRetryInterval = time.Millisecond
+	t.Cleanup(func() { settlementRetryInterval = previous })
+	storer := &fakeStore{inserted: true, positions: lanePosition()}
+	client := &fakeCLOB{submitErrs: []error{unsettledBalanceError()}, response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeForce)); err != nil {
+		t.Fatalf("expected the retried force close to be placed, got %v", err)
+	}
+	if client.submissions != 2 {
+		t.Fatalf("expected one retry after the balance rejection, got %d submissions", client.submissions)
+	}
+	if results := closeResults(pub); len(results) != 0 {
+		t.Fatalf("expected FORCE_CLOSE never to publish a close result, got %+v", results)
+	}
 }
 
 func TestExecuteCloseLimitCloseEmitsNoImmediateResult(t *testing.T) {

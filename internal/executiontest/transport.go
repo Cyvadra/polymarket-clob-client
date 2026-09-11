@@ -23,9 +23,9 @@ type Observer struct {
 	queryTimeout time.Duration
 	mu           sync.RWMutex
 	messages     []WireMessage
-	features map[string]protocol.PositionFeature
-	quotes   []marketquotes.Snapshot
-	subs     []*nats.Subscription
+	features     map[string]protocol.PositionFeature
+	quotes       []marketquotes.Snapshot
+	subs         []*nats.Subscription
 }
 
 func NewObserver(ctx context.Context, cfg Config) (*Observer, error) {
@@ -150,8 +150,12 @@ func (o *Observer) WaitForResult(ctx context.Context, subject, tag string, after
 }
 
 // OrderEventsBetween returns the execution.order.event messages received in
-// [start, end], decoded and in arrival order.
-func (o *Observer) OrderEventsBetween(start, end time.Time) []protocol.ExecutionOrderEvent {
+// [start, end], decoded and in arrival order. When tag is non-empty, only
+// events whose unique_tag matches it are returned, so a run ignores order
+// events from other strategies sharing the subject; events that carry no tag
+// (an executiond that predates the field, or an event whose intent could not
+// be resolved) are dropped by that filter.
+func (o *Observer) OrderEventsBetween(start, end time.Time, tag string) []protocol.ExecutionOrderEvent {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	var events []protocol.ExecutionOrderEvent
@@ -163,11 +167,30 @@ func (o *Observer) OrderEventsBetween(start, end time.Time) []protocol.Execution
 			continue
 		}
 		var event protocol.ExecutionOrderEvent
-		if json.Unmarshal(message.Payload, &event) == nil {
-			events = append(events, event)
+		if json.Unmarshal(message.Payload, &event) != nil {
+			continue
 		}
+		if tag != "" && event.UniqueTag != tag {
+			continue
+		}
+		events = append(events, event)
 	}
 	return events
+}
+
+// LatestQuote returns the most recent pmm.market.quotes entry for assetID,
+// if any quote for it has been observed.
+func (o *Observer) LatestQuote(assetID string) (marketquotes.Quote, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for i := len(o.quotes) - 1; i >= 0; i-- {
+		for _, quote := range []marketquotes.Quote{o.quotes[i].Up, o.quotes[i].Down} {
+			if quote.AssetID == assetID {
+				return quote, true
+			}
+		}
+	}
+	return marketquotes.Quote{}, false
 }
 
 func payloadTag(payload []byte) string {

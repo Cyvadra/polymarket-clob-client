@@ -264,19 +264,19 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 	if err != nil {
 		return fmt.Errorf("mark submitting: %w", err)
 	}
-	e.publishTransition(updated, "submit requested")
+	e.publishTransition(updated, intent.UniqueTag, "submit requested")
 	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, child.TimeInForce, child.PostOnly)
 	if submitErr != nil {
 		if isOrderRejected(submitErr) {
-			return e.markSubmitRejected(ctx, updated, submitErr)
+			return e.markSubmitRejected(ctx, updated, intent.UniqueTag, submitErr)
 		}
-		return e.markSubmitUnknown(ctx, updated, submitErr.Error())
+		return e.markSubmitUnknown(ctx, updated, intent.UniqueTag, submitErr.Error())
 	}
 	if response == nil || response.OrderID == "" {
-		return e.markSubmitUnknown(ctx, updated, "successful submission missing exchange order ID")
+		return e.markSubmitUnknown(ctx, updated, intent.UniqueTag, "successful submission missing exchange order ID")
 	}
 	if updated.ExchangeOrderID != "" && response.OrderID != updated.ExchangeOrderID {
-		return e.markSubmitUnknown(ctx, updated, "submission returned unexpected exchange order ID")
+		return e.markSubmitUnknown(ctx, updated, intent.UniqueTag, "submission returned unexpected exchange order ID")
 	}
 	live, err := e.store.TransitionOrder(ctx, updated, statemachine.EventSubmitAcknowledged, "0", response.OrderID, "submit acknowledged")
 	if err != nil {
@@ -285,7 +285,7 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 		}
 		return fmt.Errorf("mark order live: %w", err)
 	}
-	e.publishTransition(live, "submit acknowledged")
+	e.publishTransition(live, intent.UniqueTag, "submit acknowledged")
 	e.settleFromResponse(ctx, intent, child, live, response)
 	return nil
 }
@@ -333,7 +333,7 @@ func (e *Executor) settleFromResponse(ctx context.Context, intent protocol.Execu
 		e.reportError(fmt.Errorf("settle order %s from submit response: %w", order.ExchangeOrderID, err))
 		return
 	}
-	e.publishTransition(updated, reason)
+	e.publishTransition(updated, intent.UniqueTag, reason)
 	if !statemachine.IsTerminal(updated.State) {
 		// A partly matched resting order is still working; its result comes
 		// when an observer sees it finish.
@@ -344,7 +344,14 @@ func (e *Executor) settleFromResponse(ctx context.Context, intent protocol.Execu
 		e.reportError(fmt.Errorf("load intent for submit response result: %w", err))
 		return
 	}
-	if err := accountfeed.PublishTerminalResult(e.publish, record, updated, reason, e.now()); err != nil {
+	// The collateral side of the match is the taker amount of a SELL and the
+	// maker amount of a BUY; collateral over shares is the average price.
+	collateral := response.MakingAmount
+	if intent.Side == protocol.SideSell {
+		collateral = response.TakingAmount
+	}
+	average, _ := decimal.DivideAndRoundDown(collateral, matched, 6)
+	if err := accountfeed.PublishTerminalResult(e.publish, record, updated, reason, average, e.now()); err != nil {
 		e.reportError(err)
 	}
 }
@@ -402,21 +409,21 @@ func rejectionReason(err error) string {
 	return err.Error()
 }
 
-func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrderRecord, reason string) error {
+func (e *Executor) markSubmitUnknown(ctx context.Context, order store.SignedOrderRecord, uniqueTag, reason string) error {
 	unknown, err := e.store.TransitionOrder(ctx, order, statemachine.EventSubmitTimedOut, order.MatchedShares, order.ExchangeOrderID, reason)
 	if err != nil {
 		return fmt.Errorf("mark submit unknown: %w", err)
 	}
-	e.publishTransition(unknown, reason)
+	e.publishTransition(unknown, uniqueTag, reason)
 	return fmt.Errorf("order submission outcome is unknown: %s", reason)
 }
 
-func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, submitErr error) error {
+func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, uniqueTag string, submitErr error) error {
 	reason := rejectionReason(submitErr)
 	rejected, err := e.store.TransitionOrder(ctx, order, statemachine.EventRejectedObserved, order.MatchedShares, order.ExchangeOrderID, reason)
 	if err != nil {
 		return fmt.Errorf("mark submit rejected: %w", err)
 	}
-	e.publishTransition(rejected, reason)
+	e.publishTransition(rejected, uniqueTag, reason)
 	return rejection{code: protocol.ReasonOrderRejected, reason: reason, cause: submitErr}
 }

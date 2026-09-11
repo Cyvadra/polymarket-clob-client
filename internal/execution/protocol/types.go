@@ -215,6 +215,7 @@ func PublishExecutionCloseResult(publisher ExecutionEventPublisher, result Execu
 type ExecutionOrderEvent struct {
 	SchemaVersion   string    `json:"schema_version"`
 	IntentID        string    `json:"intent_id"`
+	UniqueTag       string    `json:"unique_tag,omitempty"`
 	ExchangeOrderID string    `json:"exchange_order_id,omitempty"`
 	State           string    `json:"state"`
 	Reason          string    `json:"reason,omitempty"`
@@ -222,7 +223,11 @@ type ExecutionOrderEvent struct {
 	OccurredAt      time.Time `json:"occurred_at"`
 }
 
-func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID string, orderState string, intentID, matchedShares, reason string, occurredAt time.Time) error {
+// PublishExecutionOrderEvent emits one order-lifecycle event. uniqueTag is the
+// lane the order belongs to, so a strategy can filter the shared subject to
+// its own orders; it may be empty for an event whose intent could not be
+// resolved.
+func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID string, orderState string, intentID, uniqueTag, matchedShares, reason string, occurredAt time.Time) error {
 	if publisher == nil {
 		return nil
 	}
@@ -233,6 +238,7 @@ func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID strin
 	return publisher.PublishJSON(SubjectExecutionOrderEvent, ExecutionOrderEvent{
 		SchemaVersion:   SchemaVersionV1,
 		IntentID:        intentID,
+		UniqueTag:       uniqueTag,
 		ExchangeOrderID: orderID,
 		State:           orderState,
 		Reason:          reason,

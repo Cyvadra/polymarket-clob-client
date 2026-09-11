@@ -23,7 +23,7 @@
 
 Subject tokens must not be empty or include `*` or `>`.
 
-`execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
+`execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. `unique_tag` carries the lane the order belongs to so an observer can filter the shared subject to its own orders; it is omitted when the event's intent could not be resolved. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
 
 ## PositionFeature
 
@@ -70,9 +70,11 @@ Open results are emitted **only at terminal resolution** of an open — when the
 
 Close results are emitted only at terminal resolution of the strategy close child. A fill (including a partial fill) reports `SUCCEEDED` with `filled_shares` populated, while a cancel/expiry with no fill reports `FAILED`. executiond does not publish a close ACK or dispatch success when a request is merely accepted. If a close intent has been superseded by a newer close on the same lane, its terminal result is suppressed.
 
-A `LIMIT_CLOSE` emits exactly one close result, when its strategy sell child resolves. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`. The same applies to a close that fails before any child order exists (e.g. a malformed request or a submission rejected by the exchange) — the strategy observes that the position never changed and re-closes.
+A `LIMIT_CLOSE` emits exactly one close result: when its strategy sell child resolves, or `FAILED` with the rejection's `reason_code` when placement is refused (for example the exchange rejects the sell or the close cannot be planned). Two cases emit nothing: a malformed request (wrong schema version, missing fields, invalid limit price or time in force) is dropped, and a close on a lane with no shares left is treated as already complete. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`.
 
-`average_price` is currently reserved and not populated on either result; the authoritative entry/exit price is conveyed on `position.features.*`.
+A sell submitted moments after the buy that produced the position can be rejected with `not enough balance / allowance` because the bought tokens have not settled on chain yet. For both close modes, executiond retries that rejection with a fresh child order about once a second for up to 30 seconds (or `policy.cancel_replace_timeout_ms`, if longer) before giving up. Closes are dispatched per lane (`strategy` + `unique_tag` + `condition_id` + `asset_id`): closes on different lanes run concurrently, so one lane's retry does not delay another's, while closes on the same lane still run in order and only the most recent pending close on a lane is kept.
+
+`average_price` is the share-weighted average price of the child order's fills. It is populated when executiond knows the price at the time it publishes the result — from the submission response for an order that matched on arrival, otherwise from recorded fills. It is omitted when no fill is recorded yet or nothing filled. The authoritative entry price stays on `position.features.*`.
 
 Order events use the same numeric representation for `matched_shares` when the field is present.
 

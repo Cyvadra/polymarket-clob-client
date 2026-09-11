@@ -25,6 +25,11 @@ go.work
 .env
 .env.local
 config.yaml
+/executiontest
+/executiond
+
+# Deployment credentials and host-specific production configuration.
+scripts/private/
 
 # OS specific
 .DS_Store

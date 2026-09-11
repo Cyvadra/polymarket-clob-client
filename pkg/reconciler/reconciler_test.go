@@ -85,6 +85,9 @@ func (s *fakeStore) FilledShares(_ context.Context, exchangeOrderID string) (str
 	}
 	return "0", nil
 }
+func (s *fakeStore) OrderAveragePrice(context.Context, string) (string, error) {
+	return "", nil
+}
 func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return nil, nil
 }

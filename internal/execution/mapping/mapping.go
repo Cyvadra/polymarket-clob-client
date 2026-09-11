@@ -91,7 +91,10 @@ func terminalStatus(state statemachine.State, matchedShares string) (protocol.Re
 // close intents are never surfaced as an open result. The result carries the
 // position identity from the parent intent so the strategy can attribute it
 // without a client-supplied correlation key.
-func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason string, occurredAt time.Time) (protocol.ExecutionOpenResult, bool) {
+//
+// averagePrice is the fill-weighted price of the order's matches when the
+// caller knows it; an empty or invalid value leaves average_price omitted.
+func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason, averagePrice string, occurredAt time.Time) (protocol.ExecutionOpenResult, bool) {
 	if order.ChildSequence != store.StrategyChildSequence || intent.Kind != store.IntentOpen {
 		return protocol.ExecutionOpenResult{}, false
 	}
@@ -106,8 +109,21 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 	return protocol.ExecutionOpenResult{
 		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
-		FilledShares: filledShares, OccurredAt: occurredAt,
+		FilledShares: filledShares, AveragePrice: resultPrice(averagePrice, filledShares), OccurredAt: occurredAt,
 	}, true
+}
+
+// resultPrice converts an average fill price for a result. A result with no
+// filled shares has no meaningful price, so it is omitted.
+func resultPrice(averagePrice string, filledShares float64) float64 {
+	if filledShares <= 0 {
+		return 0
+	}
+	price, err := decimal.Price(averagePrice)
+	if err != nil {
+		return 0
+	}
+	return price
 }
 
 // TerminalCloseResult derives the strategy-facing close result for the
@@ -115,7 +131,7 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 // strategy child (sequence 1) produces a close result: a close's force-close
 // exit is an internal child (higher sequence) that never emits one, so the
 // strategy reconciles a force close from position.features.* instead.
-func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason string, occurredAt time.Time) (protocol.ExecutionCloseResult, bool) {
+func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntentRecord, reason, averagePrice string, occurredAt time.Time) (protocol.ExecutionCloseResult, bool) {
 	if order.ChildSequence != store.StrategyChildSequence || intent.Kind != store.IntentClose {
 		return protocol.ExecutionCloseResult{}, false
 	}
@@ -130,7 +146,7 @@ func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntent
 	return protocol.ExecutionCloseResult{
 		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.SideSell, Status: status, ReasonCode: reasonCode, Reason: reason,
-		FilledShares: filledShares, OccurredAt: occurredAt,
+		FilledShares: filledShares, AveragePrice: resultPrice(averagePrice, filledShares), OccurredAt: occurredAt,
 	}, true
 }
 

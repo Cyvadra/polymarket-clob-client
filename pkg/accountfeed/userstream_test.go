@@ -64,6 +64,9 @@ func (s *userStreamStore) Intent(_ context.Context, intentID string) (store.Orde
 	}
 	return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a"}, nil
 }
+func (s *userStreamStore) OrderAveragePrice(context.Context, string) (string, error) {
+	return "", nil
+}
 func (s *userStreamStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return nil, nil
 }

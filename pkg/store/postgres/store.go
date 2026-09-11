@@ -391,6 +391,24 @@ func (s *Store) FilledShares(ctx context.Context, exchangeOrderID string) (strin
 	return shares, nil
 }
 
+// OrderAveragePrice returns the share-weighted average price of the fills
+// recorded against one exchange order, leaving out fills whose trade failed on
+// chain. It returns an empty string when the order has no fill yet.
+func (s *Store) OrderAveragePrice(ctx context.Context, exchangeOrderID string) (string, error) {
+	if exchangeOrderID == "" {
+		return "", fmt.Errorf("exchange order ID is required")
+	}
+	var price string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE((SUM(shares * price) / NULLIF(SUM(shares), 0))::text, '')
+		FROM fills
+		WHERE exchange_order_id = $1 AND trade_status <> 'FAILED'
+	`, exchangeOrderID).Scan(&price); err != nil {
+		return "", fmt.Errorf("average order fill price: %w", err)
+	}
+	return price, nil
+}
+
 func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, error) {
 	if record.FillID == "" || record.ConditionID == "" || record.TokenID == "" || record.Outcome == "" {
 		return false, fmt.Errorf("fill ID, condition ID, token ID, and outcome are required")

@@ -208,10 +208,17 @@ type AccountFillStore interface {
 	Intent(context.Context, string) (OrderIntentRecord, error)
 }
 
+// OrderPriceStore reports the fill-weighted average price of one exchange
+// order; an empty string means no fill is recorded yet.
+type OrderPriceStore interface {
+	OrderAveragePrice(context.Context, string) (string, error)
+}
+
 type AccountOrderStore interface {
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
+	OrderPriceStore
 }
 
 type ReconcileStore interface {
@@ -219,6 +226,7 @@ type ReconcileStore interface {
 	OpenOrders(context.Context) ([]SignedOrderRecord, error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
 	FilledShares(context.Context, string) (string, error)
+	OrderPriceStore
 }
 
 type Store interface {
