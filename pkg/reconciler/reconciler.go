@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type Reconciler struct {
 	now               func() time.Time
 	interval          time.Duration
 	missingOrderGrace time.Duration
+	maxTradeAge       time.Duration
 	replayedFills     map[string]struct{}
 	onError           func(error)
 	publish           protocol.ExecutionEventPublisher
@@ -56,6 +58,16 @@ func New(repository store.ReconcileStore, clob CLOB, fills *accountfeed.FillCons
 func (r *Reconciler) SetMissingOrderGrace(grace time.Duration) {
 	if grace > 0 {
 		r.missingOrderGrace = grace
+	}
+}
+
+// SetMaxTradeAge bounds how far back trade replay looks on each pass. Trades
+// older than this are skipped rather than replayed, so a wallet's history
+// from before executiond adopted it never reaches the fill consumer as
+// "unknown order" noise. Zero (the default) replays the full trade history.
+func (r *Reconciler) SetMaxTradeAge(age time.Duration) {
+	if age > 0 {
+		r.maxTradeAge = age
 	}
 }
 
@@ -119,7 +131,14 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load account trades for reconciliation: %w", err)
 	}
+	cutoff := time.Time{}
+	if r.maxTradeAge > 0 {
+		cutoff = r.now().UTC().Add(-r.maxTradeAge)
+	}
 	for _, trade := range trades {
+		if !cutoff.IsZero() && tradeTooOld(trade.Timestamp, cutoff) {
+			continue
+		}
 		for _, fill := range accountfeed.OwnedFillsFromTrade(trade, r.apiKey, r.now().UTC()) {
 			// Applying a fill is idempotent in the store, but the round trip is
 			// not free and the trade history only grows. Each fill therefore
@@ -136,6 +155,17 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// tradeTooOld reports whether a trade's exchange timestamp falls before
+// cutoff. An unparseable or missing timestamp is treated as not old, so a
+// malformed value never hides a fill executiond actually needs.
+func tradeTooOld(timestamp string, cutoff time.Time) bool {
+	milliseconds, err := strconv.ParseInt(strings.TrimSpace(timestamp), 10, 64)
+	if err != nil || milliseconds <= 0 {
+		return false
+	}
+	return time.UnixMilli(milliseconds).UTC().Before(cutoff)
 }
 
 // isSettled reports whether a fill can no longer change, so replaying it again

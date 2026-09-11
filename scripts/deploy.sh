@@ -10,8 +10,7 @@ HOST=${1:-${EXECUTIOND_DEPLOY_HOST:-${PMM_DEPLOY_HOST:-}}}
 TARGET=${EXECUTIOND_DEPLOY_TARGET:-root}
 ARCH=${EXECUTIOND_DEPLOY_ARCH:-amd64}
 OS=${EXECUTIOND_DEPLOY_OS:-linux}
-APP_USER=executiond
-APP_GROUP=executiond
+PM2_BIN=${EXECUTIOND_PM2_BIN:-/root/.nvm/versions/node/v24.21.0/bin/pm2}
 INSTALL_ROOT=/opt/executiond
 CONFIG_ROOT=/etc/executiond
 DATA_ROOT=/var/lib/executiond
@@ -92,11 +91,13 @@ upload_and_activate() {
 	scp "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256" \
 		"$PRIVATE_DIR/executiond.env" \
 		"$TARGET@$HOST:$remote_stage/"
-	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' bash -s" <<'REMOTE'
+	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 
 release_dir="$INSTALL_ROOT/releases/$RELEASE_ID"
 current_link="$INSTALL_ROOT/current"
+run_script="$INSTALL_ROOT/run.sh"
+node_bin="$(dirname "$PM2_BIN")/node"
 previous_release=
 activation_started=0
 
@@ -105,46 +106,51 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pm2_app_status() {
+	# Prints "status restart_time" for the executiond pm2 app, or nothing if absent.
+	"$PM2_BIN" jlist | "$node_bin" -e '
+		const apps = JSON.parse(require("fs").readFileSync(0, "utf8"));
+		const app = apps.find((a) => a.name === "executiond");
+		if (app) process.stdout.write(app.pm2_env.status + " " + app.pm2_env.restart_time + "\n");
+	'
+}
+
+start_pm2_app() {
+	"$PM2_BIN" delete executiond >/dev/null 2>&1 || true
+	"$PM2_BIN" start "$run_script" --name executiond --interpreter bash --cwd "$DATA_ROOT"
+	"$PM2_BIN" save
+}
+
 rollback() {
 	local status=$?
 	trap - ERR
 	(( activation_started )) || exit "$status"
-	systemctl stop executiond.service 2>/dev/null || true
 	if [[ -f $REMOTE_STAGE/previous/executiond.env ]]; then
-		install -o root -g "$APP_GROUP" -m 0640 "$REMOTE_STAGE/previous/executiond.env" "$CONFIG_ROOT/executiond.env"
+		install -o root -g root -m 0600 "$REMOTE_STAGE/previous/executiond.env" "$CONFIG_ROOT/executiond.env"
 	else
 		rm -f "$CONFIG_ROOT/executiond.env"
 	fi
-	if [[ -f $REMOTE_STAGE/previous/executiond.service ]]; then
-		install -o root -g root -m 0644 "$REMOTE_STAGE/previous/executiond.service" /etc/systemd/system/executiond.service
-	else
-		rm -f /etc/systemd/system/executiond.service
-	fi
-	systemctl daemon-reload || true
 	if [[ -n $previous_release && -d $previous_release ]]; then
 		ln -sfn "$previous_release" "$current_link.new"
 		mv -Tf "$current_link.new" "$current_link"
-		systemctl start executiond.service || true
+		start_pm2_app || true
 	else
 		rm -f "$current_link" "$current_link.new"
+		"$PM2_BIN" delete executiond >/dev/null 2>&1 || true
+		"$PM2_BIN" save >/dev/null 2>&1 || true
 	fi
 	exit "$status"
 }
 
-if ! getent group "$APP_GROUP" >/dev/null; then
-	groupadd --system "$APP_GROUP"
-fi
-if ! getent passwd "$APP_USER" >/dev/null; then
-	useradd --system --gid "$APP_GROUP" --home-dir "$DATA_ROOT" --shell /usr/sbin/nologin "$APP_USER"
-fi
+command -v "$PM2_BIN" >/dev/null || { echo "[executiond] ERROR: pm2 not found at $PM2_BIN (set EXECUTIOND_PM2_BIN)" >&2; exit 1; }
 
-if ! systemctl is-active --quiet pmm-nats.service; then
+if ! systemctl is-active --quiet pmm-nats.service 2>/dev/null; then
 	echo "[executiond] WARNING: pmm-nats.service is not active; executiond needs a NATS server at its EXECUTION_NATS_URL" >&2
 fi
 
 install -d -o root -g root -m 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"
-install -d -o root -g "$APP_GROUP" -m 0750 "$CONFIG_ROOT"
-install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750 "$DATA_ROOT"
+install -d -o root -g root -m 0750 "$CONFIG_ROOT"
+install -d -o root -g root -m 0750 "$DATA_ROOT"
 (cd "$REMOTE_STAGE" && sha256sum -c "executiond-$RELEASE_ID.tar.gz.sha256")
 tar -C "$REMOTE_STAGE" -xzf "$REMOTE_STAGE/executiond-$RELEASE_ID.tar.gz"
 install -d -o root -g root -m 0755 "$release_dir"
@@ -158,66 +164,35 @@ install -d -m 0700 "$REMOTE_STAGE/previous"
 if [[ -f $CONFIG_ROOT/executiond.env ]]; then
 	install -m 0600 "$CONFIG_ROOT/executiond.env" "$REMOTE_STAGE/previous/executiond.env"
 fi
-if [[ -f /etc/systemd/system/executiond.service ]]; then
-	install -m 0600 /etc/systemd/system/executiond.service "$REMOTE_STAGE/previous/executiond.service"
-fi
 activation_started=1
 trap rollback ERR
 
-cat > /etc/systemd/system/executiond.service <<EOF
-[Unit]
-Description=Polymarket execution daemon
-Wants=network-online.target pmm-nats.service
-After=network-online.target pmm-nats.service postgresql.service
-StartLimitIntervalSec=1min
-StartLimitBurst=10
-
-[Service]
-Type=simple
-User=$APP_USER
-Group=$APP_GROUP
-WorkingDirectory=$DATA_ROOT
-EnvironmentFile=$CONFIG_ROOT/executiond.env
-ExecStart=$current_link/executiond
-Restart=always
-RestartSec=5s
-TimeoutStopSec=30s
-KillSignal=SIGTERM
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=executiond
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA_ROOT
-
-[Install]
-WantedBy=multi-user.target
+cat > "$run_script" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+set -a
+source "$CONFIG_ROOT/executiond.env"
+set +a
+exec "$current_link/executiond"
 EOF
+chmod 0755 "$run_script"
 
-systemctl daemon-reload
-systemctl enable executiond.service >/dev/null
-systemctl stop executiond.service 2>/dev/null || true
-install -o root -g "$APP_GROUP" -m 0640 "$REMOTE_STAGE/executiond.env" "$CONFIG_ROOT/executiond.env"
+install -o root -g root -m 0600 "$REMOTE_STAGE/executiond.env" "$CONFIG_ROOT/executiond.env"
 ln -sfn "$release_dir" "$current_link.new"
 mv -Tf "$current_link.new" "$current_link"
-systemctl start executiond.service
+start_pm2_app
 
-# executiond exposes no HTTP endpoint; treat it as ready once it stays active
-# without a restart for a few consecutive seconds.
+# executiond exposes no HTTP endpoint; treat it as ready once pm2 reports it
+# online and stable (no new restarts) for a few consecutive seconds.
+read -r baseline_status baseline_restarts <<<"$(pm2_app_status)"
 stable=0
 ready=0
 for attempt in {1..20}; do
-	if ! systemctl is-active --quiet executiond.service; then
-		stable=0
+	read -r status restarts <<<"$(pm2_app_status)"
+	if [[ $status == "online" && ${restarts:-0} == "$baseline_restarts" ]]; then
+		stable=$((stable + 1))
 	else
-		restarts=$(systemctl show -p NRestarts --value executiond.service 2>/dev/null || echo 0)
-		if [[ ${restarts:-0} -gt 0 ]]; then
-			stable=0
-		else
-			stable=$((stable + 1))
-		fi
+		stable=0
 	fi
 	if (( stable >= 5 )); then
 		ready=1
@@ -226,7 +201,7 @@ for attempt in {1..20}; do
 	sleep 1
 done
 if (( ! ready )); then
-	journalctl -u executiond.service -n 50 --no-pager >&2 || true
+	"$PM2_BIN" logs executiond --lines 50 --nostream >&2 || true
 	false
 fi
 trap - ERR

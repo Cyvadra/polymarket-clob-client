@@ -33,6 +33,7 @@ type config struct {
 	FeatureInterval       time.Duration
 	ReconcileInterval     time.Duration
 	MissingOrderGrace     time.Duration
+	MaxTradeAge           time.Duration
 	ConnectTimeout        time.Duration
 	ShutdownGracePeriod   time.Duration
 }
@@ -120,6 +121,7 @@ func run() error {
 		return err
 	}
 	repair.SetMissingOrderGrace(cfg.MissingOrderGrace)
+	repair.SetMaxTradeAge(cfg.MaxTradeAge)
 	positions, err := positionfeatures.New(store, bus, time.Now, cfg.FeatureInterval)
 	if err != nil {
 		return err
@@ -233,6 +235,7 @@ func configFromEnv() (config, error) {
 		FeatureInterval:       durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
 		ReconcileInterval:     durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
 		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
+		MaxTradeAge:           durationEnv("EXECUTION_RECONCILE_MAX_TRADE_AGE", 24*time.Hour),
 		ConnectTimeout:        durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		ShutdownGracePeriod:   durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}

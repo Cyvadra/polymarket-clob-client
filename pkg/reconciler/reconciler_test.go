@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -281,6 +282,28 @@ func TestReconcileReplaysOwnedTradesBeforeOrders(t *testing.T) {
 	}
 	if len(repository.fills) != 1 || repository.fills[0].ExchangeOrderID != "order-1" || repository.fills[0].IntentID != "intent-1" || repository.fills[0].UniqueTag != "lane-a" || repository.fills[0].Side != store.SideSell {
 		t.Fatalf("expected owned maker fill replay, got %+v", repository.fills)
+	}
+}
+
+func TestReconcileSkipsTradesOlderThanMaxTradeAge(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
+	fills, err := accountfeed.NewFillConsumer(repository, func() time.Time { return time.Unix(1_000_000, 0).UTC() })
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	now := time.Unix(1_000_000, 0).UTC()
+	oldTimestamp := strconv.FormatInt(now.Add(-48*time.Hour).UnixMilli(), 10)
+	client := &fakeCLOB{
+		orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE"}},
+		trades: []clobclient.Trade{{ID: "trade-1", Timestamp: oldTimestamp, Market: "condition", AssetID: "token", Outcome: "Up", Status: "CONFIRMED", TraderSide: "MAKER", MakerOrders: []clobclient.MakerTrade{{OrderID: "order-1", Owner: "key", MatchedAmount: "2", Price: "0.5", AssetID: "token", Outcome: "Up", Side: clobclient.SideSell}}}},
+	}
+	reconciler, _ := New(repository, client, fills, "key", func() time.Time { return now }, time.Second)
+	reconciler.SetMaxTradeAge(24 * time.Hour)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.fills) != 0 {
+		t.Fatalf("expected old trade to be skipped, got %+v", repository.fills)
 	}
 }
 
