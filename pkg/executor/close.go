@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
@@ -91,6 +92,9 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 		return err
 	}
 	for _, candidate := range stale {
+		if !supersededBy(req.Mode, candidate) {
+			continue
+		}
 		if err := e.replaceStaleChild(ctx, candidate); err != nil {
 			return err
 		}
@@ -123,6 +127,19 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 		e.publishCloseRejection(intent, declared)
 	}
 	return err
+}
+
+// supersededBy reports whether a fresh close in this mode retires the lane
+// child. A FORCE_CLOSE retires everything: it exits before settlement and needs
+// the position to stop moving. A LIMIT_CLOSE leaves a resting open BUY alone,
+// so a partially filled entry keeps working; the close is resized to match by
+// the maintenance pass as the position grows (see closemaintain.go). A prior
+// close is always superseded, in either mode.
+func supersededBy(mode protocol.ExecutionCloseMode, candidate closeableOrder) bool {
+	if candidate.intent.Kind == store.IntentClose {
+		return true
+	}
+	return mode == protocol.ExecutionCloseModeForce
 }
 
 func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declared rejection) {
@@ -159,7 +176,26 @@ func (e *Executor) replaceStaleChild(ctx context.Context, candidate closeableOrd
 		}
 		return err
 	}
+	e.releaseSupersededReservation(ctx, candidate)
 	return nil
+}
+
+// releaseSupersededReservation frees the shares a cancelled close was holding,
+// so the replacement can be sized for the whole position straight away.
+//
+// Without this the reservation lingers until the cancelled order is observed
+// reaching a terminal state, which is a round trip away. The replacement would
+// meanwhile be planned against an available_size that still excludes it and so
+// would be sized too small — silently selling less than the position, or being
+// refused for falling under the market minimum.
+//
+// The release is idempotent: if the observer gets there first, the reservation
+// is already gone and the store reports it as not found.
+func (e *Executor) releaseSupersededReservation(ctx context.Context, candidate closeableOrder) {
+	id := reservationID(candidate.intent.IntentID, candidate.order.ChildSequence)
+	if err := e.store.Release(ctx, id, "superseded by a replacement close"); err != nil && !errors.Is(err, store.ErrNotFound) {
+		e.reportError(fmt.Errorf("release superseded close reservation %s: %w", id, err))
+	}
 }
 
 func closeRetryTimeout(policy protocol.ExecutionPolicy) time.Duration {
@@ -299,7 +335,14 @@ func (e *Executor) closeRetryDecision(ctx context.Context, intent protocol.Execu
 	switch {
 	case declared.code == protocol.ReasonActiveSellReservation, declared.code == protocol.ReasonNoPosition:
 		retry = closeRetry{retry: true}
-	case declared.code == protocol.ReasonOrderRejected && isUnsettledBalance(declared):
+	case declared.code == protocol.ReasonOrderRejected && isSizeMismatch(declared):
+		// The order was well formed and only its size was wrong, so a retry
+		// against a freshly read position is worth the settlement window. A
+		// reported balance of 0 is the usual case: the fill has not settled on
+		// chain yet and the wallet holds nothing to sell.
+		if err := e.adoptExchangeBalance(ctx, intent, declared); err != nil {
+			return closeRetry{}, err
+		}
 		retry = closeRetry{retry: true, fresh: true, window: settlementRetryWindow, delay: settlementRetryInterval}
 	default:
 		return closeRetry{}, nil
@@ -314,11 +357,26 @@ func (e *Executor) closeRetryDecision(ctx context.Context, intent protocol.Execu
 	return retry, nil
 }
 
-// isUnsettledBalance reports whether the exchange refused a sell because the
-// wallet does not hold the tokens yet, the signature of a fill that has not
-// settled on chain. The CLOB gives no structured code for it, only this text.
-func isUnsettledBalance(err error) bool {
-	return strings.Contains(strings.ToLower(err.Error()), "not enough balance")
+// adoptExchangeBalance records the position the exchange reported in a size
+// refusal, so the retry plans from the wallet's real holding instead of the
+// local fill ledger that just proved wrong. A report the store declines to
+// apply (it never raises a position) simply leaves the sizes as they were.
+func (e *Executor) adoptExchangeBalance(ctx context.Context, intent protocol.ExecutionIntent, declared rejection) error {
+	reported, ok := exchangeBalance(declared)
+	if !ok {
+		return nil
+	}
+	// A reported balance of zero is the unsettled case, not a smaller holding:
+	// the fill is booked but the tokens have not reached the wallet yet.
+	// Clamping the lane to zero there would read as "nothing left to exit" and
+	// cancel the retry that is waiting for settlement.
+	if !decimal.Positive(reported) {
+		return nil
+	}
+	if err := e.store.ReconcilePositionSize(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag, reported); err != nil {
+		return fmt.Errorf("adopt exchange-reported position %s: %w", reported, err)
+	}
+	return nil
 }
 
 func forceCloseIntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderIntentRecord {
@@ -370,10 +428,21 @@ func (e *Executor) forceClosePosition(ctx context.Context, intent store.OrderInt
 	if !found || !decimal.Positive(position.ActualShares) {
 		return nil
 	}
+	// The exit bypasses the planner, so it floors to share precision here: an
+	// unfloored size is rejected by the signer, and the reservation is gated on
+	// available_size, not actual_shares.
+	shares, err := sellableShares(position)
+	if err != nil {
+		return err
+	}
+	shares, ok := decimal.FloorTo(shares, clobclient.SharePrecisionDigits(protocol.SideSell, protocol.TimeInForceFAK))
+	if !ok {
+		return rejection{code: protocol.ReasonNoPosition, reason: fmt.Sprintf("position %s rounds to zero at share precision", position.ActualShares)}
+	}
 	if _, err := e.store.InsertIntent(ctx, intent); err != nil {
 		return fmt.Errorf("persist force-close intent: %w", err)
 	}
-	child := plannedChild{Sequence: forceCloseChildSequence, Shares: position.ActualShares, Price: forceClosePrice, TimeInForce: protocol.TimeInForceFAK, ReservationReason: "force close"}
+	child := plannedChild{Sequence: forceCloseChildSequence, Shares: shares, Price: forceClosePrice, TimeInForce: protocol.TimeInForceFAK, ReservationReason: "force close"}
 	exit := mapping.ExecutionIntent(intent)
 	exit.Side = protocol.SideSell
 	exit.PostOnly = false

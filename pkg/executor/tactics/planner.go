@@ -3,6 +3,7 @@
 package tactics
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -91,6 +92,20 @@ func plannedShares(request Request, price float64, timeInForce protocol.TimeInFo
 	return shares, nil
 }
 
+// belowMinOrderSizeError marks a size the exchange would refuse for being too
+// small. The close path holds such a position rather than reporting it failed,
+// so it needs to tell this apart from an unplannable order.
+type belowMinOrderSizeError struct{ reason string }
+
+func (e belowMinOrderSizeError) Error() string { return e.reason }
+
+// BelowMinOrderSize reports whether err was caused by a size under the market
+// minimum order size.
+func BelowMinOrderSize(err error) bool {
+	var target belowMinOrderSizeError
+	return errors.As(err, &target)
+}
+
 func checkMinOrderSize(shares string, minOrderSize float64) error {
 	if minOrderSize <= 0 {
 		return nil
@@ -100,7 +115,7 @@ func checkMinOrderSize(shares string, minOrderSize float64) error {
 		return err
 	}
 	if parsed+1e-9 < minOrderSize {
-		return fmt.Errorf("planned shares %s are below the market minimum order size %.4f", shares, minOrderSize)
+		return belowMinOrderSizeError{reason: fmt.Sprintf("planned shares %s are below the market minimum order size %.4f", shares, minOrderSize)}
 	}
 	return nil
 }

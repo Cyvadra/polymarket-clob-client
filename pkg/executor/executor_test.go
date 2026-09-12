@@ -7,6 +7,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -24,6 +25,18 @@ type fakeStore struct {
 	// lane (e.g. a resting open next to a pending close).
 	extraOrders  []store.SignedOrderRecord
 	extraIntents map[string]store.OrderIntentRecord
+
+	// reconciled records every exchange-reported size clamp, so tests can
+	// assert the daemon adopted the exchange's view of a position.
+	reconciled []reconciledPosition
+
+	// latestClose is the lane's most recent limit close intent, if any.
+	latestClose store.OrderIntentRecord
+
+	// reservations models locked exposure so tests exercise the real
+	// available/reserved accounting a close is sized against.
+	reservations map[string]store.ReservationRecord
+	released     []string
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
@@ -71,6 +84,10 @@ func (s *fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRe
 	if exchangeOrderID != "" {
 		order.ExchangeOrderID = exchangeOrderID
 	}
+	// Mirror the store: reaching a terminal state frees the locked exposure.
+	if statemachine.IsTerminal(order.State) {
+		_ = s.Release(context.Background(), reservationID(order.IntentID, order.ChildSequence), "terminal")
+	}
 	s.order = order
 	return order, nil
 }
@@ -91,14 +108,88 @@ func (s *fakeStore) OpenOrders(context.Context) ([]store.SignedOrderRecord, erro
 	orders = append(orders, s.extraOrders...)
 	return orders, nil
 }
-func (s *fakeStore) Reserve(context.Context, store.ReservationRecord) error { return nil }
+func (s *fakeStore) Reserve(_ context.Context, record store.ReservationRecord) error {
+	if record.Side != "SELL" {
+		return nil
+	}
+	// Mirror the store: a sell reservation moves shares out of available_size,
+	// and is refused when there are not enough to move.
+	for i, position := range s.positions {
+		if position.ConditionID != record.ConditionID || position.TokenID != record.TokenID || position.UniqueTag != record.UniqueTag {
+			continue
+		}
+		if decimal.Compare(position.AvailableSize, record.Shares) < 0 {
+			return store.ErrConflict
+		}
+		available, _ := decimal.SubString(position.AvailableSize, record.Shares)
+		reserved, _ := decimal.AddString(position.ReservedSize, record.Shares)
+		s.positions[i].AvailableSize, s.positions[i].ReservedSize = available, reserved
+		if s.reservations == nil {
+			s.reservations = map[string]store.ReservationRecord{}
+		}
+		s.reservations[record.ReservationID] = record
+	}
+	return nil
+}
 func (s *fakeStore) Reservation(context.Context, string) (store.ReservationRecord, error) {
 	return store.ReservationRecord{}, store.ErrNotFound
 }
-func (s *fakeStore) Release(context.Context, string, string) error             { return nil }
+func (s *fakeStore) Release(_ context.Context, reservationID, _ string) error {
+	record, ok := s.reservations[reservationID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	delete(s.reservations, reservationID)
+	s.released = append(s.released, reservationID)
+	for i, position := range s.positions {
+		if position.ConditionID != record.ConditionID || position.TokenID != record.TokenID || position.UniqueTag != record.UniqueTag {
+			continue
+		}
+		available, _ := decimal.AddString(position.AvailableSize, record.Shares)
+		reserved, _ := decimal.SubString(position.ReservedSize, record.Shares)
+		s.positions[i].AvailableSize, s.positions[i].ReservedSize = available, reserved
+	}
+	return nil
+}
 func (s *fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error) { return false, nil }
+
+// latestClose, when set, is what LatestLimitCloseIntent returns for any lane.
+func (s *fakeStore) LatestLimitCloseIntent(_ context.Context, _, _, _ string) (store.OrderIntentRecord, error) {
+	if s.latestClose.IntentID == "" {
+		return store.OrderIntentRecord{}, store.ErrNotFound
+	}
+	return s.latestClose, nil
+}
+
 func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return s.positions, nil
+}
+
+func (s *fakeStore) ReconcilePositionSize(_ context.Context, conditionID, tokenID, uniqueTag, shares string) error {
+	s.reconciled = append(s.reconciled, reconciledPosition{conditionID: conditionID, tokenID: tokenID, uniqueTag: uniqueTag, shares: shares})
+	for i, position := range s.positions {
+		if position.ConditionID != conditionID || position.TokenID != tokenID || position.UniqueTag != uniqueTag {
+			continue
+		}
+		// Mirror the store: clamp down only, never up.
+		if decimal.Compare(shares, position.ActualShares) >= 0 {
+			return nil
+		}
+		s.positions[i].PositionSize = shares
+		s.positions[i].ActualShares = shares
+		if decimal.Compare(shares, position.AvailableSize) < 0 {
+			s.positions[i].AvailableSize = shares
+		}
+		s.positions[i].SourceRevision++
+	}
+	return nil
+}
+
+type reconciledPosition struct {
+	conditionID string
+	tokenID     string
+	uniqueTag   string
+	shares      string
 }
 
 type fakeCLOB struct {
@@ -111,9 +202,15 @@ type fakeCLOB struct {
 	created          clobclient.UserOrder
 	canceledOrderID  string
 	canceledOrderIDs []string
+	// minOrderSize is the market minimum the planner enforces; zero means the
+	// market publishes no minimum, which is the default in most tests.
+	minOrderSize float64
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
+func (c *fakeCLOB) MinOrderSize(context.Context, string) (float64, error) {
+	return c.minOrderSize, nil
+}
 func (c *fakeCLOB) CreateOrder(_ context.Context, order clobclient.UserOrder) (clobclient.SignedOrderV2, error) {
 	c.created = order
 	return clobclient.SignedOrderV2{OrderID: "order-1", Salt: 1}, nil

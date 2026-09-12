@@ -152,6 +152,7 @@ const (
 	ReasonNoPosition            = "NO_POSITION"
 	ReasonActiveSellReservation = "ACTIVE_SELL_RESERVATION"
 	ReasonExposureLimit         = "EXPOSURE_LIMIT"
+	ReasonBelowMinOrderSize     = "BELOW_MIN_ORDER_SIZE"
 	ReasonUnplannable           = "UNPLANNABLE"
 	ReasonOrderRejected         = "ORDER_REJECTED"
 	ReasonExecutionFailed       = "EXECUTION_FAILED"

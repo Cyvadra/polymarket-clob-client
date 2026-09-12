@@ -172,6 +172,11 @@ type IntentStore interface {
 	InsertIntent(context.Context, OrderIntentRecord) (inserted bool, err error)
 	Intent(context.Context, string) (OrderIntentRecord, error)
 	UpdateIntentStatus(context.Context, string, string) error
+	// LatestLimitCloseIntent returns the lane's most recent limit close intent,
+	// the one whose price a maintenance pass re-places against. Force closes
+	// are excluded: they carry a nominal exit price, not a strategy target.
+	// Returns ErrNotFound when the lane has never been closed at a limit.
+	LatestLimitCloseIntent(ctx context.Context, conditionID, tokenID, uniqueTag string) (OrderIntentRecord, error)
 }
 
 type OrderStore interface {
@@ -188,6 +193,17 @@ type FillStore interface {
 
 type PositionStore interface {
 	PositionFeatures(context.Context) ([]PositionRecord, error)
+}
+
+// PositionReconciler adopts the exchange's own view of a lane's size. It is
+// kept apart from PositionStore because most consumers only read positions.
+type PositionReconciler interface {
+	// ReconcilePositionSize clamps a lane's recorded size down to what the
+	// exchange reports it holds. The local sizes are derived from fills, which
+	// can overstate the wallet if a trade failed on chain or was never seen;
+	// the exchange's figure is authoritative when it is lower. It never raises
+	// a position: an unseen fill must arrive as a fill, not as a clamp.
+	ReconcilePositionSize(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) error
 }
 
 type ReservationStore interface {

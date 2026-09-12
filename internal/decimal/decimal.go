@@ -124,6 +124,38 @@ func snapToTick(price, tick float64, round func(float64) float64) float64 {
 
 const tickEpsilon = 1e-9
 
+// AddString sums two decimal strings exactly, without going through float64.
+func AddString(left, right string) (string, bool) {
+	a, ok := Rat(left)
+	if !ok {
+		return "", false
+	}
+	b, ok := Rat(right)
+	if !ok {
+		return "", false
+	}
+	return new(big.Rat).Add(a, b).FloatString(sumPrecision), true
+}
+
+// SubString subtracts right from left exactly. A negative result is returned as
+// such; callers decide whether that is meaningful.
+func SubString(left, right string) (string, bool) {
+	a, ok := Rat(left)
+	if !ok {
+		return "", false
+	}
+	b, ok := Rat(right)
+	if !ok {
+		return "", false
+	}
+	return new(big.Rat).Sub(a, b).FloatString(sumPrecision), true
+}
+
+// sumPrecision is the decimal precision sums and differences are rendered at.
+// Share counts and prices both carry at most six places on this exchange, so
+// this is exact for every figure these helpers see.
+const sumPrecision = 6
+
 func MulString(left, right string) (string, bool) {
 	leftRat, leftOK := Rat(left)
 	rightRat, rightOK := Rat(right)

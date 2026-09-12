@@ -309,3 +309,55 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 		t.Fatalf("expected ErrExposureLimit, got %v", err)
 	}
 }
+
+// ReconcilePositionSize adopts the exchange's own view of a lane when it is
+// smaller than the local fill ledger, and never inflates one: an unseen fill
+// must arrive as a fill, not as a clamp.
+func TestReconcilePositionSizeClampsDownOnly(t *testing.T) {
+	s := testStore(t)
+	seedIntent(t, s, "intent-clamp")
+	seedSignedOrder(t, s, "intent-clamp")
+
+	ctx := context.Background()
+	if _, err := s.ApplyFill(ctx, store.FillRecord{
+		FillID: "fill-clamp", ExchangeOrderID: "intent-clamp-exchange", IntentID: "intent-clamp", UniqueTag: "lane-a",
+		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
+		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED",
+	}); err != nil {
+		t.Fatalf("seed position: %v", err)
+	}
+	if err := s.Reserve(ctx, store.ReservationRecord{
+		ReservationID: "reserve-clamp", IntentID: "intent-clamp", UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token",
+		Outcome: "Up", Side: store.SideSell, Shares: "3", Notional: "1.5", State: "active",
+	}); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	// A report above the local figure changes nothing.
+	if err := s.ReconcilePositionSize(ctx, "condition", "token", "lane-a", "12"); err != nil {
+		t.Fatalf("reconcile upward: %v", err)
+	}
+	positions, err := s.PositionFeatures(ctx)
+	if err != nil {
+		t.Fatalf("positions after upward reconcile: %v", err)
+	}
+	if positions[0].ActualShares != "10.000000000000000000" {
+		t.Fatalf("expected an upward report to be ignored, got %+v", positions[0])
+	}
+
+	// A report below it clamps the lane, keeping available + reserved <= total.
+	if err := s.ReconcilePositionSize(ctx, "condition", "token", "lane-a", "4"); err != nil {
+		t.Fatalf("reconcile downward: %v", err)
+	}
+	positions, err = s.PositionFeatures(ctx)
+	if err != nil {
+		t.Fatalf("positions after downward reconcile: %v", err)
+	}
+	got := positions[0]
+	if got.ActualShares != "4.000000000000000000" || got.PositionSize != "4.000000000000000000" {
+		t.Fatalf("expected the lane clamped to 4, got %+v", got)
+	}
+	if got.ReservedSize != "3.000000000000000000" || got.AvailableSize != "1.000000000000000000" {
+		t.Fatalf("expected 3 reserved and 1 available after the clamp, got %+v", got)
+	}
+}

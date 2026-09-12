@@ -177,6 +177,28 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 	return scanIntent(row)
 }
 
+// LatestLimitCloseIntent returns the lane's newest close intent that carries a
+// strategy limit price. A force close is told apart by its FAK time in force:
+// it exits at a nominal price the strategy never chose, so re-placing against
+// it would sell the residual at 0.01.
+func (s *Store) LatestLimitCloseIntent(ctx context.Context, conditionID, tokenID, uniqueTag string) (store.OrderIntentRecord, error) {
+	if conditionID == "" || tokenID == "" || uniqueTag == "" {
+		return store.OrderIntentRecord{}, fmt.Errorf("condition ID, token ID, and unique tag are required")
+	}
+	row := s.pool.QueryRow(ctx, `
+		SELECT intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
+			token_id, outcome, side, target_usd::text, limit_price::text,
+			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
+			status, policy, created_at, updated_at
+		FROM order_intents
+		WHERE condition_id = $1 AND token_id = $2 AND unique_tag = $3
+			AND kind = 'CLOSE' AND time_in_force <> 'FAK'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, conditionID, tokenID, uniqueTag)
+	return scanIntent(row)
+}
+
 func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrderRecord) error {
 	if record.IntentID == "" || record.ChildSequence <= 0 || len(record.SignedPayload) == 0 || record.SignedOrderHash == "" || record.Salt == "" {
 		return fmt.Errorf("intent ID, child sequence, signed payload, signed order hash, and salt are required")
@@ -813,6 +835,32 @@ func restoreReservationPosition(ctx context.Context, tx pgx.Tx, record store.Res
 		WHERE condition_id = $2 AND token_id = $3 AND unique_tag = $4
 	`, record.Shares, record.ConditionID, record.TokenID, record.UniqueTag); err != nil {
 		return fmt.Errorf("restore sell position: %w", err)
+	}
+	return nil
+}
+
+// ReconcilePositionSize clamps a lane's sizes down to the share count the
+// exchange reports. Only a decrease is applied (the GREATEST/LEAST guards), so
+// a stale or partial report can never inflate a position. reserved_size is left
+// alone and available_size is squeezed beneath the new total, keeping the
+// table's available + reserved <= position_size invariant.
+func (s *Store) ReconcilePositionSize(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) error {
+	if conditionID == "" || tokenID == "" || uniqueTag == "" || shares == "" {
+		return fmt.Errorf("condition ID, token ID, unique tag, and shares are required")
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE positions
+		SET position_size = LEAST(position_size, $1::numeric),
+			actual_shares = LEAST(actual_shares, $1::numeric),
+			reserved_size = LEAST(reserved_size, $1::numeric),
+			available_size = GREATEST(LEAST(available_size, $1::numeric - LEAST(reserved_size, $1::numeric)), 0),
+			state = CASE WHEN $1::numeric <= 0 THEN 'empty' ELSE state END,
+			source_revision = source_revision + 1,
+			updated_at = now()
+		WHERE condition_id = $2 AND token_id = $3 AND unique_tag = $4
+			AND actual_shares > $1::numeric
+	`, shares, conditionID, tokenID, uniqueTag); err != nil {
+		return fmt.Errorf("reconcile position size: %w", err)
 	}
 	return nil
 }

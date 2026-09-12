@@ -22,6 +22,7 @@ type Client struct {
 type metadataCache struct {
 	mu       sync.RWMutex
 	tickSize map[string]float64
+	minSize  map[string]float64
 	negRisk  map[string]bool
 	feeRate  map[string]int
 }
@@ -51,7 +52,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		cfg: cfg, key: key, signer: signer,
 		transport: transport.New(cfg.Host, cfg.HTTPClient, cfg.Timeout, cfg.Retry.MaxAttempts, cfg.Retry.BaseDelay, cfg.QPS),
-		metadata:  &metadataCache{tickSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}},
+		metadata:  &metadataCache{tickSize: map[string]float64{}, minSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}},
 	}, nil
 }
 

@@ -234,13 +234,20 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 		if !found {
 			return plannedChild{}, rejection{code: protocol.ReasonNoPosition, reason: "no position held for this token"}
 		}
-		request.AvailableShares = position.ActualShares
+		sellable, err := sellableShares(position)
+		if err != nil {
+			return plannedChild{}, err
+		}
+		request.AvailableShares = sellable
 	}
 	if e.quotes != nil {
 		request.Quote, request.HasQuote = e.quotes.Get(intent.ConditionID)
 	}
 	decision, err := tactics.Plan(request)
 	if err != nil {
+		if tactics.BelowMinOrderSize(err) {
+			return plannedChild{}, rejection{code: protocol.ReasonBelowMinOrderSize, reason: err.Error(), cause: err}
+		}
 		return plannedChild{}, rejection{code: protocol.ReasonUnplannable, reason: err.Error(), cause: err}
 	}
 	return plannedChild{
@@ -250,12 +257,43 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	}, nil
 }
 
+// sellableShares is the size a SELL child can actually reserve. The store gates
+// Reserve on available_size (see pkg/store/postgres/store.go), so sizing a close
+// from actual_shares places an order the reservation refuses whenever some of
+// the lane is still reserved by a close being superseded. Taking the lesser of
+// the two keeps the planned size and the reservable size the same number.
+//
+// A lane whose shares are all reserved reports ReasonNoPosition, which the close
+// retry loop treats as transient: the reservation is released when the
+// superseded order reaches a terminal state, and the retry then converges.
+func sellableShares(position store.PositionRecord) (string, error) {
+	actual := position.ActualShares
+	if !decimal.Positive(actual) {
+		return "", rejection{code: protocol.ReasonNoPosition, reason: "no position held for this token"}
+	}
+	sellable := actual
+	if decimal.NonNegative(position.AvailableSize) && decimal.Compare(position.AvailableSize, sellable) < 0 {
+		sellable = position.AvailableSize
+	}
+	if !decimal.Positive(sellable) {
+		return "", rejection{code: protocol.ReasonNoPosition, reason: "the whole position is reserved by another sell"}
+	}
+	return sellable, nil
+}
+
 func (e *Executor) marketRules(ctx context.Context, tokenID string) (tactics.Market, error) {
 	tick, err := e.clob.TickSize(ctx, tokenID)
 	if err != nil {
 		return tactics.Market{}, fmt.Errorf("load tick size for %s: %w", tokenID, err)
 	}
-	return tactics.Market{TickSize: tick}, nil
+	// The minimum is what the exchange rejects a close on, so the planner needs
+	// it to refuse an unplaceable size locally instead of learning it from a
+	// rejection. Both figures are cached client-side per token.
+	minimum, err := e.clob.MinOrderSize(ctx, tokenID)
+	if err != nil {
+		return tactics.Market{}, fmt.Errorf("load minimum order size for %s: %w", tokenID, err)
+	}
+	return tactics.Market{TickSize: tick, MinOrderSize: minimum}, nil
 }
 
 func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, revision int64) error {

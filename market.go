@@ -24,6 +24,7 @@ func (c *Client) InvalidateMarketMetadata(tokenID string) {
 		return
 	}
 	delete(c.metadata.tickSize, tokenID)
+	delete(c.metadata.minSize, tokenID)
 	delete(c.metadata.negRisk, tokenID)
 	delete(c.metadata.feeRate, tokenID)
 }
@@ -79,6 +80,37 @@ func (c *Client) TickSize(ctx context.Context, tokenID string) (float64, error) 
 	c.metadata.tickSize[tokenID] = out.MinimumTickSize
 	c.metadata.mu.Unlock()
 	return out.MinimumTickSize, nil
+}
+
+// MinOrderSize reports the market's minimum order size in shares. The CLOB
+// publishes it on the order book rather than on a metadata endpoint, so the
+// book is fetched once per token and the figure cached beside the tick size:
+// both are per-market constants and callers ask for them on every order.
+//
+// A book that omits min_order_size yields 0, meaning "no minimum known", which
+// callers treat as no constraint.
+func (c *Client) MinOrderSize(ctx context.Context, tokenID string) (float64, error) {
+	if tokenID == "" {
+		return 0, fmt.Errorf("token ID is required")
+	}
+	c.metadata.mu.RLock()
+	value, ok := c.metadata.minSize[tokenID]
+	c.metadata.mu.RUnlock()
+	if ok {
+		return value, nil
+	}
+	book, err := c.OrderBook(ctx, tokenID)
+	if err != nil {
+		return 0, err
+	}
+	size, err := minimumShares(book)
+	if err != nil {
+		return 0, err
+	}
+	c.metadata.mu.Lock()
+	c.metadata.minSize[tokenID] = size
+	c.metadata.mu.Unlock()
+	return size, nil
 }
 
 func (c *Client) NegRisk(ctx context.Context, tokenID string) (bool, error) {

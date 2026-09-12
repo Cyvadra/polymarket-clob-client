@@ -246,8 +246,10 @@ func TestExecuteCloseReplacesActiveCloseWithoutImmediateResult(t *testing.T) {
 	}
 }
 
-func TestExecuteCloseReplacesActiveCloseAlongsidePendingOpenOrder(t *testing.T) {
-	storer := &fakeStore{
+// laneWithOpenAndClose models a lane carrying both a resting open buy and a
+// prior close, the state a replacement close has to resolve.
+func laneWithOpenAndClose() *fakeStore {
+	return &fakeStore{
 		inserted: true,
 		positions: []store.PositionRecord{
 			{ConditionID: "condition", TokenID: "token", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "2", ActualShares: "2", AvailableSize: "2", State: "open"},
@@ -261,6 +263,13 @@ func TestExecuteCloseReplacesActiveCloseAlongsidePendingOpenOrder(t *testing.T) 
 			"close-old": {IntentID: "close-old", UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Kind: store.IntentClose, Status: statemachine.StateLive},
 		},
 	}
+}
+
+// A LIMIT_CLOSE supersedes a prior close but leaves a resting open buy working,
+// so a partially filled entry keeps growing; the maintenance pass resizes the
+// close to match. Only a FORCE_CLOSE freezes the lane.
+func TestExecuteCloseLimitReplacesCloseButLeavesPendingOpenOrder(t *testing.T) {
+	storer := laneWithOpenAndClose()
 	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-new"}}
 	exec, err := New(storer, client, time.Now)
 	if err != nil {
@@ -271,13 +280,121 @@ func TestExecuteCloseReplacesActiveCloseAlongsidePendingOpenOrder(t *testing.T) 
 	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err != nil {
 		t.Fatalf("execute close replacement: %v", err)
 	}
-	if len(client.canceledOrderIDs) != 2 {
-		t.Fatalf("expected both the open and old close orders canceled, got %+v", client.canceledOrderIDs)
+	if len(client.canceledOrderIDs) != 1 || client.canceledOrderIDs[0] != "order-close" {
+		t.Fatalf("expected only the old close canceled, got %+v", client.canceledOrderIDs)
 	}
 	if storer.extraIntents["close-old"].Status != store.IntentStatusSuperseded {
 		t.Fatalf("expected old close intent to be superseded, got %s", storer.extraIntents["close-old"].Status)
 	}
 	if pub.subject == protocol.SubjectExecutionCloseResult {
 		t.Fatalf("expected no immediate close result, got %+v", pub.value)
+	}
+}
+
+// A FORCE_CLOSE retires every child on the lane, the open buy included: it
+// exits before settlement and needs the position to stop moving.
+func TestExecuteCloseForceCancelsPendingOpenOrderToo(t *testing.T) {
+	storer := laneWithOpenAndClose()
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-new"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&resultPublisher{})
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeForce)); err != nil {
+		t.Fatalf("execute force close: %v", err)
+	}
+	if len(client.canceledOrderIDs) != 2 {
+		t.Fatalf("expected both the open and old close orders canceled, got %+v", client.canceledOrderIDs)
+	}
+}
+
+// A close is sized from what can actually be reserved, not from the lane's
+// gross holding: the store gates the sell reservation on available_size, so
+// planning from actual_shares places an order the reservation would refuse.
+func TestExecuteCloseSizesFromTheReservableShares(t *testing.T) {
+	storer := &fakeStore{
+		inserted: true,
+		positions: []store.PositionRecord{{
+			ConditionID: "condition", TokenID: "token", UniqueTag: "lane-a", Outcome: "Up",
+			PositionSize: "10", ActualShares: "10", AvailableSize: "4", ReservedSize: "6", State: "open",
+		}},
+	}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-new"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&resultPublisher{})
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err != nil {
+		t.Fatalf("execute close: %v", err)
+	}
+	if client.created.Shares != 4 {
+		t.Fatalf("expected the close sized at the 4 reservable shares, got %v", client.created.Shares)
+	}
+}
+
+// A refusal that names the exchange's own holding resizes the lane to it, so
+// the retry plans from the wallet's truth rather than the local fill ledger.
+func TestExecuteCloseAdoptsTheExchangeReportedPosition(t *testing.T) {
+	previous := settlementRetryInterval
+	settlementRetryInterval = time.Millisecond
+	t.Cleanup(func() { settlementRetryInterval = previous })
+
+	storer := &fakeStore{
+		inserted: true,
+		positions: []store.PositionRecord{{
+			ConditionID: "condition", TokenID: "token", UniqueTag: "lane-a", Outcome: "Up",
+			PositionSize: "10", ActualShares: "10", AvailableSize: "10", State: "open",
+		}},
+	}
+	shortBalance := &clobclient.APIError{StatusCode: 400, Method: "POST", Path: "/order",
+		Body: []byte(`{"error":"not enough balance / allowance: the balance is not enough -> balance: 4000000, order amount: 10000000"}`)}
+	client := &fakeCLOB{
+		submitErrs: []error{shortBalance},
+		response:   &clobclient.OrderResponse{Success: true, OrderID: "order-new"},
+	}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&recordingPublisher{})
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err != nil {
+		t.Fatalf("execute close: %v", err)
+	}
+	if len(storer.reconciled) != 1 || storer.reconciled[0].shares != "4" {
+		t.Fatalf("expected the lane clamped to the reported 4 shares, got %+v", storer.reconciled)
+	}
+	if client.created.Shares != 4 {
+		t.Fatalf("expected the retry sized at the exchange's 4 shares, got %v", client.created.Shares)
+	}
+}
+
+// A reported balance of zero is the unsettled case, not a smaller holding: the
+// fill is booked but the tokens have not reached the wallet. Clamping there
+// would read as "nothing left to exit" and cancel the settlement retry.
+func TestExecuteCloseDoesNotAdoptAZeroReportedBalance(t *testing.T) {
+	previous := settlementRetryInterval
+	settlementRetryInterval = time.Millisecond
+	t.Cleanup(func() { settlementRetryInterval = previous })
+
+	storer := &fakeStore{inserted: true, positions: lanePosition()}
+	client := &fakeCLOB{
+		submitErrs: []error{unsettledBalanceError()},
+		response:   &clobclient.OrderResponse{Success: true, OrderID: "order-new"},
+	}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&recordingPublisher{})
+	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err != nil {
+		t.Fatalf("execute close: %v", err)
+	}
+	if len(storer.reconciled) != 0 {
+		t.Fatalf("expected no clamp from a zero balance, got %+v", storer.reconciled)
+	}
+	if client.created.Shares != 2 {
+		t.Fatalf("expected the retry to keep the full position, got %v", client.created.Shares)
 	}
 }

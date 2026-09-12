@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -20,6 +21,7 @@ type CLOB interface {
 	SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error)
 	CancelOrder(context.Context, string) error
 	TickSize(context.Context, string) (float64, error)
+	MinOrderSize(context.Context, string) (float64, error)
 }
 
 type QuoteProvider interface {
@@ -32,6 +34,7 @@ type QuoteProvider interface {
 type repository interface {
 	store.ExecutionStore
 	store.PositionStore
+	store.PositionReconciler
 }
 
 type Executor struct {
@@ -41,6 +44,18 @@ type Executor struct {
 	now     func() time.Time
 	onError func(error)
 	publish protocol.ExecutionEventPublisher
+
+	// laneRevisions holds each lane's position revision as of the previous
+	// maintenance pass, so the pass can tell a position that is still filling
+	// from one that has come to rest. It is a cache of observations, not state
+	// the trading path depends on: losing it across a restart costs one extra
+	// tick before a close is resized.
+	laneMu        sync.Mutex
+	laneRevisions map[laneKey]int64
+	// residualSweeps is when each lane's sub-minimum residual was last offered
+	// to the book, so a size the exchange keeps refusing is not retried on
+	// every tick.
+	residualSweeps map[laneKey]time.Time
 }
 
 func New(repository repository, clob CLOB, now func() time.Time) (*Executor, error) {
@@ -70,6 +85,9 @@ func (e *Executor) Run(ctx context.Context) error {
 				e.onError(err)
 			}
 			if err := e.cancelExpired(ctx); err != nil && e.onError != nil {
+				e.onError(err)
+			}
+			if err := e.maintainCloses(ctx); err != nil && e.onError != nil {
 				e.onError(err)
 			}
 		}

@@ -72,6 +72,10 @@ Close results are emitted only at terminal resolution of the strategy close chil
 
 A `LIMIT_CLOSE` emits exactly one close result: when its strategy sell child resolves, or `FAILED` with the rejection's `reason_code` when placement is refused (for example the exchange rejects the sell or the close cannot be planned). Two cases emit nothing: a malformed request (wrong schema version, missing fields, invalid limit price or time in force) is dropped, and a close on a lane with no shares left is treated as already complete. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`.
 
+A `LIMIT_CLOSE` is sized for the whole lane and leaves a resting open buy working, so an entry that is still filling keeps growing behind it. executiond tracks that: once the position stops moving it cancels the resting close and re-places it for the current size. The replacement covers the whole position rather than the increment, because an increment on its own is usually below the market's minimum order size and would be refused. A `FORCE_CLOSE` still cancels every order on the lane, including the open buy — it exits before settlement and needs the position to stop moving.
+
+If the exchange refuses a sell over its size, executiond adopts the holding the rejection reports (`balance: N`, in 1e6 units) as the lane's size before retrying, so the retry is planned from the wallet's own view rather than the local fill ledger. A reported balance of zero is treated as the unsettled case below, not as an empty position.
+
 A sell submitted moments after the buy that produced the position can be rejected with `not enough balance / allowance` because the bought tokens have not settled on chain yet. For both close modes, executiond retries that rejection with a fresh child order about once a second for up to 30 seconds (or `policy.cancel_replace_timeout_ms`, if longer) before giving up. Closes are dispatched per lane (`strategy` + `unique_tag` + `condition_id` + `asset_id`): closes on different lanes run concurrently, so one lane's retry does not delay another's, while closes on the same lane still run in order and only the most recent pending close on a lane is kept.
 
 `average_price` is the share-weighted average price of the child order's fills. It is populated when executiond knows the price at the time it publishes the result — from the submission response for an order that matched on arrival, otherwise from recorded fills. It is omitted when no fill is recorded yet or nothing filled. The authoritative entry price stays on `position.features.*`.
@@ -80,7 +84,9 @@ Order events use the same numeric representation for `matched_shares` when the f
 
 ## Reason codes
 
-`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
+
+`BELOW_MIN_ORDER_SIZE` means the position is smaller than the market's minimum order size, so no order can be placed for it. It is not a permanent failure: executiond keeps the shares and retries as the lane grows, and takes the residual with a FAK if the bid reaches the close's limit price before settlement.
 
 ## Examples
 
