@@ -14,10 +14,19 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
+// DefaultPriceWait bounds how long a terminal result waits for the fills that
+// price it before it is published without an authoritative average_price.
+const DefaultPriceWait = 3500 * time.Millisecond
+
+// priceWaitPoll is how often the wait re-reads the order's fill-weighted price.
+const priceWaitPoll = 100 * time.Millisecond
+
 type OrderConsumer struct {
-	store   store.AccountOrderStore
-	now     func() time.Time
-	publish protocol.ExecutionEventPublisher
+	store     store.AccountOrderStore
+	now       func() time.Time
+	publish   protocol.ExecutionEventPublisher
+	priceWait time.Duration
+	onError   func(error)
 }
 
 func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) (*OrderConsumer, error) {
@@ -27,11 +36,23 @@ func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) 
 	if now == nil {
 		now = time.Now
 	}
-	return &OrderConsumer{store: repository, now: now}, nil
+	return &OrderConsumer{store: repository, now: now, priceWait: DefaultPriceWait}, nil
 }
 
 func (c *OrderConsumer) SetEventPublisher(publisher protocol.ExecutionEventPublisher) {
 	c.publish = publisher
+}
+
+// SetErrorHandler receives failures from a result published after the stream
+// callback has already returned.
+func (c *OrderConsumer) SetErrorHandler(handler func(error)) {
+	c.onError = handler
+}
+
+// SetPriceWait bounds how long a terminal result waits for its fills to land
+// before publishing without average_price. Zero publishes immediately.
+func (c *OrderConsumer) SetPriceWait(wait time.Duration) {
+	c.priceWait = wait
 }
 
 func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEvent) error {
@@ -61,6 +82,14 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	if err != nil {
 		return fmt.Errorf("persist account order observation: %w", err)
 	}
+	// The exchange repeats an order message: the same status with the same
+	// size_matched arrives several times within milliseconds. Such an
+	// observation moves nothing (the store returns the record unchanged, at
+	// the same revision), and an order already terminal has reported itself,
+	// so republishing would emit a second terminal result for one lane.
+	if updated.Revision == order.Revision && statemachine.IsTerminal(order.State) {
+		return nil
+	}
 	// The order event and the terminal result both carry the lane tag from the
 	// parent intent, so load it first. A missing intent is abnormal for an
 	// order we track; publish the event with no tag and skip the result.
@@ -76,10 +105,55 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	if intent.IntentID == "" {
 		return nil
 	}
-	if err := PublishTerminalResult(c.publish, intent, updated, reason, AveragePrice(ctx, c.store, updated), c.now()); err != nil {
-		return err
+	return c.publishPricedResult(ctx, intent, updated, reason)
+}
+
+// publishPricedResult publishes the terminal result, waiting briefly for the
+// fills that price it when they have not landed yet. The order event that ends
+// an order routinely beats its own trade messages down the user stream, so a
+// result published the instant the order goes terminal can carry filled shares
+// with no average_price, which books a fill at a cost basis of zero.
+//
+// The wait runs off the stream goroutine. That goroutine is the one that
+// applies the trade messages, so blocking it here would keep the very fills
+// being waited on from ever arriving.
+func (c *OrderConsumer) publishPricedResult(ctx context.Context, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason string) error {
+	price := AveragePrice(ctx, c.store, order)
+	if price == "" && c.priceWait > 0 && statemachine.IsTerminal(order.State) && decimal.Positive(order.MatchedShares) {
+		go c.awaitPriceAndPublish(context.WithoutCancel(ctx), intent, order, reason)
+		return nil
 	}
-	return nil
+	if price == "" {
+		price = PricedResult(ctx, c.store, order)
+	}
+	return PublishTerminalResult(c.publish, intent, order, reason, price, c.now())
+}
+
+func (c *OrderConsumer) awaitPriceAndPublish(ctx context.Context, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason string) {
+	deadline, cancel := context.WithTimeout(ctx, c.priceWait)
+	defer cancel()
+	ticker := time.NewTicker(priceWaitPoll)
+	defer ticker.Stop()
+	price := ""
+	for price == "" {
+		select {
+		case <-deadline.Done():
+			c.publishResult(intent, order, reason, PricedResult(ctx, c.store, order))
+			return
+		case <-ticker.C:
+			price = AveragePrice(deadline, c.store, order)
+		}
+	}
+	c.publishResult(intent, order, reason, price)
+}
+
+// publishResult reports a publication failure through the error hook: the
+// deferred publication runs off the stream goroutine, so there is no caller
+// left to return the error to.
+func (c *OrderConsumer) publishResult(intent store.OrderIntentRecord, order store.SignedOrderRecord, reason, price string) {
+	if err := PublishTerminalResult(c.publish, intent, order, reason, price, c.now()); err != nil && c.onError != nil {
+		c.onError(err)
+	}
 }
 
 // AveragePrice looks up the recorded fill price of a terminal order for its
@@ -100,6 +174,21 @@ func AveragePrice(ctx context.Context, prices store.OrderPriceStore, order store
 		return price
 	}
 	if order.PostOnly && decimal.Positive(order.MatchedShares) && decimal.Positive(order.Price) && restingOrderType(order.OrderType) {
+		return order.Price
+	}
+	return ""
+}
+
+// PricedResult is the price a terminal result reports for an order that
+// filled. It prefers the order's recorded fills and falls back to the price
+// the order was signed at, which bounds the fill on the side it was placed:
+// a result that filled shares but reports no price books that fill at a cost
+// basis of zero, which is a worse answer than the bound.
+func PricedResult(ctx context.Context, prices store.OrderPriceStore, order store.SignedOrderRecord) string {
+	if price := AveragePrice(ctx, prices, order); price != "" {
+		return price
+	}
+	if decimal.Positive(order.MatchedShares) && decimal.Positive(order.Price) {
 		return order.Price
 	}
 	return ""

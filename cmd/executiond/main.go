@@ -34,6 +34,7 @@ type config struct {
 	ReconcileInterval     time.Duration
 	MissingOrderGrace     time.Duration
 	MaxTradeAge           time.Duration
+	ResultPriceWait       time.Duration
 	ConnectTimeout        time.Duration
 	ShutdownGracePeriod   time.Duration
 }
@@ -129,6 +130,8 @@ func run() error {
 	positions.SetErrorHandler(func(err error) { log.Printf("position feature publish error: %v", err) })
 	accountStream.SetErrorHandler(func(err error) { log.Printf("account stream error: %v", err) })
 	fills.SetErrorHandler(func(err error) { log.Printf("account fill error: %v", err) })
+	orders.SetErrorHandler(func(err error) { log.Printf("account order result error: %v", err) })
+	orders.SetPriceWait(cfg.ResultPriceWait)
 	execution.SetErrorHandler(func(err error) { log.Printf("execution lifecycle error: %v", err) })
 	repair.SetErrorHandler(func(err error) { log.Printf("reconciliation error: %v", err) })
 	execution.SetEventPublisher(bus)
@@ -236,13 +239,14 @@ func configFromEnv() (config, error) {
 		ReconcileInterval:     durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
 		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
 		MaxTradeAge:           durationEnv("EXECUTION_RECONCILE_MAX_TRADE_AGE", 24*time.Hour),
+		ResultPriceWait:       durationEnv("EXECUTION_RESULT_PRICE_WAIT", accountfeed.DefaultPriceWait),
 		ConnectTimeout:        durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		ShutdownGracePeriod:   durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
 	}
-	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
+	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
 	return cfg, nil

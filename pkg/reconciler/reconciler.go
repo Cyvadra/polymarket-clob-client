@@ -336,7 +336,7 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	if intent.IntentID == "" {
 		return nil
 	}
-	if err := accountfeed.PublishTerminalResult(r.publish, intent, updated, reason, accountfeed.AveragePrice(ctx, r.store, updated), r.now()); err != nil {
+	if err := accountfeed.PublishTerminalResult(r.publish, intent, updated, reason, accountfeed.PricedResult(ctx, r.store, updated), r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation open result: %w", err)
 	}
 	return nil

@@ -78,7 +78,11 @@ If the exchange refuses a sell over its size, executiond adopts the holding the 
 
 A sell submitted moments after the buy that produced the position can be rejected with `not enough balance / allowance` because the bought tokens have not settled on chain yet. For both close modes, executiond retries that rejection with a fresh child order about once a second for up to 30 seconds (or `policy.cancel_replace_timeout_ms`, if longer) before giving up. Closes are dispatched per lane (`strategy` + `unique_tag` + `condition_id` + `asset_id`): closes on different lanes run concurrently, so one lane's retry does not delay another's, while closes on the same lane still run in order and only the most recent pending close on a lane is kept.
 
-`average_price` is the share-weighted average price of the child order's fills. It is populated when executiond knows the price at the time it publishes the result — from the submission response for an order that matched on arrival, otherwise from recorded fills. It is omitted when no fill is recorded yet or nothing filled. The authoritative entry price stays on `position.features.*`.
+`average_price` is the share-weighted average price of the child order's fills, and it is the authoritative realized entry price for a result: **whenever `filled_shares > 0`, `average_price` is present**. It comes from the submission response for an order that matched on arrival, and otherwise from the order's recorded fills.
+
+The order message that ends an order can arrive ahead of the trade messages that price it, so a result whose fills have not landed yet waits for them, up to `EXECUTION_RESULT_PRICE_WAIT` (3500ms by default), before publishing. If they still have not landed, the result carries the order's own limit price, which bounds the fill on the side it was placed. A result with `filled_shares: 0` has no price and omits the field. `position.features.*` remains the authority for a lane's aggregate entry price across several orders.
+
+A terminal result is published once per intent child. The exchange repeats an order message — the same status and the same `size_matched` several times within milliseconds — and those repeats move nothing, so they emit no further result.
 
 Order events use the same numeric representation for `matched_shares` when the field is present.
 
