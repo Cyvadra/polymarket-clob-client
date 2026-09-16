@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -73,6 +74,55 @@ func TestConsumeRejectsInvalidDecimalBeforeStore(t *testing.T) {
 	}
 	if repository.record.FillID != "" {
 		t.Fatalf("store received invalid fill: %+v", repository.record)
+	}
+}
+
+type fakeFeeSchedules struct {
+	schedule clobclient.FeeSchedule
+	err      error
+}
+
+func (f fakeFeeSchedules) FeeSchedule(context.Context, string) (clobclient.FeeSchedule, error) {
+	return f.schedule, f.err
+}
+
+func TestConsumeRecordsTheFeeEachSidePaid(t *testing.T) {
+	crypto := fakeFeeSchedules{schedule: clobclient.FeeSchedule{Rate: "0.07", Exponent: "1", TakerOnly: true}}
+	cases := []struct {
+		side, reported, want string
+		fees                 FeeSchedules
+		reports              int
+	}{
+		{side: "TAKER", want: "0.04263", fees: crypto},
+		{side: "MAKER", want: "0", fees: crypto},
+		// The exchange's own figure wins when it sends one.
+		{side: "TAKER", reported: "0.5", want: "0.5", fees: crypto},
+		// Without a schedule the column stays as it always was.
+		{side: "TAKER", want: ""},
+		// A failed lookup keeps the fill and reports the gap.
+		{side: "TAKER", want: "", fees: fakeFeeSchedules{err: fmt.Errorf("proxy down")}, reports: 1},
+		{side: "", want: "", fees: crypto, reports: 1},
+	}
+	for i, c := range cases {
+		repository := &fakeFillStore{}
+		consumer, err := NewFillConsumer(repository, time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.fees != nil {
+			consumer.SetFeeSchedules(c.fees)
+		}
+		reports := 0
+		consumer.SetErrorHandler(func(error) { reports++ })
+		fill := testFill()
+		fill.TraderSide, fill.Fee = c.side, c.reported
+		inserted, err := consumer.Consume(context.Background(), fill)
+		if err != nil || !inserted {
+			t.Fatalf("case %d: inserted=%v err=%v", i, inserted, err)
+		}
+		if repository.record.Fee != c.want || reports != c.reports {
+			t.Fatalf("case %d: fee=%q reports=%d, want %q and %d", i, repository.record.Fee, reports, c.want, c.reports)
+		}
 	}
 }
 

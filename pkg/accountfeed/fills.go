@@ -4,8 +4,11 @@ package accountfeed
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
@@ -18,10 +21,17 @@ import (
 // without telling an operator anything the first few lines did not.
 const unknownOrderReportLimit = 10
 
+// FeeSchedules looks up a market's fee schedule; *clobclient.Client
+// implements it.
+type FeeSchedules interface {
+	FeeSchedule(ctx context.Context, conditionID string) (clobclient.FeeSchedule, error)
+}
+
 type FillConsumer struct {
 	store   store.AccountFillStore
 	now     func() time.Time
 	onError func(error)
+	fees    FeeSchedules
 
 	mu              sync.Mutex
 	unknownOrders   map[string]struct{}
@@ -42,6 +52,13 @@ func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*
 // from, such as a fill whose exchange order is unknown to the store.
 func (c *FillConsumer) SetErrorHandler(handler func(error)) {
 	c.onError = handler
+}
+
+// SetFeeSchedules makes the consumer record the fee each fill paid. The
+// exchange reports fee_rate_bps 0 and no fee on crypto trades that are in fact
+// charged, so without a schedule every fill is stored fee-free.
+func (c *FillConsumer) SetFeeSchedules(fees FeeSchedules) {
+	c.fees = fees
 }
 
 // Consume stores a fill exactly once. The caller may safely retry a delivery
@@ -74,6 +91,9 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	if receivedAt.IsZero() {
 		receivedAt = c.now().UTC()
 	}
+	if fill.Fee == "" {
+		fill.Fee = c.fee(ctx, fill)
+	}
 	return c.store.ApplyFill(ctx, store.FillRecord{
 		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: order.IntentID, UniqueTag: intent.UniqueTag,
 		MarketID: fill.MarketID, ConditionID: fill.ConditionID, TokenID: fill.TokenID,
@@ -81,6 +101,37 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 		Fee: fill.Fee, FeeRateBps: fill.FeeRateBps, TradeStatus: fill.TradeStatus,
 		TraderSide: fill.TraderSide, ExchangeTime: fill.ExchangeTime, ReceivedAt: receivedAt,
 	})
+}
+
+// fee derives what fill paid from its market's schedule. A fill is stored
+// exactly once, so a failed lookup costs the fee column and nothing else: it is
+// reported and the fill is kept, because the position must not wait on it.
+func (c *FillConsumer) fee(ctx context.Context, fill AccountFill) string {
+	if c.fees == nil {
+		return ""
+	}
+	side := strings.ToUpper(strings.TrimSpace(fill.TraderSide))
+	if side != "TAKER" && side != "MAKER" {
+		c.report(fmt.Errorf("fill %s: unknown trader side %q, fee not recorded", fill.FillID, fill.TraderSide))
+		return ""
+	}
+	schedule, err := c.fees.FeeSchedule(ctx, fill.ConditionID)
+	if err != nil {
+		c.report(fmt.Errorf("fill %s: load fee schedule for %s: %w", fill.FillID, fill.ConditionID, err))
+		return ""
+	}
+	fee, err := schedule.Fee(fill.Shares, fill.Price, side == "TAKER")
+	if err != nil {
+		c.report(fmt.Errorf("fill %s: compute fee: %w", fill.FillID, err))
+		return ""
+	}
+	return fee
+}
+
+func (c *FillConsumer) report(err error) {
+	if c.onError != nil {
+		c.onError(err)
+	}
 }
 
 // UnknownOrderCount reports how many distinct exchange orders have produced

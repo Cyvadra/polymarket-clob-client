@@ -22,6 +22,29 @@ func TestCacheKeepsLatestMarketQuote(t *testing.T) {
 	}
 }
 
+func TestCacheAnnouncesEachMarketOnce(t *testing.T) {
+	cache := New()
+	var announced []string
+	cache.OnNewMarket(func(s Snapshot) { announced = append(announced, s.ConditionID+"/"+s.Up.AssetID) })
+	for _, at := range []int64{10, 20, 5} {
+		if err := cache.Put(testQuotes(time.Unix(at, 0))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := testQuotes(time.Unix(30, 0))
+	other.ConditionID = "condition-2"
+	if err := cache.Put(other); err != nil {
+		t.Fatal(err)
+	}
+	invalid := testQuotes(time.Unix(40, 0))
+	invalid.ConditionID = "condition-3"
+	invalid.Up.Mid = 0.9
+	_ = cache.Put(invalid)
+	if len(announced) != 2 || announced[0] != "condition-1/up-token" || announced[1] != "condition-2/up-token" {
+		t.Fatalf("announced = %v", announced)
+	}
+}
+
 func TestCacheRejectsInvalidQuotes(t *testing.T) {
 	quotes := testQuotes(time.Unix(20, 0))
 	quotes.Up.Mid = 0.9

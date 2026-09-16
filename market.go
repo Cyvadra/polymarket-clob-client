@@ -2,6 +2,7 @@ package clobclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -19,8 +20,10 @@ func (c *Client) InvalidateMarketMetadata(tokenID string) {
 	defer c.metadata.mu.Unlock()
 	if tokenID == "" {
 		c.metadata.tickSize = map[string]float64{}
+		c.metadata.minSize = map[string]float64{}
 		c.metadata.negRisk = map[string]bool{}
 		c.metadata.feeRate = map[string]int{}
+		c.metadata.feeSchedule = map[string]FeeSchedule{}
 		return
 	}
 	delete(c.metadata.tickSize, tokenID)
@@ -111,6 +114,27 @@ func (c *Client) MinOrderSize(ctx context.Context, tokenID string) (float64, err
 	c.metadata.minSize[tokenID] = size
 	c.metadata.mu.Unlock()
 	return size, nil
+}
+
+// WarmMarketMetadata loads everything signing and planning an order on
+// tokenID needs from the network — tick size, minimum order size and the
+// neg-risk flag — concurrently, so the first order on a market does not pay
+// for three sequential round trips. Through the production proxy each costs
+// 0.26-1.2s, which on 2026-09-15..16 put a median 1.17s between a strategy
+// signal and its signed order.
+func (c *Client) WarmMarketMetadata(ctx context.Context, tokenID string) error {
+	if tokenID == "" {
+		return fmt.Errorf("token ID is required")
+	}
+	errs := make(chan error, 3)
+	go func() { _, err := c.TickSize(ctx, tokenID); errs <- err }()
+	go func() { _, err := c.MinOrderSize(ctx, tokenID); errs <- err }()
+	go func() { _, err := c.NegRisk(ctx, tokenID); errs <- err }()
+	var joined error
+	for range 3 {
+		joined = errors.Join(joined, <-errs)
+	}
+	return joined
 }
 
 func (c *Client) NegRisk(ctx context.Context, tokenID string) (bool, error) {

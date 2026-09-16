@@ -11,6 +11,16 @@ import (
 type Cache struct {
 	mu     sync.RWMutex
 	quotes map[string]Snapshot
+	onNew  func(Snapshot)
+}
+
+// OnNewMarket registers fn to run once for each condition, on the first valid
+// snapshot the cache stores for it. It runs on the caller of Put, outside the
+// cache lock, so fn must return quickly.
+func (c *Cache) OnNewMarket(fn func(Snapshot)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onNew = fn
 }
 
 func New() *Cache {
@@ -28,11 +38,17 @@ func (c *Cache) Put(quotes Snapshot) error {
 	quotes.Up.Timestamp = quotes.Up.Timestamp.UTC()
 	quotes.Down.Timestamp = quotes.Down.Timestamp.UTC()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if existing, ok := c.quotes[quotes.ConditionID]; ok && existing.At.After(quotes.At) {
+	existing, seen := c.quotes[quotes.ConditionID]
+	if seen && existing.At.After(quotes.At) {
+		c.mu.Unlock()
 		return nil
 	}
 	c.quotes[quotes.ConditionID] = quotes
+	onNew := c.onNew
+	c.mu.Unlock()
+	if !seen && onNew != nil {
+		onNew(quotes)
+	}
 	return nil
 }
 

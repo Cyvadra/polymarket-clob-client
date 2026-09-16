@@ -105,10 +105,12 @@ func run() error {
 	}
 	quotes := marketquotes.New()
 	execution.SetQuoteProvider(quotes)
+	quotes.OnNewMarket(metadataWarmer(ctx, clob))
 	fills, err := accountfeed.NewFillConsumer(store, time.Now)
 	if err != nil {
 		return err
 	}
+	fills.SetFeeSchedules(clob)
 	orders, err := accountfeed.NewOrderConsumer(store, time.Now)
 	if err != nil {
 		return err
@@ -169,6 +171,36 @@ func run() error {
 		return errors.Join(runErr, closeErr)
 	}
 	return closeErr
+}
+
+// metadataWarmer loads a market's order metadata and fee schedule as soon as
+// its first quote arrives, so the first order on it signs without a network
+// round trip and its fills are priced without one. PMM
+// quotes a market from registration and signals it a minute or more later.
+// At startup every live market is announced at once, so warming is bounded.
+func metadataWarmer(ctx context.Context, clob *clobclient.Client) func(marketquotes.Snapshot) {
+	const concurrent, timeout = 4, 15 * time.Second
+	slots := make(chan struct{}, concurrent)
+	return func(snapshot marketquotes.Snapshot) {
+		go func() {
+			select {
+			case slots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-slots }()
+			warmCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			if _, err := clob.FeeSchedule(warmCtx, snapshot.ConditionID); err != nil && ctx.Err() == nil {
+				log.Printf("warm fee schedule %s: %v", snapshot.ConditionID, err)
+			}
+			for _, tokenID := range []string{snapshot.Up.AssetID, snapshot.Down.AssetID} {
+				if err := clob.WarmMarketMetadata(warmCtx, tokenID); err != nil && ctx.Err() == nil {
+					log.Printf("warm market metadata %s/%s: %v", snapshot.ConditionID, tokenID, err)
+				}
+			}
+		}()
+	}
 }
 
 func initModules(ctx context.Context, modules []namedModule) error {
