@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"os"
 	"testing"
 	"time"
@@ -35,11 +36,59 @@ func testStore(t *testing.T) *Store {
 	return s
 }
 
-func seedIntent(t *testing.T, s *Store, intentID string) {
+// testLane is one test's private lane. The database is shared with earlier
+// runs and with other tests, so every row a test writes is keyed by a tag
+// unique to that run, read back by that tag, and deleted when the test ends.
+type testLane struct {
+	tag, conditionID, tokenID string
+}
+
+func newTestLane(t *testing.T, s *Store) testLane {
+	t.Helper()
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	lane := testLane{tag: "lane-" + suffix, conditionID: "condition-" + suffix, tokenID: "token-" + suffix}
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, statement := range []string{
+			`DELETE FROM reservations WHERE unique_tag = $1`,
+			`DELETE FROM fills WHERE unique_tag = $1`,
+			`DELETE FROM positions WHERE unique_tag = $1`,
+			`DELETE FROM order_events WHERE intent_id IN (SELECT intent_id FROM order_intents WHERE unique_tag = $1)`,
+			`DELETE FROM orders WHERE intent_id IN (SELECT intent_id FROM order_intents WHERE unique_tag = $1)`,
+			`DELETE FROM order_intents WHERE unique_tag = $1`,
+		} {
+			if _, err := s.pool.Exec(ctx, statement, lane.tag); err != nil {
+				t.Errorf("clean up lane %s: %v", lane.tag, err)
+			}
+		}
+	})
+	return lane
+}
+
+// id namespaces an intent, fill, or reservation ID to the lane.
+func (l testLane) id(name string) string { return l.tag + "-" + name }
+
+// position returns the lane's own row out of everything PositionFeatures reads.
+func (l testLane) position(t *testing.T, s *Store) store.PositionRecord {
+	t.Helper()
+	positions, err := s.PositionFeatures(context.Background())
+	if err != nil {
+		t.Fatalf("positions: %v", err)
+	}
+	for _, position := range positions {
+		if position.UniqueTag == l.tag {
+			return position
+		}
+	}
+	t.Fatalf("lane %s has no position row", l.tag)
+	return store.PositionRecord{}
+}
+
+func seedIntent(t *testing.T, s *Store, lane testLane, intentID string) {
 	t.Helper()
 	_, err := s.InsertIntent(context.Background(), store.OrderIntentRecord{
-		IntentID: intentID, UniqueTag: "lane-a", Strategy: "test", Kind: store.IntentOpen,
-		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
+		IntentID: intentID, UniqueTag: lane.tag, Strategy: "test", Kind: store.IntentOpen,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up", Side: store.SideBuy,
 		TargetUSD: "1", LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
 	})
 	if err != nil {
@@ -61,11 +110,13 @@ func seedSignedOrder(t *testing.T, s *Store, intentID string) {
 
 func TestTransitionOrderRejectsStaleRevision(t *testing.T) {
 	s := testStore(t)
-	seedIntent(t, s, "intent-cas")
-	seedSignedOrder(t, s, "intent-cas")
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
 
 	first, err := s.TransitionOrder(context.Background(), store.SignedOrderRecord{
-		IntentID: "intent-cas", ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0",
+		IntentID: intentID, ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0",
 	}, statemachine.EventSubmitStarted, "0", "", "submit")
 	if err != nil {
 		t.Fatalf("first transition: %v", err)
@@ -75,7 +126,7 @@ func TestTransitionOrderRejectsStaleRevision(t *testing.T) {
 	}
 
 	_, err = s.TransitionOrder(context.Background(), store.SignedOrderRecord{
-		IntentID: "intent-cas", ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0",
+		IntentID: intentID, ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0",
 	}, statemachine.EventSubmitStarted, "0", "", "submit again")
 	if err != store.ErrConflict {
 		t.Fatalf("expected ErrConflict on stale revision, got %v", err)
@@ -84,16 +135,18 @@ func TestTransitionOrderRejectsStaleRevision(t *testing.T) {
 
 func TestIntentStatusMirrorsOrderLifecycle(t *testing.T) {
 	s := testStore(t)
-	seedIntent(t, s, "intent-status")
-	seedSignedOrder(t, s, "intent-status")
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
 
 	_, err := s.TransitionOrder(context.Background(), store.SignedOrderRecord{
-		IntentID: "intent-status", ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0",
+		IntentID: intentID, ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0",
 	}, statemachine.EventSubmitStarted, "0", "", "submit")
 	if err != nil {
 		t.Fatalf("transition: %v", err)
 	}
-	intent, err := s.Intent(context.Background(), "intent-status")
+	intent, err := s.Intent(context.Background(), intentID)
 	if err != nil {
 		t.Fatalf("load intent: %v", err)
 	}
@@ -104,40 +157,34 @@ func TestIntentStatusMirrorsOrderLifecycle(t *testing.T) {
 
 func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 	s := testStore(t)
-	seedIntent(t, s, "intent-fill")
-	seedSignedOrder(t, s, "intent-fill")
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
 
 	ctx := context.Background()
 	inserted, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-1", ExchangeOrderID: "intent-fill-exchange", IntentID: "intent-fill", UniqueTag: "lane-a",
-		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
+		FillID: lane.id("fill-1"), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED", TraderSide: "TAKER",
 	})
 	if err != nil || !inserted {
 		t.Fatalf("apply fill: inserted=%v err=%v", inserted, err)
 	}
-	positions, err := s.PositionFeatures(ctx)
-	if err != nil {
-		t.Fatalf("positions after buy: %v", err)
-	}
-	if len(positions) != 1 || positions[0].PositionSize != "10.000000000000000000" {
-		t.Fatalf("expected the position to equal the reported fill size, got %+v", positions)
+	if position := lane.position(t, s); position.PositionSize != "10.000000000000000000" {
+		t.Fatalf("expected the position to equal the reported fill size, got %+v", position)
 	}
 
 	reversed, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-1", ExchangeOrderID: "intent-fill-exchange", IntentID: "intent-fill", UniqueTag: "lane-a",
-		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
+		FillID: lane.id("fill-1"), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "FAILED", TraderSide: "TAKER",
 	})
 	if err != nil || !reversed {
 		t.Fatalf("reverse fill: reversed=%v err=%v", reversed, err)
 	}
-	positions, err = s.PositionFeatures(ctx)
-	if err != nil {
-		t.Fatalf("positions after reversal: %v", err)
-	}
-	if len(positions) != 1 || positions[0].PositionSize != "0.000000000000000000" || positions[0].AvailableSize != "0.000000000000000000" {
-		t.Fatalf("expected fully reversed position, got %+v", positions)
+	if position := lane.position(t, s); position.PositionSize != "0.000000000000000000" || position.AvailableSize != "0.000000000000000000" {
+		t.Fatalf("expected fully reversed position, got %+v", position)
 	}
 }
 
@@ -150,18 +197,16 @@ func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 func TestOpenLotsCountsBuyIntentsSinceEntry(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	suffix := fmt.Sprint(time.Now().UnixNano())
-	lane := "lane-lots-" + suffix
-	const conditionID, tokenID = "condition-lots", "token-lots"
-	t.Cleanup(func() {
-		_, _ = s.pool.Exec(context.Background(), `DELETE FROM fills WHERE unique_tag = $1`, lane)
-		_, _ = s.pool.Exec(context.Background(), `DELETE FROM positions WHERE unique_tag = $1`, lane)
-	})
-	fill := func(id, intentID, side, shares, status string) {
+	lane := newTestLane(t, s)
+	fill := func(id, intent, side, shares, status string) {
 		t.Helper()
+		intentID := ""
+		if intent != "" {
+			intentID = lane.id(intent)
+		}
 		if _, err := s.ApplyFill(ctx, store.FillRecord{
-			FillID: lane + "-" + id, IntentID: intentID, UniqueTag: lane,
-			MarketID: "market", ConditionID: conditionID, TokenID: tokenID, Outcome: "Up",
+			FillID: lane.id(id), IntentID: intentID, UniqueTag: lane.tag,
+			MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
 			Side: store.Side(side), Shares: shares, Price: "0.5", TradeStatus: status, TraderSide: "TAKER",
 		}); err != nil {
 			t.Fatalf("apply fill %s: %v", id, err)
@@ -169,33 +214,23 @@ func TestOpenLotsCountsBuyIntentsSinceEntry(t *testing.T) {
 	}
 	lots := func() int {
 		t.Helper()
-		positions, err := s.PositionFeatures(ctx)
-		if err != nil {
-			t.Fatalf("positions: %v", err)
-		}
-		for _, position := range positions {
-			if position.UniqueTag == lane {
-				return position.OpenLots
-			}
-		}
-		t.Fatalf("lane %s has no position row", lane)
-		return 0
+		return lane.position(t, s).OpenLots
 	}
 
 	// One open request filled in two parts is one lot.
-	fill("a1", lane+"-intent-a", "BUY", "4", "CONFIRMED")
-	fill("a2", lane+"-intent-a", "BUY", "6", "CONFIRMED")
+	fill("a1", "intent-a", "BUY", "4", "CONFIRMED")
+	fill("a2", "intent-a", "BUY", "6", "CONFIRMED")
 	if got := lots(); got != 1 {
 		t.Fatalf("open lots after one partially filled open = %d, want 1", got)
 	}
 	// A second open request adds a lot.
-	fill("b1", lane+"-intent-b", "BUY", "5", "CONFIRMED")
+	fill("b1", "intent-b", "BUY", "5", "CONFIRMED")
 	if got := lots(); got != 2 {
 		t.Fatalf("open lots after a second open = %d, want 2", got)
 	}
 	// A fill the exchange later failed is reversed out of the position, so its
 	// lot goes with it.
-	fill("b1", lane+"-intent-b", "BUY", "5", "FAILED")
+	fill("b1", "intent-b", "BUY", "5", "FAILED")
 	if got := lots(); got != 1 {
 		t.Fatalf("open lots after the second open was reversed = %d, want 1", got)
 	}
@@ -204,7 +239,7 @@ func TestOpenLotsCountsBuyIntentsSinceEntry(t *testing.T) {
 	if got := lots(); got != 0 {
 		t.Fatalf("open lots of an emptied lane = %d, want 0", got)
 	}
-	fill("c1", lane+"-intent-c", "BUY", "3", "CONFIRMED")
+	fill("c1", "intent-c", "BUY", "3", "CONFIRMED")
 	if got := lots(); got != 1 {
 		t.Fatalf("open lots after the lane went flat and bought again = %d, want 1", got)
 	}
@@ -302,7 +337,8 @@ func TestOrderAveragePriceWeightsFillsAndIgnoresFailed(t *testing.T) {
 		t.Fatalf("average price: %v", err)
 	}
 	// (3*0.60 + 1*0.80) / 4 = 0.65; the FAILED fill is excluded.
-	if price != "0.650000000000000000" {
+	// Compared as a number: the scale of the text is the division's, not ours.
+	if got, ok := new(big.Rat).SetString(price); !ok || got.Cmp(big.NewRat(13, 20)) != 0 {
 		t.Fatalf("expected weighted average 0.65, got %q", price)
 	}
 
@@ -317,39 +353,33 @@ func TestOrderAveragePriceWeightsFillsAndIgnoresFailed(t *testing.T) {
 
 func TestReserveReleaseRestoresAvailableShares(t *testing.T) {
 	s := testStore(t)
-	seedIntent(t, s, "intent-reserve")
-	seedSignedOrder(t, s, "intent-reserve")
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
 
 	ctx := context.Background()
 	if _, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-2", ExchangeOrderID: "intent-reserve-exchange", IntentID: "intent-reserve", UniqueTag: "lane-a",
-		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
+		FillID: lane.id("fill-2"), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED",
 	}); err != nil {
 		t.Fatalf("seed position: %v", err)
 	}
 	if err := s.Reserve(ctx, store.ReservationRecord{
-		ReservationID: "reserve-1", IntentID: "intent-reserve", UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token",
+		ReservationID: lane.id("reserve-1"), IntentID: intentID, UniqueTag: lane.tag, ConditionID: lane.conditionID, TokenID: lane.tokenID,
 		Outcome: "Up", Side: store.SideSell, Shares: "3", Notional: "1.5", State: "active",
 	}); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	positions, err := s.PositionFeatures(ctx)
-	if err != nil {
-		t.Fatalf("positions after reserve: %v", err)
+	if position := lane.position(t, s); position.ReservedSize != "3.000000000000000000" {
+		t.Fatalf("expected reserved 3, got %+v", position)
 	}
-	if positions[0].ReservedSize != "3.000000000000000000" {
-		t.Fatalf("expected reserved 3, got %+v", positions[0])
-	}
-	if err := s.Release(ctx, "reserve-1", "test release"); err != nil {
+	if err := s.Release(ctx, lane.id("reserve-1"), "test release"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	positions, err = s.PositionFeatures(ctx)
-	if err != nil {
-		t.Fatalf("positions after release: %v", err)
-	}
-	if positions[0].ReservedSize != "0.000000000000000000" {
-		t.Fatalf("expected reserved 0 after release, got %+v", positions[0])
+	if position := lane.position(t, s); position.ReservedSize != "0.000000000000000000" {
+		t.Fatalf("expected reserved 0 after release, got %+v", position)
 	}
 }
 
@@ -359,10 +389,12 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 	s.maxOpenBuyNotionalUSD = "10"
 	t.Cleanup(func() { s.maxOpenBuyNotionalUSD = "" })
 
-	seedIntent(t, s, "intent-exposure")
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
 	within := store.ReservationRecord{
-		ReservationID: "intent-exposure:1", IntentID: "intent-exposure", ChildSequence: 1, UniqueTag: "lane-a", MarketID: "market",
-		ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy,
+		ReservationID: intentID + ":1", IntentID: intentID, ChildSequence: 1, UniqueTag: lane.tag, MarketID: "market",
+		ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up", Side: store.SideBuy,
 		Shares: "10", Notional: "8", State: "active",
 	}
 	if err := s.Reserve(ctx, within); err != nil {
@@ -371,7 +403,7 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 	t.Cleanup(func() { _ = s.Release(context.Background(), within.ReservationID, "cleanup") })
 
 	beyond := within
-	beyond.ReservationID = "intent-exposure:2"
+	beyond.ReservationID = intentID + ":2"
 	beyond.ChildSequence = 2
 	beyond.Notional = "5"
 	if err := s.Reserve(ctx, beyond); err != store.ErrExposureLimit {
@@ -384,45 +416,39 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 // must arrive as a fill, not as a clamp.
 func TestReconcilePositionSizeClampsDownOnly(t *testing.T) {
 	s := testStore(t)
-	seedIntent(t, s, "intent-clamp")
-	seedSignedOrder(t, s, "intent-clamp")
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
 
 	ctx := context.Background()
 	if _, err := s.ApplyFill(ctx, store.FillRecord{
-		FillID: "fill-clamp", ExchangeOrderID: "intent-clamp-exchange", IntentID: "intent-clamp", UniqueTag: "lane-a",
-		MarketID: "market", ConditionID: "condition", TokenID: "token", Outcome: "Up",
+		FillID: lane.id("fill-clamp"), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
 		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED",
 	}); err != nil {
 		t.Fatalf("seed position: %v", err)
 	}
 	if err := s.Reserve(ctx, store.ReservationRecord{
-		ReservationID: "reserve-clamp", IntentID: "intent-clamp", UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token",
+		ReservationID: lane.id("reserve-clamp"), IntentID: intentID, UniqueTag: lane.tag, ConditionID: lane.conditionID, TokenID: lane.tokenID,
 		Outcome: "Up", Side: store.SideSell, Shares: "3", Notional: "1.5", State: "active",
 	}); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 
 	// A report above the local figure changes nothing.
-	if err := s.ReconcilePositionSize(ctx, "condition", "token", "lane-a", "12"); err != nil {
+	if err := s.ReconcilePositionSize(ctx, lane.conditionID, lane.tokenID, lane.tag, "12"); err != nil {
 		t.Fatalf("reconcile upward: %v", err)
 	}
-	positions, err := s.PositionFeatures(ctx)
-	if err != nil {
-		t.Fatalf("positions after upward reconcile: %v", err)
-	}
-	if positions[0].ActualShares != "10.000000000000000000" {
-		t.Fatalf("expected an upward report to be ignored, got %+v", positions[0])
+	if position := lane.position(t, s); position.ActualShares != "10.000000000000000000" {
+		t.Fatalf("expected an upward report to be ignored, got %+v", position)
 	}
 
 	// A report below it clamps the lane, keeping available + reserved <= total.
-	if err := s.ReconcilePositionSize(ctx, "condition", "token", "lane-a", "4"); err != nil {
+	if err := s.ReconcilePositionSize(ctx, lane.conditionID, lane.tokenID, lane.tag, "4"); err != nil {
 		t.Fatalf("reconcile downward: %v", err)
 	}
-	positions, err = s.PositionFeatures(ctx)
-	if err != nil {
-		t.Fatalf("positions after downward reconcile: %v", err)
-	}
-	got := positions[0]
+	got := lane.position(t, s)
 	if got.ActualShares != "4.000000000000000000" || got.PositionSize != "4.000000000000000000" {
 		t.Fatalf("expected the lane clamped to 4, got %+v", got)
 	}
