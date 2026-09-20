@@ -274,6 +274,7 @@ type PositionFeature struct {
 	EntryTime         *time.Time `json:"entry_time"`
 	SecondsSinceEntry float64    `json:"seconds_since_entry"`
 	PositionSize      float64    `json:"position_size,omitempty"`
+	OpenLots          int        `json:"open_lots,omitempty"`
 	ActualShares      float64    `json:"actual_shares,omitempty"`
 	AvailableSize     float64    `json:"available_size,omitempty"`
 	ReservedSize      float64    `json:"reserved_size,omitempty"`

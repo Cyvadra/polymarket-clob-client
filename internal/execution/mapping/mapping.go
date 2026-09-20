@@ -201,6 +201,7 @@ func PositionFeature(position store.PositionRecord, sequence int64, publishedAt 
 		EntryTime:         entryTime,
 		SecondsSinceEntry: secondsSinceEntry,
 		PositionSize:      positionSize,
+		OpenLots:          position.OpenLots,
 		ActualShares:      actualShares,
 		AvailableSize:     availableSize,
 		ReservedSize:      reservedSize,

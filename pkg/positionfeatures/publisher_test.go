@@ -54,7 +54,7 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 	entry := now.Add(-3 * time.Minute)
 	publisher := &fakePublisher{}
 	module, err := New(fakeStore{positions: []store.PositionRecord{
-		{ConditionID: "condition-1", TokenID: "token-up", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "12.5", AvailableSize: "10", ReservedSize: "2.5", EntryPrice: "0.42", EntryTime: entry, State: "open", SourceRevision: 8, UpdatedAt: now.Add(-time.Second)},
+		{ConditionID: "condition-1", TokenID: "token-up", UniqueTag: "lane-a", Outcome: "Up", PositionSize: "12.5", AvailableSize: "10", ReservedSize: "2.5", EntryPrice: "0.42", EntryTime: entry, OpenLots: 2, State: "open", SourceRevision: 8, UpdatedAt: now.Add(-time.Second)},
 		{ConditionID: "condition-1", TokenID: "token-up", UniqueTag: "lane-b", Outcome: "Up", PositionSize: "4", AvailableSize: "4", ReservedSize: "0", EntryPrice: "0.43", EntryTime: entry, State: "open", SourceRevision: 8, UpdatedAt: now.Add(-time.Second)},
 		{ConditionID: "condition-1", TokenID: "token-down", Outcome: "Down", PositionSize: "0", AvailableSize: "0", ReservedSize: "0", State: "empty", SourceRevision: 9, UpdatedAt: now.Add(-time.Second)},
 	}}, publisher, func() time.Time { return now }, 0)
@@ -77,6 +77,9 @@ func TestPublishBuildsStrategyPositionFeatures(t *testing.T) {
 	}
 	if open.value.EntryTime == nil || !open.value.EntryTime.Equal(entry) || open.value.SecondsSinceEntry != 180 {
 		t.Errorf("open feature timing fields = %+v", open.value)
+	}
+	if open.value.OpenLots != 2 {
+		t.Errorf("open feature lot count = %d, want 2", open.value.OpenLots)
 	}
 	if open.value.Seq != 1 || open.value.SchemaVersion != protocol.SchemaVersionV1 {
 		t.Errorf("open feature metadata = %+v", open.value)

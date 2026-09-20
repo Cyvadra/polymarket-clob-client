@@ -31,6 +31,8 @@ Subject tokens must not be empty or include `*` or `>`.
 
 `position_size` and `actual_shares` are the net (BUY − SELL) of the share counts the exchange reported for the lane's fills, with no estimated fee deducted. The fields of an open request (`target_usd`, `limit_price`, and the shares planned from them) describe intent only; they never set a position's size, which follows actual fills alone.
 
+`open_lots` is how many separate open requests make up the position the lane holds now: one lot per intent, however many child orders or partial fills it took, counting only fills since the position was last empty. It is `0` for an empty position, and omitted by an executiond that predates the field — a consumer that needs it must treat an absent value as "unknown" rather than as zero lots. The size cannot stand in for it: several lots pool into one `position_size`, so a strategy that bounds how many times a lane may buy has no other way to recover that count after a restart.
+
 ## ExecutionOpenRequest
 
 Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.

@@ -133,17 +133,22 @@ type FillRecord struct {
 }
 
 type PositionRecord struct {
-	MarketID       string
-	ConditionID    string
-	TokenID        string
-	UniqueTag      string
-	Outcome        string
-	PositionSize   string
-	ActualShares   string
-	AvailableSize  string
-	ReservedSize   string
-	EntryPrice     string
-	EntryTime      time.Time
+	MarketID      string
+	ConditionID   string
+	TokenID       string
+	UniqueTag     string
+	Outcome       string
+	PositionSize  string
+	ActualShares  string
+	AvailableSize string
+	ReservedSize  string
+	EntryPrice    string
+	EntryTime     time.Time
+	// OpenLots is how many separate BUY intents make up the position the lane
+	// holds now: one lot is one open request, however many child orders or
+	// partial fills it took. It is counted from the fills since entry_time, so
+	// it resets with the position rather than accumulating over a lane's life.
+	OpenLots       int
 	State          string
 	SourceRevision int64
 	UpdatedAt      time.Time

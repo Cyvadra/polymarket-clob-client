@@ -23,6 +23,7 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 		ReservedSize:   "1",
 		EntryPrice:     "0.42",
 		EntryTime:      entryTime,
+		OpenLots:       3,
 		State:          "confirmed",
 		SourceRevision: 9,
 		UpdatedAt:      time.Unix(120, 0).UTC(),
@@ -48,6 +49,12 @@ func TestPositionFeatureOpenPosition(t *testing.T) {
 	}
 	if feature.PositionSize != 5.5 || feature.AvailableSize != 4.5 || feature.ReservedSize != 1 {
 		t.Fatalf("unexpected sizes: %+v", feature)
+	}
+	// The strategy bounds how many times a lane may buy, so the lot count has
+	// to survive the store->wire hop as its own field: it cannot be recovered
+	// from the size, which pools every lot into one number.
+	if feature.OpenLots != 3 {
+		t.Fatalf("open lots=%d, want 3", feature.OpenLots)
 	}
 }
 

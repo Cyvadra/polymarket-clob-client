@@ -10,15 +10,22 @@ func TestMigrationsEmbedSchemaThenPositionRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-	// The schema is a single merged migration; later files are data fixes.
-	if len(migrations) != 2 {
-		t.Fatalf("expected the merged schema plus the position rebuild, got %d", len(migrations))
+	// The schema is a single merged migration; later files are data fixes and
+	// indexes an already-migrated database cannot get from the schema file.
+	want := []string{"000001_schema.sql", "000002_positions_from_fills.sql", "000003_fills_lane_index.sql"}
+	if len(migrations) != len(want) {
+		t.Fatalf("expected %d migrations, got %d", len(want), len(migrations))
 	}
-	if migrations[0].Name != "000001_schema.sql" || migrations[1].Name != "000002_positions_from_fills.sql" {
-		t.Fatalf("unexpected migration names %q, %q", migrations[0].Name, migrations[1].Name)
+	for i, name := range want {
+		if migrations[i].Name != name {
+			t.Fatalf("migration %d is %q, want %q", i, migrations[i].Name, name)
+		}
 	}
 	if !strings.Contains(migrations[1].SQL, "UPDATE positions") || !strings.Contains(migrations[1].SQL, "trade_status <> 'FAILED'") {
 		t.Fatalf("position rebuild must recompute positions from non-failed fills:\n%s", migrations[1].SQL)
+	}
+	if !strings.Contains(migrations[2].SQL, "fills_lane_idx") {
+		t.Fatalf("lane index migration must create fills_lane_idx:\n%s", migrations[2].SQL)
 	}
 
 	sql := migrations[0].SQL

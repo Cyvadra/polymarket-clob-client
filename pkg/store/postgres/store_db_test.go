@@ -141,6 +141,72 @@ func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 	}
 }
 
+// TestOpenLotsCountsBuyIntentsSinceEntry pins what open_lots means to the
+// strategy that reads it: how many times the lane bought into the position it
+// holds now. A partially filled open request is one lot however many fills it
+// took, a reversed fill leaves no lot behind, and emptying the lane starts the
+// count again — otherwise a strategy recovering a position after a restart
+// would mistake a lane that is already full for one with room to add.
+func TestOpenLotsCountsBuyIntentsSinceEntry(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	lane := "lane-lots-" + suffix
+	const conditionID, tokenID = "condition-lots", "token-lots"
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM fills WHERE unique_tag = $1`, lane)
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM positions WHERE unique_tag = $1`, lane)
+	})
+	fill := func(id, intentID, side, shares, status string) {
+		t.Helper()
+		if _, err := s.ApplyFill(ctx, store.FillRecord{
+			FillID: lane + "-" + id, IntentID: intentID, UniqueTag: lane,
+			MarketID: "market", ConditionID: conditionID, TokenID: tokenID, Outcome: "Up",
+			Side: store.Side(side), Shares: shares, Price: "0.5", TradeStatus: status, TraderSide: "TAKER",
+		}); err != nil {
+			t.Fatalf("apply fill %s: %v", id, err)
+		}
+	}
+	lots := func() int {
+		t.Helper()
+		positions, err := s.PositionFeatures(ctx)
+		if err != nil {
+			t.Fatalf("positions: %v", err)
+		}
+		for _, position := range positions {
+			if position.UniqueTag == lane {
+				return position.OpenLots
+			}
+		}
+		t.Fatalf("lane %s has no position row", lane)
+		return 0
+	}
+
+	// One open request filled in two parts is one lot.
+	fill("a1", lane+"-intent-a", "BUY", "4", "CONFIRMED")
+	fill("a2", lane+"-intent-a", "BUY", "6", "CONFIRMED")
+	if got := lots(); got != 1 {
+		t.Fatalf("open lots after one partially filled open = %d, want 1", got)
+	}
+	// A second open request adds a lot.
+	fill("b1", lane+"-intent-b", "BUY", "5", "CONFIRMED")
+	if got := lots(); got != 2 {
+		t.Fatalf("open lots after a second open = %d, want 2", got)
+	}
+	// A fill the exchange later failed is reversed out of the position, so its
+	// lot goes with it.
+	fill("b1", lane+"-intent-b", "BUY", "5", "FAILED")
+	if got := lots(); got != 1 {
+		t.Fatalf("open lots after the second open was reversed = %d, want 1", got)
+	}
+	// Emptying the lane ends the episode; the next buy starts a fresh count.
+	fill("s1", "", "SELL", "10", "CONFIRMED")
+	fill("c1", lane+"-intent-c", "BUY", "3", "CONFIRMED")
+	if got := lots(); got != 1 {
+		t.Fatalf("open lots after the lane went flat and bought again = %d, want 1", got)
+	}
+}
+
 func TestPositionsFromFillsMigrationRebuildsSizesFromFills(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

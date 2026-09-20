@@ -964,7 +964,7 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 	err := row.Scan(
 		&record.MarketID, &record.ConditionID, &record.TokenID, &record.UniqueTag, &record.Outcome,
 		&record.PositionSize, &record.ActualShares, &record.AvailableSize, &record.ReservedSize,
-		&entryPrice, &entryTime, &record.State, &record.SourceRevision, &record.UpdatedAt,
+		&entryPrice, &entryTime, &record.OpenLots, &record.State, &record.SourceRevision, &record.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.PositionRecord{}, store.ErrNotFound
@@ -981,12 +981,30 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 	return record, nil
 }
 
+// positionSelectSQL reads the position rows the strategy sees. open_lots is
+// counted here rather than kept as a column because fills are the only source
+// of a position's quantities: a reversed fill (trade_status FAILED) has to
+// un-count its lot exactly as it un-counts its shares, and a count over the
+// fills does that for free. Distinct intent is what makes a lot: executiond
+// may fill one open request through several child orders or partial fills,
+// and the strategy's max_positions bounds the requests, not the fills. The
+// window starts at entry_time, which applyPositionDelta sets on the buy into
+// an empty lane and nulls when a sell empties it, so the count resets with the
+// position; a lane whose entry_time is missing counts its whole history, which
+// can only overstate a cap.
 func positionSelectSQL() string {
 	return `
-		SELECT market_id, condition_id, token_id, unique_tag, outcome,
-			position_size::text, actual_shares::text, available_size::text, reserved_size::text,
-			entry_price::text, entry_time, state, source_revision, updated_at
-		FROM positions
+		SELECT p.market_id, p.condition_id, p.token_id, p.unique_tag, p.outcome,
+			p.position_size::text, p.actual_shares::text, p.available_size::text, p.reserved_size::text,
+			p.entry_price::text, p.entry_time,
+			(SELECT count(DISTINCT coalesce(f.intent_id, f.fill_id))
+				FROM fills f
+				WHERE f.condition_id = p.condition_id AND f.token_id = p.token_id
+					AND f.unique_tag = p.unique_tag AND f.side = 'BUY'
+					AND f.trade_status <> 'FAILED'
+					AND f.received_at >= coalesce(p.entry_time, '-infinity'::timestamptz)),
+			p.state, p.source_revision, p.updated_at
+		FROM positions p
 	`
 }
 
