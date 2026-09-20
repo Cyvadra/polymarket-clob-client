@@ -201,6 +201,9 @@ func TestOpenLotsCountsBuyIntentsSinceEntry(t *testing.T) {
 	}
 	// Emptying the lane ends the episode; the next buy starts a fresh count.
 	fill("s1", "", "SELL", "10", "CONFIRMED")
+	if got := lots(); got != 0 {
+		t.Fatalf("open lots of an emptied lane = %d, want 0", got)
+	}
 	fill("c1", lane+"-intent-c", "BUY", "3", "CONFIRMED")
 	if got := lots(); got != 1 {
 		t.Fatalf("open lots after the lane went flat and bought again = %d, want 1", got)

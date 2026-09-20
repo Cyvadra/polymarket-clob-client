@@ -31,7 +31,7 @@ Subject tokens must not be empty or include `*` or `>`.
 
 `position_size` and `actual_shares` are the net (BUY − SELL) of the share counts the exchange reported for the lane's fills, with no estimated fee deducted. The fields of an open request (`target_usd`, `limit_price`, and the shares planned from them) describe intent only; they never set a position's size, which follows actual fills alone.
 
-`open_lots` is how many separate open requests make up the position the lane holds now: one lot per intent, however many child orders or partial fills it took, counting only fills since the position was last empty. It is `0` for an empty position, and omitted by an executiond that predates the field — a consumer that needs it must treat an absent value as "unknown" rather than as zero lots. The size cannot stand in for it: several lots pool into one `position_size`, so a strategy that bounds how many times a lane may buy has no other way to recover that count after a restart.
+`open_lots` is how many separate open requests make up the position the lane holds now: one lot per intent, however many child orders or partial fills it took, counting only fills since the position was last empty. It is meaningful only when `has_position` is true: an empty position has zero lots, which the wire omits, and an executiond that predates the field omits it too — so a consumer that needs it must treat an absent value on an open position as "unknown" rather than as zero lots. The size cannot stand in for it: several lots pool into one `position_size`, so a strategy that bounds how many times a lane may buy has no other way to recover that count after a restart.
 
 ## ExecutionOpenRequest
 

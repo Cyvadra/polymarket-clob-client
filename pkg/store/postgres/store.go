@@ -990,8 +990,8 @@ func scanPosition(row rowScanner) (store.PositionRecord, error) {
 // and the strategy's max_positions bounds the requests, not the fills. The
 // window starts at entry_time, which applyPositionDelta sets on the buy into
 // an empty lane and nulls when a sell empties it, so the count resets with the
-// position; a lane whose entry_time is missing counts its whole history, which
-// can only overstate a cap.
+// position and an empty lane, whose entry_time is NULL, matches no fill and
+// counts zero.
 func positionSelectSQL() string {
 	return `
 		SELECT p.market_id, p.condition_id, p.token_id, p.unique_tag, p.outcome,
@@ -1002,7 +1002,7 @@ func positionSelectSQL() string {
 				WHERE f.condition_id = p.condition_id AND f.token_id = p.token_id
 					AND f.unique_tag = p.unique_tag AND f.side = 'BUY'
 					AND f.trade_status <> 'FAILED'
-					AND f.received_at >= coalesce(p.entry_time, '-infinity'::timestamptz)),
+					AND f.received_at >= p.entry_time),
 			p.state, p.source_revision, p.updated_at
 		FROM positions p
 	`

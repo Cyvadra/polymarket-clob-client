@@ -144,10 +144,8 @@ type PositionRecord struct {
 	ReservedSize  string
 	EntryPrice    string
 	EntryTime     time.Time
-	// OpenLots is how many separate BUY intents make up the position the lane
-	// holds now: one lot is one open request, however many child orders or
-	// partial fills it took. It is counted from the fills since entry_time, so
-	// it resets with the position rather than accumulating over a lane's life.
+	// OpenLots is the number of BUY intents filled since EntryTime; see
+	// positionSelectSQL.
 	OpenLots       int
 	State          string
 	SourceRevision int64
