@@ -1,22 +1,23 @@
 # Polymarket CLOB Go Client
 
-面向 Polymarket CLOB API 的、上下文感知的 Go 客户端，同时也是可独立运行的、面向 Polymarket 交易系统的持久化执行服务。
+A context-aware Go client for the Polymarket CLOB API, plus `executiond`: a standalone, durable execution service for Polymarket trading systems.
 
-## 能力特性
+## Features
 
-- L1 凭据派生与 L2 HMAC 认证
-- 面向 EOA、Gnosis Safe 与 Poly1271 签名的 V2 EIP-712 订单
-- 签名前的 tick size、手续费率与负风险（neg-risk）解析
-- 公共市场、订单簿、定价、历史与批量订单簿查询
-- 已认证的订单、余额、成交、通知、评分与撤单
-- 可自动重连的已认证用户 WebSocket 数据流
-- 持久化的执行意图、已签名订单恢复、到期撤单与订单状态对账
-- 已认证用户流的订单与成交处理，以及持久化的仓位记账
-- 面向策略的仓位特征：持仓、可用与预留份额、入场价与入场时间
+- L1 credential derivation and L2 HMAC authentication
+- V2 EIP-712 orders for EOA, Gnosis Safe, and Poly 1271 signatures
+- Tick size, fee rate, and neg-risk resolution before signing
+- Public market, order book, pricing, history, and batch order book queries
+- Authenticated orders, balances, trades, notifications, scoring, and cancellation
+- Authenticated user WebSocket stream with automatic reconnection
+- Per-market fee schedules, so fills can be priced with the fee the exchange actually charges
+- Durable execution intents, signed-order recovery, `expires_at` cancellation, and order-state reconciliation
+- Order and fill handling from the authenticated user stream, with durable position accounting
+- Strategy-facing position features: position size, available and reserved shares, entry price, entry time, and open lot count
 
-## 执行运行时
+## Execution runtime
 
-`cmd/executiond` 是三部分交易程序中的执行组件：
+`cmd/executiond` is the execution component of a three-part trading system:
 
 ```text
 pmm market features -> strategy -> executiond -> Polymarket CLOB
@@ -24,85 +25,136 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
                               +-- position features and execution results
 ```
 
-`pmm` 负责市场特征产出并发布行情快照；策略发布 open / close 请求。`executiond` 负责签名、提交、关闭、已认证账户事件、持久化订单状态、仓位记账，以及使用最新行情快照为高级执行风格规划初始 child 订单。
+`pmm` produces market features and publishes quote snapshots. The strategy publishes open and close requests. `executiond` signs and submits orders, closes positions, consumes authenticated account events, persists order state, keeps position accounting, and uses the latest quote snapshot to plan the initial child order for the advanced execution styles.
 
-服务使用 PostgreSQL 保存持久化状态，并使用 core NATS 传递策略消息。请求投递刻意采用 at-most-once 语义：过期或丢失的请求不会被重放。开仓请求的可解码校验失败会收到失败结果；平仓请求不再发 ACK / SUCCESS，终态结果只在订单真正结束后回报。无效 JSON 无法回应。每个钱包只能运行一个 `executiond` 实例。
+The service keeps durable state in PostgreSQL and exchanges strategy messages over core NATS. Request delivery is deliberately at-most-once: an expired or lost request is never replayed. An open request that decodes but fails validation receives a failure result. A close request gets no ACK or SUCCESS; its terminal result is reported only when the order actually ends. Invalid JSON cannot be answered. Run exactly one `executiond` instance per wallet.
 
-### NATS 契约
+### NATS contract
 
-完整、版本化的字段约束、示例、交付语义与兼容性规则见 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md)。策略集成应以该文档为准，而不是 import runtime Go package。
+The versioned field rules, examples, delivery semantics, and compatibility rules are in [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md). Strategy integrations should follow that document rather than import the runtime Go packages.
 
-| 主题 | 方向 | 负载 | 用途 |
+| Subject | Direction | Payload | Purpose |
 | --- | --- | --- | --- |
-| `strategy.execution.open` | strategy -> executiond | `ExecutionOpenRequest` | 请求一个开仓订单。 |
-| `execution.open.result` | executiond -> strategy | `ExecutionOpenResult` | 开仓请求的成功或失败结果。 |
-| `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | 请求一个平仓。 |
-| `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | 平仓请求的成功或失败结果。 |
-| `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | 高级执行风格使用的最新行情快照。 |
-| `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | 持久化的订单生命周期迁移。 |
-| `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | 最新的持久化仓位快照。 |
-| `strategy.execution.position.query` | strategy -> executiond（request/reply） | `PositionQueryRequest` | 查询当前仓位，回复发往请求的 reply subject。 |
+| `strategy.execution.open` | strategy -> executiond | `ExecutionOpenRequest` | Request one open order. |
+| `execution.open.result` | executiond -> strategy | `ExecutionOpenResult` | Terminal success or failure of an open request. |
+| `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | Request a position close. |
+| `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | Terminal success or failure of a close request. |
+| `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Latest quote snapshot for the advanced execution styles. |
+| `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order lifecycle transitions. |
+| `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest durable position snapshot. |
+| `strategy.execution.position.query` | strategy -> executiond (request/reply) | `PositionQueryRequest` | Query current positions; the reply goes to the request's reply subject. |
 
-开仓请求要求 `unique_tag`、`strategy`、`condition_id`、`token_id`、`outcome`、`side`、`limit_price` 和 `time_in_force`。`target_usd` 是唯一的开仓计量字段；普通开仓的份额会根据当前计划价格推导。`unique_tag` 是策略通道键，用来隔离同一资产上的并行开平仓信号，不是幂等键。调用端必须在 `policy.style` 中明确指定 `LIMIT`、`MAKER_POST_ONLY` 或 `TAKER_AGGRESSIVE`；`LIMIT` 使用请求限价直接创建初始 child，后两者会使用最新行情快照规划初始 child 的价格、post-only 与 time-in-force，超过 `policy.quote_max_age_ms` 的快照会被忽略。所有价格在签名前都会按被动方向（买单向下、卖单向上）对齐到市场 tick；份额会按交易所实际编码的精度向下取整。关闭请求按 `condition_id + asset_id + unique_tag` 定位仓位，`LIMIT_CLOSE` 走普通限价卖出，`FORCE_CLOSE` 走 `SELL 0.01 FAK`。设置 `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` 后，超过未平仓买入名义总额上限的买单会以 `EXPOSURE_LIMIT` 拒绝。
+### Opening a position
 
-被接受的订单会在外部提交之前先被持久化。如果进程在持久化之后停止，`executiond` 会在启动时恢复 `SIGNED` 订单。结果未知的提交会依据 CLOB REST 状态进行对账。超过所配置期限的订单会被撤销。
-对账循环还会从 CLOB REST 补拉账户成交，并通过与用户流相同的幂等 fill 路径修复 WebSocket 断线期间漏掉的成交。未知提交如果暂时查询不到订单，会先进入 `UNKNOWN_RECONCILE`；超过缺失订单宽限期后仍返回 404 才会标记为失败并释放预留。
+An open request requires `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`, plus a future `expires_at` or a positive `policy.complete_within_ms`. `target_usd` is the only sizing field; share counts are derived from the planned price.
 
-`strategy.execution.close` 用于关闭当前仓位：`LIMIT_CLOSE` 先撤掉同一 `condition_id` / `asset_id` / `unique_tag` 上仍挂单的开仓 child 与旧平仓 child，再提交新的限价卖出；`FORCE_CLOSE` 会先撤单，再提交内部的 `0.01 SELL FAK` 强平。若同一 lane 再收到新的平仓信号，旧平仓会被取消并且不再向外发出失败/取消反馈，新的平仓请求会按至少 `200ms` 的间隔重试提交，`policy.cancel_replace_timeout_ms` 用来限制这段替换等待。关闭结果只在平仓单真正终态后通过 `execution.close.result` 回报，仓位快照随后照常发布。`strategy.execution.position.query` 是 request/reply 仓位查询：不带过滤返回全部当前持仓，也可按 `condition_id`、`market_id` 或 `unique_tag` 过滤，回复负载与 `PositionFeature` 一致。
+`unique_tag` is the strategy lane key. It isolates parallel open and close signals on the same asset, and it is not an idempotency key.
 
-### 仓位记账
+The caller must set `policy.style` explicitly:
 
-已认证的 CLOB 用户流是 `executiond` 中唯一的账户事件入口。Fill ID 使重复投递具备幂等性。成交生命周期状态（`MATCHED`、`MINED`、`CONFIRMED`、`FAILED`）会被持久化。仓位按交易所报告的原始成交份额计入，不做手续费估算或扣减；如果该成交随后变为 `FAILED`，其仓位影响会按相同的份额数量被反向冲销。
+| Style | Behavior |
+| --- | --- |
+| `LIMIT` | Creates the initial child order directly from the request's limit price. |
+| `MAKER_POST_ONLY` | Plans the child's price, post-only flag, and time in force from the latest quote snapshot. |
+| `TAKER_AGGRESSIVE` | Prices the child aggressively from the signal price, capped by the request's limit, and turns a `GTC` time in force into `FAK`. |
 
-发布的仓位状态是执行视图，而非结算或赎回引擎。订单状态对账由 CLOB REST 修复未知提交结果；链上结算、赎回与跨系统资金核对不属于 `executiond` 的当前职责。
+Snapshots older than `policy.quote_max_age_ms` are ignored. Before signing, prices are aligned to the market tick in the passive direction (buys down, sells up), and share counts are floored to the precision the exchange encodes.
 
-### 包边界
+If `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` is set, a buy that would push the total notional of open BUY reservations over the cap is rejected with `EXPOSURE_LIMIT`.
 
-- 仓库根目录：`executiond` 使用的 CLOB API 客户端。
-- `cmd/executiond`：执行服务的 composition root。
-- `internal/execution/protocol`：`executiond` 私有的 Go wire types；外部协议见 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md)。
-- `pkg/accountfeed`、`pkg/executor`、`pkg/reconciler`、`pkg/store`：执行服务实现包，保持 Go 可测试性与模块化；策略集成 API 仍以 [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md) 为准。
+An open result is published only when the open reaches a terminal state: any fill, including a partial one, is a success, and a cancellation with no fill is a failure. Accepting a resting order is never reported as success. Whenever a result carries `filled_shares > 0` it also carries `average_price`.
 
-### 运行 `executiond`
+### Closing a position
 
-`executiond` 只需要 `POLYMARKET_PRIVATE_KEY`：L2 API 凭证（key/secret/passphrase）
-在启动时由私钥自动派生（`GET /auth/derive-api-key`，签名者尚无凭证时才
-`POST /auth/api-key`），派生是幂等的，重启不会重复创建，无需也不应手工配置。
-另外还需要：
+A close request targets a lane by `condition_id + asset_id + unique_tag`.
 
-| 变量 | 必填 | 默认值 |
+| Mode | Behavior |
+| --- | --- |
+| `LIMIT_CLOSE` | Places a normal limit sell for the lane's position. It cancels any previous close on the lane but leaves a resting open buy working, so an entry that is still filling keeps filling. |
+| `FORCE_CLOSE` | Cancels every order on the lane, including the open buy, then submits an internal `SELL 0.01 FAK`. It never emits a close result; confirm the exit from `position.features.*`. |
+
+Further behavior worth knowing:
+
+- **Replacement.** A newer close on the same lane cancels the older one and suppresses its terminal result. The new close is retried at most every 200ms, bounded by `policy.cancel_replace_timeout_ms`.
+- **Close maintenance.** A `LIMIT_CLOSE` is sized for the whole lane. Once the position stops growing, a maintenance loop cancels the resting close and re-places it for the current size. If the position is below the market's minimum order size (`BELOW_MIN_ORDER_SIZE`), `executiond` keeps the shares and retries as the lane grows, and takes the residual with a FAK if the bid reaches the close's limit price before settlement.
+- **Unsettled buys.** A sell placed moments after the buy can be rejected with `not enough balance / allowance` while the bought tokens settle on chain. Both close modes retry that rejection about once a second for up to 30 seconds.
+- **Terminal results.** A `LIMIT_CLOSE` emits exactly one `execution.close.result`, when its sell child resolves or when placement is refused. A malformed request is dropped, and a close on a lane with no shares is treated as already complete.
+
+Closes are dispatched per lane, so retries on one lane never delay another.
+
+### Position queries
+
+`strategy.execution.position.query` is a request/reply query. With no filter it returns every current position; it can also filter by `condition_id`, `market_id`, or `unique_tag`. The reply uses the same shape as `PositionFeature`.
+
+### Durability and recovery
+
+An accepted order is persisted before it is sent to the exchange. If the process stops after persisting, `executiond` recovers `SIGNED` orders at startup. A submission with an unknown outcome is reconciled against CLOB REST order status.
+
+Two independent loops run once per second:
+
+- **Deadline enforcement** cancels orders that have passed their `expires_at`.
+- **Close maintenance** keeps resting closes sized to their positions.
+
+They are separate so that slow maintenance can never delay a cancellation. Each loop times its own passes and reports one that takes ten intervals or more, once when it starts overrunning and once when it recovers, through the daemon's error log.
+
+The reconciliation loop also backfills account trades from CLOB REST and feeds them through the same idempotent fill path as the user stream, repairing any fills missed while the WebSocket was down. An unknown submission whose order cannot be found first enters `UNKNOWN_RECONCILE`; it is failed and its reservation released only if it still returns 404 after the missing-order grace period.
+
+### Latency and fees
+
+Signing the first order on a token needs its tick size, minimum order size, and neg-risk flag, and pricing its fills needs the market's fee schedule. When a market first appears in `pmm.market.quotes`, `executiond` warms all of this in the background (at most four markets at a time), so the first order does not wait on a chain of REST calls.
+
+The exchange can report a fee rate of 0 on trades it actually charged. `executiond` therefore prices each fill from the market fee schedule (`rate * shares * (p * (1 - p))^exponent`, floored to five decimals, and nothing for a maker when the market is taker-only). Fees are informational: a failed fee lookup is reported and the fill is stored without a fee rather than delaying the position.
+
+### Position accounting
+
+The authenticated CLOB user stream is the only account-event input to `executiond`. Fill IDs make repeated deliveries idempotent, and the fill lifecycle (`MATCHED`, `MINED`, `CONFIRMED`, `FAILED`) is persisted. Positions are computed from the raw share counts the exchange reports, with no estimated fee deducted. If a fill later becomes `FAILED`, its effect on the position is reversed by exactly the same share count.
+
+`PositionFeature.open_lots` counts how many separate open requests make up the current position, one lot per intent however many child orders or partial fills it took. It lets a strategy that caps how many times a lane may buy recover that count after a restart. It is meaningful only when `has_position` is true, and an absent value on an open position means "unknown", not zero.
+
+The published position is an execution view, not a settlement or redemption engine. On-chain settlement, redemption, and cross-system fund reconciliation are outside the scope of `executiond`.
+
+### Package layout
+
+| Path | Purpose |
+| --- | --- |
+| repository root | The CLOB API client (`clobclient`) used by `executiond`. |
+| `cmd/executiond` | Composition root of the execution service. |
+| `cmd/executiontest` | Real-money NATS black-box lifecycle test. |
+| `internal/execution/protocol` | Go wire types private to `executiond`. The external protocol is [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md). |
+| `pkg/accountfeed`, `pkg/executor`, `pkg/reconciler`, `pkg/store` | Service implementation packages, kept modular and testable. |
+| `pkg/marketquotes`, `pkg/positionfeatures`, `pkg/natsbus`, `pkg/statemachine` | Quote cache, position publisher, NATS bus, and order state machine. |
+| `examples/` | Runnable client examples for public market data and an authenticated client. |
+| `scripts/` | pm2 deployment; see [scripts/README.md](scripts/README.md). |
+
+### Running `executiond`
+
+`executiond` needs only `POLYMARKET_PRIVATE_KEY`. It derives the L2 API credentials (key, secret, passphrase) from the private key at startup, using `GET /auth/derive-api-key` and calling `POST /auth/api-key` only when the signer has no credentials yet. Derivation is idempotent, so restarts never create duplicates, and the credentials should not be configured by hand.
+
+| Variable | Required | Default |
 | --- | --- | --- |
-| `EXECUTION_NATS_URL` | 否 | `nats://127.0.0.1:4222` |
-| `EXECUTION_POSTGRES_URL` | 否 | `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable` |
-| `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | 否 | 不限制 |
+| `POLYMARKET_PRIVATE_KEY` | Yes | none |
+| `EXECUTION_NATS_URL` | No | `nats://127.0.0.1:4222` |
+| `EXECUTION_POSTGRES_URL` | No | `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable` (a placeholder; replace it outside local development) |
+| `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | no cap |
+| `POLYMARKET_PROXY_URL` | No | direct connection |
 
-`executiond` 直接用环境变量构建 CLOB 客户端，不会自动发现代理钱包，默认按 EOA
-（`signature_type=0`）签名。**如果交易资金在 Polymarket 代理钱包（Safe/deposit
-wallet）中，必须同时设置 `POLYMARKET_MAKER_ADDRESS`（代理钱包地址）与
-`POLYMARKET_SIGNATURE_TYPE`（`1` Poly proxy 或 `2` Gnosis Safe）**，只设其中一个
-会导致下单被交易所拒绝。
+`executiond` builds its CLOB client straight from the environment and does not discover proxy wallets. It signs as an EOA (`signature_type=0`) by default. **If the trading funds are in a Polymarket proxy wallet (Safe or deposit wallet), you must set both `POLYMARKET_MAKER_ADDRESS` (the proxy wallet address) and `POLYMARKET_SIGNATURE_TYPE` (`1` Poly proxy, `2` Gnosis Safe, `3` Poly 1271).** Setting only one of them produces orders the exchange rejects.
 
-调优类变量（快照与对账间隔、各类超时）均有可用默认值，不必在部署时设置，
-说明见 [docs/configuration.md](docs/configuration.md)。完整的环境变量清单和安全配置方式
-同样见该文档；可使用 [.env.example](.env.example) 作为无秘密的变量名参考。
+The tuning variables (snapshot and reconciliation intervals, result price wait, and the various timeouts) all have production-usable defaults and do not need to be set at deploy time. They, the full variable list, and guidance on keeping secrets safe are in [docs/configuration.md](docs/configuration.md). [.env.example](.env.example) is a secret-free reference for the variable names.
 
 ```sh
 go run ./cmd/executiond
 ```
 
-### 真实资金 NATS 黑盒验证
+For a pm2-based deployment to a remote host, see [scripts/README.md](scripts/README.md).
 
-`cmd/executiontest` 连接到预先启动的、专用的 `executiond`，通过 NATS
-执行最小的真实资金开仓与强平清理闭环，并保留 Markdown 证据报告。必填参数只有
-五个：`--condition-id`、`--asset-id`、`--outcome`、`--target-usd`、`--buy-limit`；
-NATS 地址取自 `EXECUTION_NATS_URL`，不再是命令行参数。
+### Real-money NATS black-box test
 
-**该工具没有二次确认开关，参数合法即立即下真实订单。** 本地校验只能拦下格式非法的
-取值，拦不住"格式正确但填错"的 asset ID 或金额。需要硬性敞口上限请在守护进程侧设置
-`EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD`。完整的前置条件、运行示例、资金风险和
-可验证边界见 [docs/execution-integration-test.md](docs/execution-integration-test.md)。
+`cmd/executiontest` connects to an already running, dedicated `executiond` and drives one real-money trade through its whole life over NATS: baseline check, open, fill reconciliation, position accounting, an optional hold, close, and a final flat check. It leaves a Markdown evidence report. It has five required flags: `--condition-id`, `--asset-id`, `--outcome`, `--target-usd`, and `--buy-limit`. Optional flags such as `--sell-limit`, `--close-mode`, `--hold`, and `--negative` add a limit-close scenario, a dwell, and an invalid-schema probe. The NATS address comes from `EXECUTION_NATS_URL`, not from a flag.
 
-## 快速开始
+**The tool has no confirmation switch: a valid invocation places a real order immediately.** Local validation catches malformed values but not a well-formed wrong asset ID or amount. For a hard exposure ceiling, set `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` on the daemon. Prerequisites, run examples, funds risk, and what the test can and cannot prove are in [docs/execution-integration-test.md](docs/execution-integration-test.md).
+
+## Client quick start
 
 ```go
 client, err := clobclient.New(clobclient.Config{
@@ -114,21 +166,28 @@ credentials, err := client.DeriveCredentials(ctx)
 if err != nil { log.Fatal(err) }
 
 client, err = clobclient.New(clobclient.Config{
-    PrivateKey: os.Getenv("POLYMARKET_PRIVATE_KEY"),
+    PrivateKey:  os.Getenv("POLYMARKET_PRIVATE_KEY"),
     Credentials: credentials,
-    QPS: 10,
+    QPS:         10,
 })
 ```
 
-所有网络方法都需要 `context.Context`。订单提交从不自动重试，因为超时的请求仍可能已被接受。执行运行时通过其持久化恢复路径处理这种未知结果，而不是盲目地重发 SDK 请求。
+Every network method takes a `context.Context`. Order submission is never retried automatically, because a timed-out request may still have been accepted. The execution runtime handles that unknown outcome through its durable recovery path instead of blindly resending the SDK request.
 
-## 验证
+More complete programs are in [examples/public_market_data](examples/public_market_data/main.go) and [examples/authenticated_client](examples/authenticated_client/main.go).
+
+## Verification
 
 ```sh
 go test ./...
 go test -race ./...
 go vet ./...
 CLOB_TEST_PROXY=http://127.0.0.1:7890 go test -tags=integration ./integration
+EXECUTION_TEST_POSTGRES_URL=postgres://... go test -tags=postgres ./pkg/store/postgres
 ```
 
-已认证的集成测试额外需要 `CLOB_TEST_PRIVATE_KEY`。它们在本地派生凭据，并且只执行只读的账户请求。
+The authenticated integration tests additionally need `CLOB_TEST_PRIVATE_KEY`. They derive credentials locally and only make read-only account requests. `CLOB_TEST_SUBMIT_REJECTION=true` opts in to one real unfunded order POST that the exchange is expected to reject.
+
+The `postgres`-tagged store tests run against a live PostgreSQL database and are skipped unless `EXECUTION_TEST_POSTGRES_URL` is set. Each test works in its own lane and removes the rows it wrote, so they can run repeatedly and alongside other data. Point them at a dedicated database anyway.
+
+`./verify.sh` runs the build, the unit tests, the examples build, and `go vet` in one step.
