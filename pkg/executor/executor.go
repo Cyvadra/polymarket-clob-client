@@ -86,31 +86,52 @@ func (e *Executor) Run(ctx context.Context) error {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		e.loop(ctx, time.Second, func(ctx context.Context) error {
+		e.loop(ctx, "deadline", time.Second, func(ctx context.Context) error {
 			return errors.Join(e.resumeSigned(ctx), e.cancelExpired(ctx))
 		})
 	}()
 	go func() {
 		defer wg.Done()
-		e.loop(ctx, time.Second, e.maintainCloses)
+		e.loop(ctx, "close maintenance", time.Second, e.maintainCloses)
 	}()
 	wg.Wait()
 	return nil
 }
 
-// loop runs pass on every tick until ctx is done. A pass that overruns its
-// interval simply starts again on the next tick; ticks are dropped rather
-// than queued, so a slow pass never builds a backlog.
-func (e *Executor) loop(ctx context.Context, interval time.Duration, pass func(context.Context) error) {
+// overrunFactor is how many times its own interval a pass may take before the
+// loop reports it. A pass occasionally running long is ordinary; one taking
+// ten intervals is no longer running at the frequency it was written for, and
+// on a shared goroutine it would be starving whatever runs beside it. That is
+// how the deadline check drifted from 1s to 60s unnoticed over nine days.
+const overrunFactor = 10
+
+// loop runs pass on every tick until ctx is done, reporting a pass that takes
+// far longer than its interval. A pass that overruns simply starts again on
+// the next tick; ticks are dropped rather than queued, so a slow pass never
+// builds a backlog.
+func (e *Executor) loop(ctx context.Context, name string, interval time.Duration, pass func(context.Context) error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	threshold := time.Duration(overrunFactor) * interval
+	overrunning := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := pass(ctx); err != nil && e.onError != nil {
-				e.onError(err)
+			started := e.now()
+			err := pass(ctx)
+			elapsed := e.now().Sub(started)
+			if err != nil {
+				e.reportError(err)
+			}
+			switch {
+			case elapsed >= threshold && !overrunning:
+				overrunning = true
+				e.reportError(fmt.Errorf("%s pass took %s, over %s for a %s interval: it is no longer running at its intended frequency", name, elapsed.Round(time.Millisecond), threshold, interval))
+			case elapsed < threshold && overrunning:
+				overrunning = false
+				e.reportError(fmt.Errorf("%s pass recovered, back to %s for a %s interval", name, elapsed.Round(time.Millisecond), interval))
 			}
 		}
 	}

@@ -520,3 +520,81 @@ func TestRunCancelsExpiredOrdersWhileCloseMaintenanceIsBlocked(t *testing.T) {
 	}
 	t.Fatal("expired order was not cancelled while close maintenance was blocked")
 }
+
+// clock is a manually advanced clock, so an overrun can be measured without
+// the test taking as long as the overrun it describes.
+type clock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// A pass that stops running at its intended frequency says so, once when it
+// starts overrunning and once when it recovers. Without this the deadline
+// check decayed from 1s to 60s over nine days with nothing in the log.
+func TestLoopReportsAPassThatStopsKeepingUpAndItsRecovery(t *testing.T) {
+	clk := &clock{now: time.Unix(1_700_000_000, 0).UTC()}
+	exec, err := New(&fakeStore{inserted: true}, &fakeCLOB{}, clk.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	var mu sync.Mutex
+	var reported []string
+	exec.SetErrorHandler(func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, err.Error())
+	})
+
+	// Three slow passes then three quick ones: the report is edge-triggered,
+	// so a sustained overrun must not repeat on every tick.
+	elapse := make(chan time.Duration, 6)
+	for range 3 {
+		elapse <- 30 * time.Second
+	}
+	for range 3 {
+		elapse <- 10 * time.Millisecond
+	}
+	done := make(chan struct{})
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	go func() {
+		defer close(done)
+		exec.loop(ctx, "deadline", time.Millisecond, func(context.Context) error {
+			select {
+			case d := <-elapse:
+				clk.advance(d)
+			default:
+				stop()
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("loop did not finish")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(reported) != 2 {
+		t.Fatalf("expected one overrun and one recovery, got %d: %v", len(reported), reported)
+	}
+	if !strings.Contains(reported[0], "deadline pass took 30s") || !strings.Contains(reported[0], "intended frequency") {
+		t.Fatalf("unexpected overrun report: %q", reported[0])
+	}
+	if !strings.Contains(reported[1], "deadline pass recovered") {
+		t.Fatalf("unexpected recovery report: %q", reported[1])
+	}
+}
