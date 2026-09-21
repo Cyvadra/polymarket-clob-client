@@ -205,10 +205,16 @@ type fakeCLOB struct {
 	// minOrderSize is the market minimum the planner enforces; zero means the
 	// market publishes no minimum, which is the default in most tests.
 	minOrderSize float64
+	// minOrderSizeErr, when set, is what the market answers instead of a
+	// minimum — a settled market reports clobclient.ErrBookGone.
+	minOrderSizeErr error
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
 func (c *fakeCLOB) MinOrderSize(context.Context, string) (float64, error) {
+	if c.minOrderSizeErr != nil {
+		return 0, c.minOrderSizeErr
+	}
 	return c.minOrderSize, nil
 }
 func (c *fakeCLOB) CreateOrder(_ context.Context, order clobclient.UserOrder) (clobclient.SignedOrderV2, error) {
