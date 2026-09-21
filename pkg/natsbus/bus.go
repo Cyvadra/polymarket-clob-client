@@ -49,6 +49,19 @@ func (b *Bus) Init(ctx context.Context) error {
 	if b.conn != nil {
 		return nil
 	}
+	conn, err := nats.Connect(b.config.URL, b.connectOptions()...)
+	if err != nil {
+		return fmt.Errorf("connect NATS: %w", err)
+	}
+	b.conn = conn
+	b.ctx = ctx
+	b.done = make(chan error, 1)
+	return nil
+}
+
+// connectOptions builds the client options, including the handlers that make
+// the connection lifecycle legible in the log.
+func (b *Bus) connectOptions() []nats.Option {
 	options := []nats.Option{}
 	if b.config.Name != "" {
 		options = append(options, nats.Name(b.config.Name))
@@ -66,23 +79,30 @@ func (b *Bus) Init(ctx context.Context) error {
 				b.config.OnHandlerError(fmt.Errorf("NATS async error on subject %s: %w", subject, err))
 			}
 		}),
+		// The connection lifecycle is reported in full: a disconnect with no
+		// matching reconnect is indistinguishable in the log from a daemon
+		// that has silently stopped receiving, and settling which one it was
+		// meant reading the client's source and the socket table.
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			if err != nil && b.config.OnHandlerError != nil {
+			if b.config.OnHandlerError == nil {
+				return
+			}
+			if err != nil {
 				b.config.OnHandlerError(fmt.Errorf("NATS disconnected: %w", err))
+				return
+			}
+			b.config.OnHandlerError(fmt.Errorf("NATS disconnected"))
+		}),
+		nats.ReconnectHandler(func(conn *nats.Conn) {
+			if b.config.OnHandlerError != nil {
+				b.config.OnHandlerError(fmt.Errorf("NATS reconnected to %s; subscriptions re-established", conn.ConnectedUrl()))
 			}
 		}),
 		nats.ClosedHandler(func(_ *nats.Conn) {
 			b.finish(fmt.Errorf("NATS connection closed"))
 		}),
 	)
-	conn, err := nats.Connect(b.config.URL, options...)
-	if err != nil {
-		return fmt.Errorf("connect NATS: %w", err)
-	}
-	b.conn = conn
-	b.ctx = ctx
-	b.done = make(chan error, 1)
-	return nil
+	return options
 }
 
 func (b *Bus) Run(ctx context.Context) error {
