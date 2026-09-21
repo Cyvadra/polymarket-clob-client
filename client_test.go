@@ -324,3 +324,67 @@ func TestOrderLookupTreatsEmptyBodyAsNotFound(t *testing.T) {
 		}
 	}
 }
+
+// A settled market answers /book with 404 forever. The verdict is cached so a
+// caller that sweeps such a lane on every pass makes one request, not one per
+// pass: the uncached case grew executiond's tick from 1s to 60s in production.
+func TestMinOrderSizeCachesSettledMarketAndStopsFetching(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"No orderbook exists for the requested token id"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	for range 3 {
+		if _, err := client.MinOrderSize(context.Background(), "token"); !errors.Is(err, ErrBookGone) {
+			t.Fatalf("MinOrderSize error = %v, want ErrBookGone", err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	client.InvalidateMarketMetadata("token")
+	if _, err := client.MinOrderSize(context.Background(), "token"); err == nil {
+		t.Fatal("expected error after invalidation")
+	}
+	if requests != 2 {
+		t.Fatalf("requests after invalidation = %d, want 2", requests)
+	}
+}
+
+// A timeout or a 5xx is transient. Caching it would strand a live market for
+// the lifetime of the process, so only the 404 is remembered.
+func TestMinOrderSizeDoesNotCacheTransientFailures(t *testing.T) {
+	var calls int
+	failing := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if failing {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, `{"min_order_size":"5"}`)
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	if _, err := client.MinOrderSize(context.Background(), "token"); err == nil {
+		t.Fatal("expected server error")
+	} else if errors.Is(err, ErrBookGone) {
+		t.Fatalf("transient failure cached as gone: %v", err)
+	}
+	failing = false
+	size, err := client.MinOrderSize(context.Background(), "token")
+	if err != nil {
+		t.Fatalf("MinOrderSize after recovery: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("expected the book to be re-fetched after a transient failure")
+	}
+	if size != 5 {
+		t.Fatalf("size = %v, want 5", size)
+	}
+}

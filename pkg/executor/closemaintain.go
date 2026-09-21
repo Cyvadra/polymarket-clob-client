@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
@@ -164,6 +165,11 @@ func (e *Executor) resizeRestingClose(ctx context.Context, position store.Positi
 	}
 	minimum, err := e.clob.MinOrderSize(ctx, position.TokenID)
 	if err != nil {
+		if errors.Is(err, clobclient.ErrBookGone) {
+			// Settled market: the resting close cannot be replaced and no
+			// longer needs to be.
+			return nil
+		}
 		return fmt.Errorf("load minimum order size: %w", err)
 	}
 	if belowMinimum(exposed, minimum) {
@@ -193,6 +199,12 @@ func (e *Executor) sweepResidual(ctx context.Context, position store.PositionRec
 	}
 	minimum, err := e.clob.MinOrderSize(ctx, position.TokenID)
 	if err != nil {
+		if errors.Is(err, clobclient.ErrBookGone) {
+			// The market has settled: there is no book left to take the
+			// residual on, and settlement itself now decides the lane. This
+			// is the ordinary end of a lane's life, not a failure.
+			return nil
+		}
 		return fmt.Errorf("load minimum order size: %w", err)
 	}
 	if !belowMinimum(sellable, minimum) {

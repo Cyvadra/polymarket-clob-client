@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 
@@ -23,6 +24,7 @@ func (c *Client) InvalidateMarketMetadata(tokenID string) {
 		c.metadata.minSize = map[string]float64{}
 		c.metadata.negRisk = map[string]bool{}
 		c.metadata.feeRate = map[string]int{}
+		c.metadata.bookGone = map[string]struct{}{}
 		c.metadata.feeSchedule = map[string]FeeSchedule{}
 		return
 	}
@@ -30,6 +32,7 @@ func (c *Client) InvalidateMarketMetadata(tokenID string) {
 	delete(c.metadata.minSize, tokenID)
 	delete(c.metadata.negRisk, tokenID)
 	delete(c.metadata.feeRate, tokenID)
+	delete(c.metadata.bookGone, tokenID)
 }
 
 func (c *Client) OrderBook(ctx context.Context, tokenID string) (*OrderBook, error) {
@@ -98,12 +101,27 @@ func (c *Client) MinOrderSize(ctx context.Context, tokenID string) (float64, err
 	}
 	c.metadata.mu.RLock()
 	value, ok := c.metadata.minSize[tokenID]
+	_, gone := c.metadata.bookGone[tokenID]
 	c.metadata.mu.RUnlock()
 	if ok {
 		return value, nil
 	}
+	if gone {
+		return 0, fmt.Errorf("%w for %s", ErrBookGone, tokenID)
+	}
 	book, err := c.OrderBook(ctx, tokenID)
 	if err != nil {
+		if bookGone(err) {
+			// The market has settled and its book is gone for good. Cache the
+			// verdict so a lane that still holds shares on a settled market
+			// costs one round trip rather than one per caller, forever: an
+			// uncached 404 here grew executiond's tick from 1s to 60s over
+			// nine days and let orders rest past expires_at.
+			c.metadata.mu.Lock()
+			c.metadata.bookGone[tokenID] = struct{}{}
+			c.metadata.mu.Unlock()
+			return 0, fmt.Errorf("%w: %w", ErrBookGone, err)
+		}
 		return 0, err
 	}
 	size, err := minimumShares(book)
@@ -114,6 +132,22 @@ func (c *Client) MinOrderSize(ctx context.Context, tokenID string) (float64, err
 	c.metadata.minSize[tokenID] = size
 	c.metadata.mu.Unlock()
 	return size, nil
+}
+
+// ErrBookGone reports a market whose order book the CLOB no longer serves,
+// which is how a settled market presents itself. It is permanent, so callers
+// that sweep lanes can retire them instead of retrying.
+var ErrBookGone = errors.New("order book no longer exists")
+
+// bookGone reports whether err is the CLOB's permanent "no orderbook" answer.
+// Only a 404 qualifies: a timeout or a 5xx is transient and must stay
+// uncached, or a blip would strand a live market for the process lifetime.
+func bookGone(err error) bool {
+	var api *APIError
+	if !errors.As(err, &api) {
+		return false
+	}
+	return api.StatusCode == http.StatusNotFound
 }
 
 // WarmMarketMetadata loads everything signing and planning an order on

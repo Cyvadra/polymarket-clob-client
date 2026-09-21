@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,4 +398,125 @@ func TestExecuteCloseDoesNotAdoptAZeroReportedBalance(t *testing.T) {
 	if client.created.Shares != 2 {
 		t.Fatalf("expected the retry to keep the full position, got %v", client.created.Shares)
 	}
+}
+
+// lockedStore serialises the handful of reads and writes the two Run passes
+// make concurrently. The plain fakeStore is written for single-goroutine
+// tests; only this one exercises Run itself.
+type lockedStore struct {
+	*fakeStore
+	mu sync.Mutex
+}
+
+func (s *lockedStore) OpenOrders(ctx context.Context) ([]store.SignedOrderRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.OpenOrders(ctx)
+}
+func (s *lockedStore) Intent(ctx context.Context, intentID string) (store.OrderIntentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.Intent(ctx, intentID)
+}
+func (s *lockedStore) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.PositionFeatures(ctx)
+}
+func (s *lockedStore) TransitionOrder(ctx context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, reason string) (store.SignedOrderRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.TransitionOrder(ctx, order, event, matchedShares, exchangeOrderID, reason)
+}
+
+// blockingCLOB holds every MinOrderSize call until the test releases it,
+// standing in for the production case: one exchange round trip per lane, with
+// enough settled lanes to make a maintenance pass take a minute.
+type blockingCLOB struct {
+	*fakeCLOB
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	cancels []string
+}
+
+func (c *blockingCLOB) MinOrderSize(context.Context, string) (float64, error) {
+	select {
+	case c.entered <- struct{}{}:
+	default:
+	}
+	<-c.release
+	return 0, nil
+}
+func (c *blockingCLOB) CancelOrder(_ context.Context, orderID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancels = append(c.cancels, orderID)
+	return nil
+}
+func (c *blockingCLOB) canceled() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.cancels...)
+}
+
+// An order past its expires_at is cancelled even while a close-maintenance
+// pass is stuck on the exchange. The two passes shared a goroutine until
+// 2026-09-22, which let one slow pass stretch the deadline check from 1s to
+// 60s and leave orders resting long past their deadline.
+func TestRunCancelsExpiredOrdersWhileCloseMaintenanceIsBlocked(t *testing.T) {
+	// The deadline falls after the first tick, so the cancel can only be made
+	// by a later pass — the one a blocked maintenance pass used to swallow.
+	start := time.Now().UTC()
+	expires := start.Add(2 * time.Second)
+	storer := &lockedStore{fakeStore: &fakeStore{
+		inserted:  true,
+		positions: lanePosition(),
+		order: store.SignedOrderRecord{
+			IntentID: "open-1", ChildSequence: 1, ExchangeOrderID: "order-open",
+			State: statemachine.StateLive, Revision: 1, RequestedShares: "2", MatchedShares: "0",
+		},
+		intent: store.OrderIntentRecord{
+			IntentID: "open-1", UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition",
+			TokenID: "token", Outcome: "Up", Kind: store.IntentOpen, Side: "BUY",
+			LimitPrice: "0.88", TimeInForce: "GTC", Status: statemachine.StateLive,
+			CreatedAt: start, ExpiresAt: expires,
+		},
+	}}
+	client := &blockingCLOB{
+		fakeCLOB: &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-new"}},
+		entered:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
+	}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&recordingPublisher{})
+	exec.SetQuoteProvider(quotesAtBid(0.55))
+
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = exec.Run(ctx) }()
+	defer func() {
+		stop()
+		close(client.release)
+		<-done
+	}()
+
+	// Wait for close maintenance to be wedged in the exchange call before
+	// judging the deadline pass, so the test cannot pass by racing it.
+	select {
+	case <-client.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("close maintenance never reached the exchange")
+	}
+	deadline := expires.Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(client.canceled()) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expired order was not cancelled while close maintenance was blocked")
 }

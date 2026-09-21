@@ -25,6 +25,9 @@ type metadataCache struct {
 	minSize  map[string]float64
 	negRisk  map[string]bool
 	feeRate  map[string]int
+	// bookGone marks tokens whose order book the CLOB has stopped serving,
+	// so a settled market is not re-fetched on every pass. See MinOrderSize.
+	bookGone map[string]struct{}
 	// feeSchedule is keyed by condition ID, unlike the per-token maps.
 	feeSchedule map[string]FeeSchedule
 }
@@ -54,7 +57,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		cfg: cfg, key: key, signer: signer,
 		transport: transport.New(cfg.Host, cfg.HTTPClient, cfg.Timeout, cfg.Retry.MaxAttempts, cfg.Retry.BaseDelay, cfg.QPS),
-		metadata:  &metadataCache{tickSize: map[string]float64{}, minSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}, feeSchedule: map[string]FeeSchedule{}},
+		metadata:  &metadataCache{tickSize: map[string]float64{}, minSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}, bookGone: map[string]struct{}{}, feeSchedule: map[string]FeeSchedule{}},
 	}, nil
 }
 

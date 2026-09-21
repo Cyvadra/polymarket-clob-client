@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -207,5 +208,29 @@ func TestMaintainClosesLeavesAPlaceablePositionToTheStrategy(t *testing.T) {
 	}
 	if client.submissions != 0 {
 		t.Fatalf("expected no order placed, got %d submissions", client.submissions)
+	}
+}
+
+// A settled market has no book left to take a residual on, and every lane that
+// still holds shares on one stays in the positions table. Reporting that as an
+// error made the pass fail on every tick for every such lane; settlement is
+// the ordinary end of a lane's life.
+func TestMaintainClosesTreatsASettledMarketAsTheEndOfTheLane(t *testing.T) {
+	storer := laneWithResidual()
+	client := &fakeCLOB{
+		response:        &clobclient.OrderResponse{Success: true, OrderID: "order-new"},
+		minOrderSizeErr: fmt.Errorf("load book: %w", clobclient.ErrBookGone),
+	}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&resultPublisher{})
+	exec.SetQuoteProvider(quotesAtBid(0.55))
+	if err := exec.maintainCloses(context.Background()); err != nil {
+		t.Fatalf("settled market reported as a failure: %v", err)
+	}
+	if client.submissions != 0 {
+		t.Fatalf("expected nothing placed on a settled market, got %d submissions", client.submissions)
 	}
 }

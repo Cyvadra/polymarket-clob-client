@@ -73,21 +73,43 @@ func (e *Executor) SetQuoteProvider(provider QuoteProvider) {
 }
 
 func (e *Executor) Init(context.Context) error { return nil }
+
+// Run drives the executor's two periodic passes on separate goroutines.
+//
+// Deadline enforcement must not share a goroutine with close maintenance.
+// maintainCloses makes one blocking exchange call per lane, so its pass takes
+// as long as the lanes it walks; run in series, it starved cancelExpired and
+// stretched the effective deadline check from 1s to 60s over nine days of
+// uptime, leaving orders resting well past their expires_at.
 func (e *Executor) Run(ctx context.Context) error {
-	ticker := time.NewTicker(time.Second)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		e.loop(ctx, time.Second, func(ctx context.Context) error {
+			return errors.Join(e.resumeSigned(ctx), e.cancelExpired(ctx))
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		e.loop(ctx, time.Second, e.maintainCloses)
+	}()
+	wg.Wait()
+	return nil
+}
+
+// loop runs pass on every tick until ctx is done. A pass that overruns its
+// interval simply starts again on the next tick; ticks are dropped rather
+// than queued, so a slow pass never builds a backlog.
+func (e *Executor) loop(ctx context.Context, interval time.Duration, pass func(context.Context) error) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return
 		case <-ticker.C:
-			if err := e.resumeSigned(ctx); err != nil && e.onError != nil {
-				e.onError(err)
-			}
-			if err := e.cancelExpired(ctx); err != nil && e.onError != nil {
-				e.onError(err)
-			}
-			if err := e.maintainCloses(ctx); err != nil && e.onError != nil {
+			if err := pass(ctx); err != nil && e.onError != nil {
 				e.onError(err)
 			}
 		}
