@@ -46,6 +46,9 @@ func (e *Executor) ExecuteClose(ctx context.Context, req protocol.ExecutionClose
 		return err
 	}
 	return e.store.WithIntentLock(ctx, closeLaneLockKey(req), func(ctx context.Context) error {
+		if req.Mode == protocol.ExecutionCloseModeCancelOpen {
+			return e.cancelLaneOpenOrders(ctx, req)
+		}
 		return e.replaceCloseLane(ctx, req)
 	})
 }
@@ -61,7 +64,9 @@ func validateCloseRequest(req protocol.ExecutionCloseRequest) error {
 	if strings.TrimSpace(req.UniqueTag) == "" || strings.TrimSpace(req.Strategy) == "" || strings.TrimSpace(req.ConditionID) == "" || strings.TrimSpace(req.AssetID) == "" || strings.TrimSpace(req.Outcome) == "" {
 		return fmt.Errorf("close request unique tag, strategy, condition ID, asset ID, and outcome are required")
 	}
-	if req.Mode != protocol.ExecutionCloseModeLimit && req.Mode != protocol.ExecutionCloseModeForce {
+	switch req.Mode {
+	case protocol.ExecutionCloseModeLimit, protocol.ExecutionCloseModeForce, protocol.ExecutionCloseModeCancelOpen:
+	default:
 		return fmt.Errorf("invalid close mode %q", req.Mode)
 	}
 	if req.Mode == protocol.ExecutionCloseModeLimit {
@@ -127,6 +132,30 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 		e.publishCloseRejection(intent, declared)
 	}
 	return err
+}
+
+// cancelLaneOpenOrders withdraws the lane's working entry and does nothing
+// else: no position is sold, no close intent is written, and no close result is
+// published. The cancelled open child keeps reporting its own result, which is
+// what says how much of the entry filled before the cancel landed; a lane whose
+// entry has already filled or already gone has nothing to cancel and the
+// request ends here as a no-op. A prior close on the lane is left alone — it is
+// an exit the strategy still wants, and this mode never supersedes one.
+func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.ExecutionCloseRequest) error {
+	lane, err := e.laneActiveOrders(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
+	if err != nil {
+		return err
+	}
+	var cancelErr error
+	for _, candidate := range lane {
+		if candidate.intent.Kind == store.IntentClose {
+			continue
+		}
+		if err := e.cancelOpenOrder(ctx, candidate.intent, candidate.order); err != nil {
+			cancelErr = errors.Join(cancelErr, err)
+		}
+	}
+	return cancelErr
 }
 
 // supersededBy reports whether a fresh close in this mode retires the lane

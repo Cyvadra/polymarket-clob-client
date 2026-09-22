@@ -50,6 +50,22 @@ them produces orders the exchange rejects.
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | Cap on the total notional of active BUY reservations, checked inside the reservation transaction. Unset means no cap; over-cap buys are rejected with `EXPOSURE_LIMIT`. |
 | `POLYMARKET_PROXY_URL` | No | Absolute `http`, `https`, or `socks5` URL for outbound CLOB traffic. Unset means a direct connection. |
 
+### Running on a separate host
+
+`executiond` needs nothing from the strategy host but NATS. Point
+`EXECUTION_NATS_URL` at the broker's LAN address and give the daemon its own
+PostgreSQL — the execution store is this daemon's order and fill state, not a
+database shared with the strategy side. The broker itself is the part that has
+to be opened up: the strategy host publishes intents and market quotes into it,
+and a broker bound to loopback is unreachable from anywhere else. The core NATS
+used here carries no credentials and no TLS, so the port belongs on a trusted
+LAN behind a firewall rule, never on a public interface.
+
+Outbound internet is still required on whichever host runs the daemon: it calls
+the CLOB REST API and holds the account websocket open. The account stream is
+wallet-wide, so two daemons on one signing key both see every fill and each
+drops the other's as unknown — run only one per wallet.
+
 The proxy covers both the REST client and the websocket account stream, so
 orders and fills always leave from the same address. `socks5` applies to REST
 only; the websocket dialer supports `http`/`https` proxies, and falls back to

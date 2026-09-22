@@ -14,7 +14,7 @@
 | --- | --- | --- | --- |
 | `strategy.execution.open` | strategy -> executiond | `ExecutionOpenRequest` | Submit one open order request. |
 | `execution.open.result` | executiond -> strategy | `ExecutionOpenResult` | Success or failure for an open request. |
-| `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | Close current position using limit-close or force-close mode. |
+| `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | Close current position using limit-close or force-close mode, or withdraw a working entry with cancel-open mode. |
 | `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | Success or failure for a close request. |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition. |
 | `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Cached quote snapshot for tactics. |
@@ -58,11 +58,13 @@ Close requests also require `unique_tag` so the execution daemon can target the 
 | Field | Rules |
 | --- | --- |
 | `schema_version` | Required, `execution.v1`. |
-| `mode` | `LIMIT_CLOSE` or `FORCE_CLOSE`. |
-| `limit_price` | Required for `LIMIT_CLOSE`. |
+| `mode` | `LIMIT_CLOSE`, `FORCE_CLOSE`, or `CANCEL_OPEN`. |
+| `limit_price` | Required for `LIMIT_CLOSE`; ignored by the other two modes. |
 | `asset_id` | The token/asset being closed. |
 
 `LIMIT_CLOSE` submits a normal sell close. `FORCE_CLOSE` submits a `SELL 0.01 FAK` exit for the remaining position. If a new close arrives while one is still pending on the same lane, executiond cancels the old close, suppresses its terminal result, and retries the latest close after at least 200ms; `policy.cancel_replace_timeout_ms` bounds that replacement retry loop.
+
+`CANCEL_OPEN` withdraws the lane's working entry and does nothing else: it sells nothing, writes no close intent, and leaves a resting close alone, because that exit is still wanted. It needs no `limit_price`. A lane whose entry has already filled or is already gone has nothing to cancel, and the request is a no-op rather than a failure — the sender emits one per order without knowing whether the exchange still holds it.
 
 ## Results
 
@@ -72,7 +74,7 @@ Open results are emitted **only at terminal resolution** of an open — when the
 
 Close results are emitted only at terminal resolution of the strategy close child. A fill (including a partial fill) reports `SUCCEEDED` with `filled_shares` populated, while a cancel/expiry with no fill reports `FAILED`. executiond does not publish a close ACK or dispatch success when a request is merely accepted. If a close intent has been superseded by a newer close on the same lane, its terminal result is suppressed.
 
-A `LIMIT_CLOSE` emits exactly one close result: when its strategy sell child resolves, or `FAILED` with the rejection's `reason_code` when placement is refused (for example the exchange rejects the sell or the close cannot be planned). Two cases emit nothing: a malformed request (wrong schema version, missing fields, invalid limit price or time in force) is dropped, and a close on a lane with no shares left is treated as already complete. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`.
+A `LIMIT_CLOSE` emits exactly one close result: when its strategy sell child resolves, or `FAILED` with the rejection's `reason_code` when placement is refused (for example the exchange rejects the sell or the close cannot be planned). Two cases emit nothing: a malformed request (wrong schema version, missing fields, invalid limit price or time in force) is dropped, and a close on a lane with no shares left is treated as already complete. `FORCE_CLOSE` has no strategy close child (its `0.01 FAK` exit is an internal child), so it never emits a close result: treat it as fire-and-forget and confirm the exit from `position.features.*`. `CANCEL_OPEN` emits no close result either: the cancelled entry's own open result still resolves terminally and reports how much filled before the cancel landed.
 
 A `LIMIT_CLOSE` is sized for the whole lane and leaves a resting open buy working, so an entry that is still filling keeps growing behind it. executiond tracks that: once the position stops moving it cancels the resting close and re-places it for the current size. The replacement covers the whole position rather than the increment, because an increment on its own is usually below the market's minimum order size and would be refused. A `FORCE_CLOSE` still cancels every order on the lane, including the open buy — it exits before settlement and needs the position to stop moving.
 
@@ -122,5 +124,17 @@ Order events use the same numeric representation for `matched_shares` when the f
   "asset_id": "12345",
   "outcome": "Up",
   "mode": "FORCE_CLOSE"
+}
+```
+
+```json
+{
+  "schema_version": "execution.v1",
+  "unique_tag": "late-gap",
+  "strategy": "late-gap",
+  "condition_id": "0xcondition",
+  "asset_id": "12345",
+  "outcome": "Up",
+  "mode": "CANCEL_OPEN"
 }
 ```

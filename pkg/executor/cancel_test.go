@@ -598,3 +598,59 @@ func TestLoopReportsAPassThatStopsKeepingUpAndItsRecovery(t *testing.T) {
 		t.Fatalf("unexpected recovery report: %q", reported[1])
 	}
 }
+
+// cancelOpenRequest carries no limit price: CANCEL_OPEN sells nothing, so it
+// has no price to name.
+func cancelOpenRequest() protocol.ExecutionCloseRequest {
+	return protocol.ExecutionCloseRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", AssetID: "token", Outcome: "Up", Mode: protocol.ExecutionCloseModeCancelOpen}
+}
+
+// A CANCEL_OPEN withdraws the working entry and touches nothing else: the
+// lane's prior close is an exit the strategy still wants, no sell is placed,
+// and no close result is published, because the cancelled entry's own open
+// result reports what filled.
+func TestExecuteCloseCancelOpenCancelsOnlyTheWorkingEntry(t *testing.T) {
+	storer := laneWithOpenAndClose()
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-new"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteClose(context.Background(), cancelOpenRequest()); err != nil {
+		t.Fatalf("execute cancel open: %v", err)
+	}
+	if len(client.canceledOrderIDs) != 1 || client.canceledOrderIDs[0] != "order-open" {
+		t.Fatalf("expected only the working entry canceled, got %+v", client.canceledOrderIDs)
+	}
+	if client.submissions != 0 {
+		t.Fatalf("expected no order submitted by a cancel, got %d", client.submissions)
+	}
+	if len(storer.insertedIntents) != 0 {
+		t.Fatalf("expected no close intent written by a cancel, got %+v", storer.insertedIntents)
+	}
+	if results := closeResults(pub); len(results) != 0 {
+		t.Fatalf("expected a cancel to publish no close result, got %+v", results)
+	}
+}
+
+// A cancel for a lane whose entry has already filled or already gone is a
+// no-op, not a failure: the engine sends one per order without knowing whether
+// the exchange still holds it.
+func TestExecuteCloseCancelOpenWithNothingWorkingIsANoOp(t *testing.T) {
+	storer := &fakeStore{inserted: true, positions: lanePosition()}
+	client := &fakeCLOB{}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteClose(context.Background(), cancelOpenRequest()); err != nil {
+		t.Fatalf("expected a cancel with nothing to cancel to succeed, got %v", err)
+	}
+	if len(client.canceledOrderIDs) != 0 || client.submissions != 0 || len(closeResults(pub)) != 0 {
+		t.Fatalf("expected the cancel to do nothing, got cancels=%+v submissions=%d results=%+v", client.canceledOrderIDs, client.submissions, closeResults(pub))
+	}
+}

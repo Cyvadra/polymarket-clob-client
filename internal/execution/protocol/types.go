@@ -127,6 +127,14 @@ type ExecutionCloseMode string
 const (
 	ExecutionCloseModeLimit ExecutionCloseMode = "LIMIT_CLOSE"
 	ExecutionCloseModeForce ExecutionCloseMode = "FORCE_CLOSE"
+	// ExecutionCloseModeCancelOpen withdraws a working entry without selling
+	// anything. It rides the close subject because that is where a working BUY
+	// is already cancelled — a FORCE_CLOSE does it before it sells — rather
+	// than on a subject of its own every consumer would have to learn. It
+	// needs no limit price, touches no position, and a lane with no working
+	// open order is a no-op. It publishes no close result: the cancelled
+	// entry's own open result still reports how much of it filled.
+	ExecutionCloseModeCancelOpen ExecutionCloseMode = "CANCEL_OPEN"
 )
 
 type ExecutionCloseRequest struct {
