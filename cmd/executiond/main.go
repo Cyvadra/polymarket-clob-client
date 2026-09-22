@@ -88,12 +88,15 @@ func run() error {
 		return err
 	}
 	if strings.TrimSpace(clobConfig.PrivateKey) == "" {
-		return fmt.Errorf("POLYMARKET_PRIVATE_KEY is required for executiond")
+		return fmt.Errorf("executiond requires a signing key: set POLYMARKET_PRIVATE_KEY_FILE (plus POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE), or POLYMARKET_PRIVATE_KEY for local development")
 	}
 	clob, err := clobclient.New(clobConfig)
 	if err != nil {
 		return fmt.Errorf("create CLOB client: %w", err)
 	}
+	// Log the address, never the key, so an operator can confirm which wallet
+	// was unlocked without reading it back out of the config.
+	log.Printf("signing as %s (maker %s)", clob.Address(), clob.MakerAddress())
 	credentials, err := clob.EnsureCredentials(ctx)
 	if err != nil {
 		return err

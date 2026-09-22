@@ -9,16 +9,62 @@ untracked local environment file.
 Everything else on this page has a working default and is documented here for
 tuning and troubleshooting.
 
-## Required
+## Required: the signing key
+
+`executiond` needs a wallet signing key for L1 auth and order signing. Supply it
+in exactly one of two ways; setting both is an error.
 
 | Variable | Description |
 | --- | --- |
-| `POLYMARKET_PRIVATE_KEY` | Wallet signing key. Used for L1 auth and order signing. |
+| `POLYMARKET_PRIVATE_KEY_FILE` | Path to a keystore v3 JSON file holding the key encrypted at rest. **Preferred for deployments.** |
+| `POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE` | Path to the file holding the passphrase for the above. Required with `_FILE`. |
+| `POLYMARKET_PRIVATE_KEY_PASSPHRASE` | Inline passphrase, an alternative to `_PASSPHRASE_FILE` for local development and CI. |
+| `POLYMARKET_PRIVATE_KEY` | The raw hex key. Convenient for development; avoid on a deployed host, where it sits in plaintext in the env file and in the process environment. |
+
+Both files must be mode `0600`; a group- or world-readable file is rejected at
+startup rather than used, the way `ssh` refuses a loose identity file.
+Decryption uses the standard (not "light") scrypt parameters, which allocate
+roughly 256 MiB for about a second at startup. On a small shared host that
+spike can get `executiond` OOM-killed into a restart loop, so either leave
+headroom for it or re-encrypt the keystore with lighter parameters. The key
+is decrypted once during startup and held only in memory — it is never written
+back to disk, put into the environment, or logged. `executiond` logs the
+derived signer address at startup so you can confirm which wallet was unlocked.
+
+### Managing the encrypted key
+
+The `polykey` command (`cmd/polykey`, shipped to `/opt/executiond/current/polykey`)
+creates and inspects these files. It never takes the key or the passphrase as a
+flag, so neither reaches the shell history or the process list.
+
+```bash
+# Create the passphrase file, then encrypt the key (read from stdin).
+(umask 077; head -c 32 /dev/urandom | base64 > private-key.pass)
+polykey encrypt --key-file private-key.json --passphrase-file private-key.pass
+
+# Which wallet does this file hold? (no passphrase needed)
+polykey inspect --key-file private-key.json
+
+# Will the daemon be able to unlock it?
+polykey verify --key-file private-key.json --passphrase-file private-key.pass
+
+# Rotate the passphrase, keeping the same key. rekey only re-encrypts the
+# keystore, so install the new passphrase afterwards or nothing will unlock it.
+(umask 077; head -c 32 /dev/urandom | base64 > private-key.pass.new)
+polykey rekey --key-file private-key.json \
+  --passphrase-file private-key.pass --new-passphrase-file private-key.pass.new
+mv private-key.pass.new private-key.pass
+polykey verify --key-file private-key.json --passphrase-file private-key.pass
+```
+
+With no `--passphrase-file`, `polykey` prompts (twice, with confirmation) when
+stdin is a terminal. The on-disk format is Web3 Secret Storage v3, the same
+keystore JSON `geth` and `clef` write, so existing wallet tooling can read it.
 
 ## L2 API credentials
 
 `executiond` derives its CLOB API credentials (key, secret, passphrase) from
-`POLYMARKET_PRIVATE_KEY` at startup: it calls `GET /auth/derive-api-key` and,
+the signing key at startup: it calls `GET /auth/derive-api-key` and,
 only if the signer has no key yet, `POST /auth/api-key`. Deriving is
 idempotent, so restarts reuse the same credentials and never create duplicates.
 Do not configure them.

@@ -29,6 +29,11 @@ CONFIG_ROOT=/etc/executiond
 DATA_ROOT=/var/lib/executiond
 RELEASE_ID=${EXECUTIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 STAGE_DIR=
+# Encrypted signing key material, shipped alongside executiond.env when the env
+# file selects POLYMARKET_PRIVATE_KEY_FILE.
+KEY_FILE="$PRIVATE_DIR/private-key.json"
+PASSPHRASE_FILE="$PRIVATE_DIR/private-key.pass"
+USE_KEY_FILE=0
 
 log() {
 	printf '[deploy:%s] %s\n' "$HOST" "$*"
@@ -45,7 +50,7 @@ cleanup() {
 
 require_commands() {
 	local command_name
-	for command_name in go ssh scp tar sha256sum; do
+	for command_name in go ssh scp tar sha256sum stat; do
 		command -v "$command_name" >/dev/null || fail "required command not found: $command_name"
 	done
 }
@@ -67,14 +72,75 @@ require_go_version() {
 require_private_bundle() {
 	local env_file="$PRIVATE_DIR/executiond.env"
 	[[ -f $env_file ]] || fail "missing private production file: $env_file"
-	! grep -q '<CHANGE_ME>' "$env_file" || fail "replace every <CHANGE_ME> value in $env_file"
-	grep -Eq '^[[:space:]]*POLYMARKET_PRIVATE_KEY=[^[:space:]]+' "$env_file" || \
-		fail "$env_file must set POLYMARKET_PRIVATE_KEY"
+	# Only real settings matter: the commented examples in the template carry
+	# <CHANGE_ME> on purpose and are meant to be left alone.
+	! grep -Eq '^[[:space:]]*[^#[:space:]].*<CHANGE_ME>' "$env_file" || \
+		fail "replace every <CHANGE_ME> value in $env_file (commented lines are ignored)"
+	local has_plaintext_key=0 has_key_file=0
+	grep -Eq '^[[:space:]]*POLYMARKET_PRIVATE_KEY=[^[:space:]]+' "$env_file" && has_plaintext_key=1
+	grep -Eq '^[[:space:]]*POLYMARKET_PRIVATE_KEY_FILE=[^[:space:]]+' "$env_file" && has_key_file=1
+	if (( has_plaintext_key && has_key_file )); then
+		fail "$env_file sets both POLYMARKET_PRIVATE_KEY and POLYMARKET_PRIVATE_KEY_FILE; use exactly one"
+	fi
+	if (( ! has_plaintext_key && ! has_key_file )); then
+		fail "$env_file must set POLYMARKET_PRIVATE_KEY_FILE (preferred) or POLYMARKET_PRIVATE_KEY"
+	fi
+	if (( has_key_file )); then
+		USE_KEY_FILE=1
+		require_key_paths "$env_file"
+		require_encrypted_key
+	else
+		printf '[deploy:%s] WARNING: %s ships the signing key in plaintext; see scripts/README.md for polykey\n' \
+			"$HOST" "$env_file" >&2
+	fi
 	grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=[^[:space:]]+' "$env_file" || \
 		fail "$env_file must set EXECUTION_POSTGRES_URL"
 	if grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=postgres://user:password@127\.0\.0\.1:5432/execution' "$env_file"; then
 		fail "$env_file still uses the placeholder EXECUTION_POSTGRES_URL; point it at the real database"
 	fi
+}
+
+# require_key_paths checks that the daemon will look for the keystore where
+# install_bundle actually puts it. The upload destinations are fixed, so a
+# custom path in the env file would otherwise pass preflight and only fail at
+# startup, after the deploy has already swapped the release.
+require_key_paths() {
+	local env_file=$1 name expected actual
+	for name in POLYMARKET_PRIVATE_KEY_FILE POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE; do
+		case $name in
+			POLYMARKET_PRIVATE_KEY_FILE) expected="$CONFIG_ROOT/private-key.json" ;;
+			*) expected="$CONFIG_ROOT/private-key.pass" ;;
+		esac
+		actual=$(sed -nE "s/^[[:space:]]*$name=[[:space:]]*//p" "$env_file" | tail -n1)
+		actual=${actual%$'\r'}
+		actual=${actual%"${actual##*[![:space:]]}"}
+		actual=${actual#\"}
+		actual=${actual%\"}
+		[[ -n $actual ]] || fail "$env_file must set $name=$expected"
+		[[ $actual == "$expected" ]] || \
+			fail "$env_file sets $name=$actual, but deploy.sh installs the key bundle at $expected; use $expected"
+	done
+}
+
+# require_encrypted_key checks the keystore bundle locally, so a wrong
+# passphrase or a loose file mode fails the deploy instead of the daemon.
+require_encrypted_key() {
+	[[ -f $KEY_FILE ]] || fail "missing encrypted signing key: $KEY_FILE (create it with: go run ./cmd/polykey encrypt --key-file $KEY_FILE --passphrase-file $PASSPHRASE_FILE)"
+	[[ -f $PASSPHRASE_FILE ]] || fail "missing passphrase file: $PASSPHRASE_FILE"
+	local mode secret
+	for secret in "$KEY_FILE" "$PASSPHRASE_FILE"; do
+		mode=$(stat -c '%a' "$secret" 2>/dev/null || stat -f '%Lp' "$secret")
+		[[ $mode == 600 ]] || fail "$secret has mode $mode; run: chmod 600 $secret"
+	done
+	local local_polykey address
+	local_polykey=$(mktemp)
+	(cd "$REPO_ROOT" && go build -o "$local_polykey" ./cmd/polykey) || fail "could not build polykey"
+	address=$("$local_polykey" verify --key-file "$KEY_FILE" --passphrase-file "$PASSPHRASE_FILE") || {
+		rm -f "$local_polykey"
+		fail "$KEY_FILE cannot be decrypted with $PASSPHRASE_FILE"
+	}
+	rm -f "$local_polykey"
+	log "signing key unlocks to $address"
 }
 
 build_bundle() {
@@ -84,7 +150,8 @@ build_bundle() {
 	log "building $OS/$ARCH release $RELEASE_ID"
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/executiond" ./cmd/executiond)
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/executiontest" ./cmd/executiontest)
-	tar -C "$STAGE_DIR" -czf "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" executiond executiontest
+	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/polykey" ./cmd/polykey)
+	tar -C "$STAGE_DIR" -czf "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" executiond executiontest polykey
 	(cd "$STAGE_DIR" && sha256sum "executiond-$RELEASE_ID.tar.gz" >"executiond-$RELEASE_ID.tar.gz.sha256")
 }
 
@@ -98,10 +165,14 @@ verify_target() {
 upload_and_activate() {
 	local remote_stage=/tmp/executiond-deploy-$RELEASE_ID
 	ssh "$TARGET@$HOST" "rm -rf '$remote_stage' && install -d -m 0700 '$remote_stage'"
+	local key_material=()
+	if (( USE_KEY_FILE )); then
+		key_material=("$KEY_FILE" "$PASSPHRASE_FILE")
+	fi
 	scp "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256" \
-		"$PRIVATE_DIR/executiond.env" \
+		"$PRIVATE_DIR/executiond.env" ${key_material[@]+"${key_material[@]}"} \
 		"$TARGET@$HOST:$remote_stage/"
-	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' bash -s" <<'REMOTE'
+	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 
 release_dir="$INSTALL_ROOT/releases/$RELEASE_ID"
@@ -131,15 +202,29 @@ start_pm2_app() {
 	"$PM2_BIN" save
 }
 
+# secret_owner prints the install(1) ownership flags for a file under
+# $CONFIG_ROOT. The env file is sourced by run.sh as root, so root owns it:
+# anything $APP_USER can write, root would execute on the next restart. The key
+# bundle is opened by the daemon itself, after it has dropped to $APP_USER, so
+# that has to be owned by $APP_USER.
+secret_owner() {
+	case $1 in
+		executiond.env) printf -- '-o root -g root' ;;
+		*) printf -- '-o %s -g %s' "$APP_USER" "$APP_GROUP" ;;
+	esac
+}
+
 rollback() {
 	local status=$?
 	trap - ERR
 	(( activation_started )) || exit "$status"
-	if [[ -f $REMOTE_STAGE/previous/executiond.env ]]; then
-		install -o root -g root -m 0600 "$REMOTE_STAGE/previous/executiond.env" "$CONFIG_ROOT/executiond.env"
-	else
-		rm -f "$CONFIG_ROOT/executiond.env"
-	fi
+	for secret in executiond.env private-key.json private-key.pass; do
+		if [[ -f $REMOTE_STAGE/previous/$secret ]]; then
+			install $(secret_owner "$secret") -m 0600 "$REMOTE_STAGE/previous/$secret" "$CONFIG_ROOT/$secret"
+		else
+			rm -f "$CONFIG_ROOT/$secret"
+		fi
+	done
 	if [[ -n $previous_release && -d $previous_release ]]; then
 		ln -sfn "$previous_release" "$current_link.new"
 		mv -Tf "$current_link.new" "$current_link"
@@ -167,21 +252,26 @@ if ! getent passwd "$APP_USER" >/dev/null; then
 fi
 
 install -d -o root -g root -m 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"
-install -d -o root -g root -m 0750 "$CONFIG_ROOT"
+# executiond (not root) execs the daemon and must be able to read the key
+# material under $CONFIG_ROOT, so the directory is group-owned by $APP_GROUP.
+install -d -o root -g "$APP_GROUP" -m 0750 "$CONFIG_ROOT"
 install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750 "$DATA_ROOT"
 (cd "$REMOTE_STAGE" && sha256sum -c "executiond-$RELEASE_ID.tar.gz.sha256")
 tar -C "$REMOTE_STAGE" -xzf "$REMOTE_STAGE/executiond-$RELEASE_ID.tar.gz"
 install -d -o root -g root -m 0755 "$release_dir"
 install -o root -g root -m 0755 "$REMOTE_STAGE/executiond" "$release_dir/executiond"
 install -o root -g root -m 0755 "$REMOTE_STAGE/executiontest" "$release_dir/executiontest"
+install -o root -g root -m 0755 "$REMOTE_STAGE/polykey" "$release_dir/polykey"
 
 if [[ -L $current_link ]]; then
 	previous_release=$(readlink -f "$current_link")
 fi
 install -d -m 0700 "$REMOTE_STAGE/previous"
-if [[ -f $CONFIG_ROOT/executiond.env ]]; then
-	install -m 0600 "$CONFIG_ROOT/executiond.env" "$REMOTE_STAGE/previous/executiond.env"
-fi
+for secret in executiond.env private-key.json private-key.pass; do
+	if [[ -f $CONFIG_ROOT/$secret ]]; then
+		install -m 0600 "$CONFIG_ROOT/$secret" "$REMOTE_STAGE/previous/$secret"
+	fi
+done
 activation_started=1
 trap rollback ERR
 
@@ -199,7 +289,17 @@ exec runuser -u "$APP_USER" -p -- "$current_link/executiond"
 EOF
 chmod 0755 "$run_script"
 
+# root owns the env file: run.sh sources it as root before dropping privileges,
+# so a file $APP_USER could write would be a root-shell injection point. The
+# daemon never reads it -- it inherits these as environment variables across
+# the runuser -p.
 install -o root -g root -m 0600 "$REMOTE_STAGE/executiond.env" "$CONFIG_ROOT/executiond.env"
+if (( USE_KEY_FILE )); then
+	install -o "$APP_USER" -g "$APP_GROUP" -m 0600 "$REMOTE_STAGE/private-key.json" "$CONFIG_ROOT/private-key.json"
+	install -o "$APP_USER" -g "$APP_GROUP" -m 0600 "$REMOTE_STAGE/private-key.pass" "$CONFIG_ROOT/private-key.pass"
+else
+	rm -f "$CONFIG_ROOT/private-key.json" "$CONFIG_ROOT/private-key.pass"
+fi
 ln -sfn "$release_dir" "$current_link.new"
 mv -Tf "$current_link.new" "$current_link"
 start_pm2_app

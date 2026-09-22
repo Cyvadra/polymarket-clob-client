@@ -128,11 +128,13 @@ The published position is an execution view, not a settlement or redemption engi
 
 ### Running `executiond`
 
-`executiond` needs only `POLYMARKET_PRIVATE_KEY`. It derives the L2 API credentials (key, secret, passphrase) from the private key at startup, using `GET /auth/derive-api-key` and calling `POST /auth/api-key` only when the signer has no credentials yet. Derivation is idempotent, so restarts never create duplicates, and the credentials should not be configured by hand.
+`executiond` needs only a signing key. The preferred form is the encrypted keystore pair `POLYMARKET_PRIVATE_KEY_FILE` / `POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE`, created with `go run ./cmd/polykey encrypt`; `POLYMARKET_PRIVATE_KEY` holds the raw hex key instead and is meant for local development. Set one form or the other, never both. It derives the L2 API credentials (key, secret, passphrase) from the private key at startup, using `GET /auth/derive-api-key` and calling `POST /auth/api-key` only when the signer has no credentials yet. Derivation is idempotent, so restarts never create duplicates, and the credentials should not be configured by hand.
 
 | Variable | Required | Default |
 | --- | --- | --- |
-| `POLYMARKET_PRIVATE_KEY` | Yes | none |
+| `POLYMARKET_PRIVATE_KEY_FILE` | Yes, unless `POLYMARKET_PRIVATE_KEY` is set | none |
+| `POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE` | Yes, with `POLYMARKET_PRIVATE_KEY_FILE` | none |
+| `POLYMARKET_PRIVATE_KEY` | Yes, unless the keystore pair above is set | none |
 | `EXECUTION_NATS_URL` | No | `nats://127.0.0.1:4222` |
 | `EXECUTION_POSTGRES_URL` | No | `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable` (a placeholder; replace it outside local development) |
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | no cap |

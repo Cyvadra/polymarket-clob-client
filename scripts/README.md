@@ -26,10 +26,12 @@ exporting them by hand.
 
 | Path | Purpose |
 |---|---|
-| `/opt/executiond/releases/<timestamp>` | Immutable application releases (`executiond`, `executiontest`) |
+| `/opt/executiond/releases/<timestamp>` | Immutable application releases (`executiond`, `executiontest`, `polykey`) |
 | `/opt/executiond/current` | Active release symlink |
 | `/opt/executiond/run.sh` | Wrapper pm2 runs: sources the env file, then drops to `executiond` and execs `current/executiond` |
-| `/etc/executiond/executiond.env` | Runtime environment, sourced by `run.sh` |
+| `/etc/executiond/executiond.env` | Runtime environment, sourced by `run.sh`. Mode 0600, owned by `root` — `run.sh` sources it as root, so `executiond` must not be able to write it |
+| `/etc/executiond/private-key.json` | Signing key, encrypted at rest (keystore v3). Mode 0600, owned by `executiond` |
+| `/etc/executiond/private-key.pass` | Passphrase for the above. Mode 0600, owned by `executiond` |
 | `/var/lib/executiond` | Service working directory, owned by the unprivileged `executiond` user |
 
 The `executiond` pm2 app always runs `run.sh` as root — needed to read the
@@ -62,14 +64,43 @@ definition itself never changes between releases.
 Each host has a git-ignored bundle at `scripts/private/<ssh-host>/`:
 
 ```
-scripts/private/<ssh-host>/executiond.env   # required: app runtime secrets
-scripts/private/<ssh-host>/deploy.env       # optional: deploy.sh overrides
+scripts/private/<ssh-host>/executiond.env      # required: app runtime secrets
+scripts/private/<ssh-host>/private-key.json    # required: signing key, encrypted at rest
+scripts/private/<ssh-host>/private-key.pass    # required: passphrase for the above
+scripts/private/<ssh-host>/deploy.env          # optional: deploy.sh overrides
 ```
 
 Copy `scripts/executiond.env.example` to `executiond.env`, replace every
-`<CHANGE_ME>`, and keep the file mode `0600`. `scripts/deploy.sh` uploads it
+`<CHANGE_ME>` on an active setting (the preflight ignores commented lines), and
+keep the file mode `0600`. `scripts/deploy.sh` uploads it
 to `/etc/executiond/executiond.env`, which `run.sh` sources before dropping
 privileges and execing the binary under pm2.
+
+### Signing key
+
+The signing key is never stored in plaintext. Create the encrypted keystore and
+its passphrase file with `polykey`:
+
+```bash
+go build -o /tmp/polykey ./cmd/polykey
+(umask 077; head -c 32 /dev/urandom | base64 > scripts/private/<ssh-host>/private-key.pass)
+/tmp/polykey encrypt \
+  --key-file scripts/private/<ssh-host>/private-key.json \
+  --passphrase-file scripts/private/<ssh-host>/private-key.pass
+```
+
+`encrypt` reads the hex key from stdin (or prompts without echo on a terminal),
+so it never reaches the shell history. Both files must be mode `0600`.
+
+Before uploading anything, `deploy.sh` checks the modes and runs
+`polykey verify` locally, so a wrong passphrase fails the deploy instead of the
+daemon. It then installs both files as `/etc/executiond/private-key.{json,pass}`,
+owned by the `executiond` user, and restores the previous pair on rollback.
+`executiond` decrypts the key once at startup and logs only the resulting
+address. See `docs/configuration.md` for the `polykey` subcommands.
+
+A bundle whose `executiond.env` still sets the plaintext `POLYMARKET_PRIVATE_KEY`
+deploys with a warning; setting both forms is an error.
 
 Copy `scripts/deploy.env.example` to `deploy.env` if a host needs different
 deploy-time settings (e.g. a non-default `EXECUTIOND_PM2_BIN`). It holds no
