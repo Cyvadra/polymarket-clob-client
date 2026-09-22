@@ -1,7 +1,11 @@
 // Package keyfile stores an Ethereum signing key encrypted at rest.
 //
-// The on-disk format is Web3 Secret Storage v3 (the keystore JSON geth and
-// clef write), so the files stay interoperable with existing wallet tooling.
+// The key is encrypted as Web3 Secret Storage v3 (the keystore JSON geth and
+// clef write) under a passphrase peppered with an app secret compiled into
+// this program, and that JSON is sealed in an AES-256-GCM envelope keyed from
+// the same secret (see seal.go). The key file and the passphrase together are
+// therefore not enough to recover the key without this program; this is
+// deliberate, and it means the files no longer open in geth or other wallets.
 // The passphrase lives in a separate file so an operator can keep the two on
 // different media; both files must be readable only by their owner.
 package keyfile
@@ -34,7 +38,7 @@ const (
 	ScryptP = keystore.StandardScryptP
 )
 
-// Encrypt converts a hex-encoded secp256k1 private key into keystore v3 JSON.
+// Encrypt converts a hex-encoded secp256k1 private key into a sealed key file.
 // The hex may carry a "0x" prefix and surrounding whitespace, matching what
 // clobclient.Config.PrivateKey accepts.
 func Encrypt(privateKeyHex, passphrase string, scryptN, scryptP int) ([]byte, error) {
@@ -53,22 +57,44 @@ func Encrypt(privateKeyHex, passphrase string, scryptN, scryptP int) ([]byte, er
 		Id:         id,
 		Address:    crypto.PubkeyToAddress(key.PublicKey),
 		PrivateKey: key,
-	}, passphrase, scryptN, scryptP)
+	}, pepper(passphrase), scryptN, scryptP)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt key: %w", err)
 	}
-	return encrypted, nil
+	return seal(encrypted)
 }
 
-// Decrypt returns the hex-encoded private key and its address from keystore
-// v3 JSON. The returned string is secret: hand it straight to the client and
+// Decrypt returns the hex-encoded private key and its address from a sealed
+// key file. The returned string is secret: hand it straight to the client and
 // never log it or write it back to disk or the environment.
 func Decrypt(keyJSON []byte, passphrase string) (privateKeyHex, address string, err error) {
+	inner, err := unseal(keyJSON)
+	if err != nil {
+		return "", "", err
+	}
+	key, err := keystore.DecryptKey(inner, pepper(passphrase))
+	if err != nil {
+		return "", "", fmt.Errorf("decrypt key: %w", err)
+	}
+	return hexKey(key.PrivateKey), key.Address.Hex(), nil
+}
+
+// DecryptLegacy decrypts a plain keystore v3 file written before sealing, with
+// the raw passphrase. It exists only so polykey migrate can convert one.
+func DecryptLegacy(keyJSON []byte, passphrase string) (privateKeyHex, address string, err error) {
+	if !isLegacyKeystore(keyJSON) {
+		return "", "", fmt.Errorf("not an unsealed keystore v3 JSON")
+	}
 	key, err := keystore.DecryptKey(keyJSON, passphrase)
 	if err != nil {
 		return "", "", fmt.Errorf("decrypt key: %w", err)
 	}
 	return hexKey(key.PrivateKey), key.Address.Hex(), nil
+}
+
+// ReadKeyFile reads a key file after the same permission check Load applies.
+func ReadKeyFile(keyPath string) ([]byte, error) {
+	return readPrivateFile(keyPath, "private key file")
 }
 
 // Load reads a keystore file and decrypts it. The file must not be readable
@@ -86,17 +112,21 @@ func Load(keyPath, passphrase string) (privateKeyHex, address string, err error)
 }
 
 // Address reports which account a keystore file holds without needing the
-// passphrase, so an operator (or the deploy preflight) can confirm the file
+// passphrase (but, being sealed, not without this program), so an operator (or the deploy preflight) can confirm the file
 // is the one they meant to ship.
 func Address(keyPath string) (string, error) {
 	keyJSON, err := readPrivateFile(keyPath, "private key file")
 	if err != nil {
 		return "", err
 	}
+	inner, err := unseal(keyJSON)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", keyPath, err)
+	}
 	var header struct {
 		Address string `json:"address"`
 	}
-	if err := json.Unmarshal(keyJSON, &header); err != nil {
+	if err := json.Unmarshal(inner, &header); err != nil {
 		return "", fmt.Errorf("%s: parse keystore JSON: %w", keyPath, err)
 	}
 	if header.Address == "" {

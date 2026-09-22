@@ -196,3 +196,87 @@ func writeFile(t *testing.T, contents string, mode os.FileMode) string {
 	}
 	return path
 }
+
+func TestSealedFileDoesNotOpenWithStockTooling(t *testing.T) {
+	sealed, err := Encrypt(testKeyHex, "pass", testScryptN, testScryptP)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if isLegacyKeystore(sealed) || strings.Contains(string(sealed), strings.ToLower(testAddress[2:])) {
+		t.Fatal("sealed file looks like a keystore or exposes the address")
+	}
+	if _, err := keystore.DecryptKey(sealed, "pass"); err == nil {
+		t.Fatal("stock keystore decrypted the sealed file")
+	}
+	// Even with the envelope stripped, the operator's passphrase alone must
+	// not open the inner keystore.
+	inner, err := unseal(sealed)
+	if err != nil {
+		t.Fatalf("unseal: %v", err)
+	}
+	if _, err := keystore.DecryptKey(inner, "pass"); err == nil {
+		t.Fatal("inner keystore opened with the unpeppered passphrase")
+	}
+}
+
+func TestUnsealRejectsTampering(t *testing.T) {
+	sealed, err := Encrypt(testKeyHex, "pass", testScryptN, testScryptP)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	for name, mutate := range map[string]func([]byte){
+		"magic":      func(b []byte) { b[0] ^= 1 },
+		"version":    func(b []byte) { b[4] = 9 },
+		"nonce":      func(b []byte) { b[6] ^= 1 },
+		"ciphertext": func(b []byte) { b[len(b)-1] ^= 1 },
+	} {
+		tampered := append([]byte(nil), sealed...)
+		mutate(tampered)
+		if _, _, err := Decrypt(tampered, "pass"); err == nil {
+			t.Errorf("%s: tampered file decrypted", name)
+		}
+	}
+	if _, _, err := Decrypt(sealed[:10], "pass"); err == nil {
+		t.Error("truncated file decrypted")
+	}
+}
+
+func TestLegacyKeystoreRejectedThenMigrated(t *testing.T) {
+	key, err := parseHexKey(testKeyHex)
+	if err != nil {
+		t.Fatalf("parseHexKey: %v", err)
+	}
+	legacy, err := keystore.EncryptKey(&keystore.Key{
+		Address:    crypto.PubkeyToAddress(key.PublicKey),
+		PrivateKey: key,
+	}, "pass", testScryptN, testScryptP)
+	if err != nil {
+		t.Fatalf("EncryptKey: %v", err)
+	}
+	keyPath := writeFile(t, string(legacy), 0o600)
+	if _, _, err := Load(keyPath, "pass"); err == nil || !strings.Contains(err.Error(), "polykey migrate") {
+		t.Fatalf("Load of legacy keystore: got %v, want a migrate hint", err)
+	}
+
+	privateKey, address, err := DecryptLegacy(legacy, "pass")
+	if err != nil {
+		t.Fatalf("DecryptLegacy: %v", err)
+	}
+	sealed, err := Encrypt(privateKey, "pass", testScryptN, testScryptP)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if err := Write(keyPath, sealed, true); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	_, loaded, err := Load(keyPath, "pass")
+	if err != nil {
+		t.Fatalf("Load after migrate: %v", err)
+	}
+	if loaded != address || loaded != testAddress {
+		t.Fatalf("address after migrate = %s, want %s", loaded, testAddress)
+	}
+	if _, _, err := DecryptLegacy(sealed, "pass"); err == nil {
+		t.Fatal("DecryptLegacy accepted a sealed file")
+	}
+}

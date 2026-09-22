@@ -30,7 +30,7 @@ exporting them by hand.
 | `/opt/executiond/current` | Active release symlink |
 | `/opt/executiond/run.sh` | Wrapper pm2 runs: sources the env file, then drops to `executiond` and execs `current/executiond` |
 | `/etc/executiond/executiond.env` | Runtime environment, sourced by `run.sh`. Mode 0600, owned by `root` — `run.sh` sources it as root, so `executiond` must not be able to write it |
-| `/etc/executiond/private-key.json` | Signing key, encrypted at rest (keystore v3). Mode 0600, owned by `executiond` |
+| `/etc/executiond/private-key.json` | Signing key, encrypted at rest (sealed keystore, see `docs/configuration.md`). Mode 0600, owned by `executiond` |
 | `/etc/executiond/private-key.pass` | Passphrase for the above. Mode 0600, owned by `executiond` |
 | `/var/lib/executiond` | Service working directory, owned by the unprivileged `executiond` user |
 

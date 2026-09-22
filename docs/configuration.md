@@ -16,7 +16,7 @@ in exactly one of two ways; setting both is an error.
 
 | Variable | Description |
 | --- | --- |
-| `POLYMARKET_PRIVATE_KEY_FILE` | Path to a keystore v3 JSON file holding the key encrypted at rest. **Preferred for deployments.** |
+| `POLYMARKET_PRIVATE_KEY_FILE` | Path to the sealed key file (created by `polykey`) holding the key encrypted at rest. **Preferred for deployments.** |
 | `POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE` | Path to the file holding the passphrase for the above. Required with `_FILE`. |
 | `POLYMARKET_PRIVATE_KEY_PASSPHRASE` | Inline passphrase, an alternative to `_PASSPHRASE_FILE` for local development and CI. |
 | `POLYMARKET_PRIVATE_KEY` | The raw hex key. Convenient for development; avoid on a deployed host, where it sits in plaintext in the env file and in the process environment. |
@@ -55,11 +55,25 @@ polykey rekey --key-file private-key.json \
   --passphrase-file private-key.pass --new-passphrase-file private-key.pass.new
 mv private-key.pass.new private-key.pass
 polykey verify --key-file private-key.json --passphrase-file private-key.pass
+
+# Convert a plain keystore v3 file written by an older polykey. The passphrase
+# is unchanged; executiond refuses the unconverted file.
+polykey migrate --key-file private-key.json --passphrase-file private-key.pass
 ```
 
 With no `--passphrase-file`, `polykey` prompts (twice, with confirmation) when
-stdin is a terminal. The on-disk format is Web3 Secret Storage v3, the same
-keystore JSON `geth` and `clef` write, so existing wallet tooling can read it.
+stdin is a terminal.
+
+The key file is sealed to this program. Inside is a Web3 Secret Storage v3
+keystore, but it is encrypted under the passphrase mixed with an app secret
+compiled into the binary (HMAC-SHA256), and the whole keystore is then wrapped
+in an AES-256-GCM envelope keyed from the same secret. Someone who steals both
+the key file and the passphrase file still cannot recover the key with geth,
+MetaMask or `eth_account`: they also need our binary and must reverse-engineer
+it. This is obfuscation, not a cryptographic boundary. Anyone who has the
+binary can extract the secret, so keep releases as private as the key files.
+Changing the secret in `internal/keyfile/appsecret.go` makes every existing
+key file unreadable.
 
 ## L2 API credentials
 

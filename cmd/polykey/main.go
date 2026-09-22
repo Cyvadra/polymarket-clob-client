@@ -44,6 +44,8 @@ func run(args []string) error {
 		return runVerify(args[1:])
 	case "rekey":
 		return runRekey(args[1:])
+	case "migrate":
+		return runMigrate(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -57,10 +59,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: polykey <command> [flags]
 
 commands:
-  encrypt   encrypt a hex private key (read from stdin or prompted) into keystore v3 JSON
+  encrypt   encrypt a hex private key (read from stdin or prompted) into a sealed key file
   inspect   print the address a keystore file holds, without the passphrase
   verify    decrypt a keystore file and print its address; exits non-zero on failure
   rekey     re-encrypt a keystore file under a new passphrase
+  migrate   convert an unsealed keystore v3 JSON from an older polykey in place
 
 run "polykey <command> -h" for the flags of a command.
 `)
@@ -185,6 +188,40 @@ func runRekey(args []string) error {
 	} else {
 		fmt.Printf("update the passphrase file the deployment reads, or it will no longer unlock %s\n", *keyPath)
 	}
+	return nil
+}
+
+func runMigrate(args []string) error {
+	flags := flag.NewFlagSet("migrate", flag.ExitOnError)
+	keyPath := flags.String("key-file", "", "path to the unsealed keystore v3 JSON to convert in place (required)")
+	passphraseFile := flags.String("passphrase-file", "", "file holding its passphrase; prompted for when empty")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*keyPath) == "" {
+		return fmt.Errorf("--key-file is required")
+	}
+	keyJSON, err := keyfile.ReadKeyFile(*keyPath)
+	if err != nil {
+		return err
+	}
+	passphrase, err := passphraseFor(*passphraseFile, "passphrase: ")
+	if err != nil {
+		return err
+	}
+	privateKey, address, err := keyfile.DecryptLegacy(keyJSON, passphrase)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *keyPath, err)
+	}
+	sealed, err := keyfile.Encrypt(privateKey, passphrase, keyfile.ScryptN, keyfile.ScryptP)
+	if err != nil {
+		return err
+	}
+	if err := keyfile.Write(*keyPath, sealed, true); err != nil {
+		return err
+	}
+	// The passphrase is unchanged, so the existing passphrase file still works.
+	fmt.Printf("sealed %s for %s\n", *keyPath, address)
 	return nil
 }
 

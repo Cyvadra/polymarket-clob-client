@@ -18,7 +18,7 @@ import (
 // private key with CreateOrDeriveCredentials.
 //
 // The signing key comes from either POLYMARKET_PRIVATE_KEY (plaintext hex,
-// intended for development) or POLYMARKET_PRIVATE_KEY_FILE (a keystore v3
+// intended for development) or POLYMARKET_PRIVATE_KEY_FILE (a sealed keystore v3
 // file decrypted at startup, intended for deployments). See privateKeyFromEnv.
 func ConfigFromEnv() (Config, error) {
 	privateKey, err := privateKeyFromEnv()
