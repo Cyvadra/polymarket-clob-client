@@ -120,6 +120,7 @@ The published position is an execution view, not a settlement or redemption engi
 | repository root | The CLOB API client (`clobclient`) used by `executiond`. |
 | `cmd/executiond` | Composition root of the execution service. |
 | `cmd/executiontest` | Real-money NATS black-box lifecycle test. |
+| `cmd/copy-trading`, `pkg/copytrading` | Standalone copy trader; see [Copy trading](#copy-trading). |
 | `internal/execution/protocol` | Go wire types private to `executiond`. The external protocol is [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md). |
 | `pkg/accountfeed`, `pkg/executor`, `pkg/reconciler`, `pkg/store` | Service implementation packages, kept modular and testable. |
 | `pkg/marketquotes`, `pkg/positionfeatures`, `pkg/natsbus`, `pkg/statemachine` | Quote cache, position publisher, NATS bus, and order state machine. |
@@ -193,3 +194,28 @@ The authenticated integration tests additionally need `CLOB_TEST_PRIVATE_KEY`. T
 The `postgres`-tagged store tests run against a live PostgreSQL database and are skipped unless `EXECUTION_TEST_POSTGRES_URL` is set. Each test works in its own lane and removes the rows it wrote, so they can run repeatedly and alongside other data. Point them at a dedicated database anyway.
 
 `./verify.sh` runs the build, the unit tests, the examples build, and `go vet` in one step.
+
+## Copy trading
+
+`cmd/copy-trading` is a standalone entry point, independent of `executiond` and PostgreSQL. It subscribes to `pmm.user.activity`, where pmm forwards each trade of the wallets it listens to, and copies every trade on the configured signer with a fixed USD amount. Which wallets are copied is decided by pmm.
+
+- **Buys** are a `FAK` buy of `COPY_TRADING_USD` with a limit of the upstream fill price plus `COPY_TRADING_INITIAL_DIFF` (0.61 + 0.02 = 0.63), aligned down to the market tick and capped at 0.99.
+- **Sells** are a `FAK` sell at 0.01, so they take whatever bids exist. They sell `COPY_TRADING_USD` worth of shares at the upstream price, capped by what the local wallet holds; a leftover worth under $1 is sold with it. A sell on a token the wallet does not hold is skipped.
+- A message older than `COPY_TRADING_MAX_TRADE_AGE` (by its `timestamp`), one with no `asset_id` yet, or one below the market's minimum order size is skipped. Every copy and skip is logged.
+- Delivery is pmm's: best effort, no backfill. A trade missed while this process or NATS was down is not copied.
+
+It uses the same signing-key and proxy-wallet variables as `executiond` (`POLYMARKET_PRIVATE_KEY_FILE` / `POLYMARKET_PRIVATE_KEY`, `POLYMARKET_MAKER_ADDRESS`, `POLYMARKET_SIGNATURE_TYPE`, `POLYMARKET_PROXY_URL`), plus:
+
+| Variable | Required | Default |
+| --- | --- | --- |
+| `COPY_TRADING_USD` | Yes | none |
+| `COPY_TRADING_INITIAL_DIFF` | No | `0.02` (added to the upstream buy price) |
+| `COPY_TRADING_MAX_TRADE_AGE` | No | `10s` |
+| `COPY_TRADING_DRY_RUN` | No | `false`; `true` logs the orders it would place without submitting them |
+| `COPY_TRADING_NATS_URL` | No | `nats://127.0.0.1:4222` |
+| `COPY_TRADING_NATS_SUBJECT` | No | `pmm.user.activity` |
+| `COPY_TRADING_CONNECT_TIMEOUT` | No | `10s` |
+
+```sh
+COPY_TRADING_USD=10 COPY_TRADING_DRY_RUN=true go run ./cmd/copy-trading
+```
