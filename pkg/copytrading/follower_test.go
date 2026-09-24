@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,20 +12,34 @@ import (
 )
 
 type fakeTrader struct {
+	mu            sync.Mutex
 	tick, minSize float64
 	balance       string
-	submitted     []clobclient.UserOrder
+	// settled, when set, is the balance reported once this many balance
+	// reads have passed, standing in for a fill that settles late.
+	settled      string
+	settleReads  int
+	balanceReads int
+	submitted    []clobclient.UserOrder
 }
 
 func (f *fakeTrader) TickSize(context.Context, string) (float64, error)     { return f.tick, nil }
 func (f *fakeTrader) MinOrderSize(context.Context, string) (float64, error) { return f.minSize, nil }
 
 func (f *fakeTrader) SubmitOrder(_ context.Context, order clobclient.UserOrder) (*clobclient.OrderResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.submitted = append(f.submitted, order)
-	return &clobclient.OrderResponse{Success: true, OrderID: fmt.Sprint(len(f.submitted)), Status: "matched"}, nil
+	return &clobclient.OrderResponse{Success: true, OrderID: fmt.Sprint(len(f.submitted)), Status: "matched", TakingAmount: fmt.Sprint(order.Shares)}, nil
 }
 
 func (f *fakeTrader) BalanceAllowance(context.Context, string, string) (*clobclient.BalanceAllowance, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.balanceReads++
+	if f.settled != "" && f.balanceReads > f.settleReads {
+		return &clobclient.BalanceAllowance{Balance: f.settled}, nil
+	}
 	return &clobclient.BalanceAllowance{Balance: f.balance}, nil
 }
 
@@ -32,7 +47,7 @@ var now = time.UnixMilli(1_790_000_000_000)
 
 func newFollower(t *testing.T, trader *fakeTrader, dryRun bool) *Follower {
 	t.Helper()
-	f, err := New(Config{USD: 10, InitialDiff: 0.02, MaxTradeAge: 5 * time.Second, DryRun: dryRun, Now: func() time.Time { return now }}, trader)
+	f, err := New(Config{USD: 10, InitialDiff: 0.02, MaxTradeAge: 5 * time.Second, DryRun: dryRun, SettleWait: time.Second, SettlePoll: time.Millisecond, Now: func() time.Time { return now }}, trader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,5 +122,46 @@ func TestDryRunSubmitsNothing(t *testing.T) {
 	newFollower(t, trader, true).Handle(context.Background(), activity("BUY", 0.5))
 	if len(trader.submitted) != 0 {
 		t.Fatalf("dry run submitted %+v", trader.submitted)
+	}
+}
+
+func TestSellWaitsForRecentBuyToSettle(t *testing.T) {
+	// The buy fills 15.873 shares, but the balance still reads 0 for the
+	// first three reads after it.
+	trader := &fakeTrader{tick: 0.01, balance: "0", settled: "15873000", settleReads: 3}
+	f := newFollower(t, trader, false)
+	f.Enqueue(activity("BUY", 0.61))
+	f.Enqueue(activity("SELL", 0.62))
+	f.Close()
+	if len(trader.submitted) != 2 || trader.submitted[0].Side != clobclient.SideBuy || trader.submitted[1].Side != clobclient.SideSell {
+		t.Fatalf("expected the buy then the sell, got %+v", trader.submitted)
+	}
+	if trader.submitted[1].Shares != 15.87 {
+		t.Fatalf("sell shares = %v, want the settled 15.87", trader.submitted[1].Shares)
+	}
+	if trader.balanceReads != 4 {
+		t.Fatalf("balance read %d times, want 4 (stop once the fill settles)", trader.balanceReads)
+	}
+}
+
+func TestSellWithoutRecentBuyDoesNotWait(t *testing.T) {
+	trader := &fakeTrader{tick: 0.01, balance: "0", settled: "100000000", settleReads: 1}
+	f := newFollower(t, trader, false)
+	f.Enqueue(activity("SELL", 0.5))
+	f.Close()
+	if len(trader.submitted) != 0 || trader.balanceReads != 1 {
+		t.Fatalf("expected one balance read and no order, got %d reads and %+v", trader.balanceReads, trader.submitted)
+	}
+}
+
+func TestEnqueueAfterCloseIsRefused(t *testing.T) {
+	trader := &fakeTrader{tick: 0.01}
+	f := newFollower(t, trader, false)
+	f.Close()
+	if f.Enqueue(activity("BUY", 0.5)) {
+		t.Fatal("enqueue after close was accepted")
+	}
+	if len(trader.submitted) != 0 {
+		t.Fatalf("closed follower submitted %+v", trader.submitted)
 	}
 }

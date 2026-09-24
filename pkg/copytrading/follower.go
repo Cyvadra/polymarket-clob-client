@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -49,14 +51,33 @@ type Config struct {
 	// message never chases a stale price.
 	MaxTradeAge time.Duration
 	DryRun      bool
-	Logf        func(format string, args ...any)
-	Now         func() time.Time
+	// CopyTimeout bounds one queued copy. It is not tied to shutdown, so an
+	// order already being submitted is allowed to finish.
+	CopyTimeout time.Duration
+	// SettleWait is how long a sell waits for a recent copied buy on the
+	// same token to show up in the balance; SettlePoll is how often it looks.
+	SettleWait time.Duration
+	SettlePoll time.Duration
+	Logf       func(format string, args ...any)
+	Now        func() time.Time
 }
 
 // Follower copies each activity message it is handed.
 type Follower struct {
 	cfg    Config
 	trader Trader
+
+	mu      sync.Mutex
+	queues  map[string][]Activity // pending copies per token, in arrival order
+	bought  map[string]recentBuy  // last matched copy buy per token
+	closed  bool
+	workers sync.WaitGroup
+}
+
+// recentBuy is a matched copy buy whose fill may not be in the balance yet.
+type recentBuy struct {
+	at     time.Time
+	shares float64
 }
 
 const (
@@ -86,12 +107,75 @@ func New(cfg Config, trader Trader) (*Follower, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Follower{cfg: cfg, trader: trader}, nil
+	if cfg.CopyTimeout <= 0 {
+		cfg.CopyTimeout = 30 * time.Second
+	}
+	if cfg.SettleWait <= 0 {
+		cfg.SettleWait = 10 * time.Second
+	}
+	if cfg.SettlePoll <= 0 {
+		cfg.SettlePoll = 500 * time.Millisecond
+	}
+	return &Follower{cfg: cfg, trader: trader, queues: map[string][]Activity{}, bought: map[string]recentBuy{}}, nil
+}
+
+// Enqueue copies activity in the background. Copies on the same token run one
+// at a time in arrival order, so a quick buy-then-sell is never reordered;
+// different tokens are copied concurrently. It reports false once the
+// follower is closed.
+func (f *Follower) Enqueue(activity Activity) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return false
+	}
+	key := activity.AssetID
+	pending, running := f.queues[key]
+	f.queues[key] = append(pending, activity)
+	if !running {
+		f.workers.Add(1)
+		go f.drain(key)
+	}
+	return true
+}
+
+// Close stops accepting activities and waits for the queued copies to finish.
+// Queued copies still run, so a sell queued behind an in-flight buy is not
+// lost; the max trade age and copy timeout bound how long this takes.
+func (f *Follower) Close() {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	f.workers.Wait()
+}
+
+func (f *Follower) drain(key string) {
+	defer f.workers.Done()
+	for {
+		f.mu.Lock()
+		pending := f.queues[key]
+		if len(pending) == 0 {
+			delete(f.queues, key)
+			f.mu.Unlock()
+			return
+		}
+		activity := pending[0]
+		f.queues[key] = pending[1:]
+		f.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), f.cfg.CopyTimeout)
+		f.Handle(ctx, activity)
+		cancel()
+	}
+}
+
+func label(activity Activity) string {
+	return fmt.Sprintf("%s %s %.4f %s @ %.4f %s", activity.Address, activity.Side, activity.Size, activity.Outcome, activity.Price, activity.EventSlug)
 }
 
 // Handle copies one activity. Every outcome, including a skip, is logged.
 func (f *Follower) Handle(ctx context.Context, activity Activity) {
-	label := fmt.Sprintf("%s %s %.4f %s @ %.4f %s", activity.Address, activity.Side, activity.Size, activity.Outcome, activity.Price, activity.EventSlug)
+	label := label(activity)
 	order, err := f.order(ctx, activity)
 	if err != nil {
 		f.cfg.Logf("skip %s: %v", label, err)
@@ -107,6 +191,7 @@ func (f *Follower) Handle(ctx context.Context, activity Activity) {
 		f.cfg.Logf("copy %s with %s failed: %v", label, action, err)
 		return
 	}
+	f.recordFill(order, resp)
 	f.cfg.Logf("copied %s with %s: order %s status %s", label, action, resp.OrderID, resp.Status)
 }
 
@@ -147,22 +232,38 @@ func (f *Follower) buyOrder(ctx context.Context, activity Activity) (clobclient.
 }
 
 // sellOrder sells the fixed USD amount's worth of shares at the upstream
-// price, capped by what the local wallet holds, at a 0.01 limit.
+// price, capped by what the local wallet holds, at a 0.01 limit. After a
+// recent copied buy on the token it waits for that fill to settle into the
+// balance before capping.
 func (f *Follower) sellOrder(ctx context.Context, activity Activity) (clobclient.UserOrder, error) {
-	balance, err := f.trader.BalanceAllowance(ctx, "CONDITIONAL", activity.AssetID)
-	if err != nil {
-		return clobclient.UserOrder{}, fmt.Errorf("read token balance: %w", err)
-	}
-	raw, err := strconv.ParseFloat(balance.Balance, 64)
-	if err != nil {
-		return clobclient.UserOrder{}, fmt.Errorf("parse token balance %q: %w", balance.Balance, err)
-	}
 	digits := clobclient.SharePrecisionDigits(clobclient.SideSell, clobclient.OrderTypeFAK)
-	held := floorTo(raw/conditionalUnit, digits)
+	shares := floorTo(f.cfg.USD/activity.Price, digits)
+	held, err := f.heldShares(ctx, activity.AssetID, digits)
+	if err != nil {
+		return clobclient.UserOrder{}, err
+	}
+	if wait := math.Min(shares, floorTo(f.recentBuyShares(activity.AssetID), digits)); held < wait {
+		deadline := time.NewTimer(f.cfg.SettleWait)
+		defer deadline.Stop()
+		poll := time.NewTicker(f.cfg.SettlePoll)
+		defer poll.Stop()
+	settle:
+		for held < wait {
+			select {
+			case <-ctx.Done():
+				return clobclient.UserOrder{}, ctx.Err()
+			case <-deadline.C:
+				break settle
+			case <-poll.C:
+			}
+			if held, err = f.heldShares(ctx, activity.AssetID, digits); err != nil {
+				return clobclient.UserOrder{}, err
+			}
+		}
+	}
 	if held <= 0 {
 		return clobclient.UserOrder{}, errors.New("no local position to sell")
 	}
-	shares := floorTo(f.cfg.USD/activity.Price, digits)
 	if shares >= held || (held-shares)*activity.Price < dustUSD {
 		shares = held
 	}
@@ -170,6 +271,48 @@ func (f *Follower) sellOrder(ctx context.Context, activity Activity) (clobclient
 		return clobclient.UserOrder{}, err
 	}
 	return clobclient.UserOrder{TokenID: activity.AssetID, Side: clobclient.SideSell, Price: sellPrice, Shares: shares, OrderType: clobclient.OrderTypeFAK}, nil
+}
+
+func (f *Follower) heldShares(ctx context.Context, tokenID string, digits int) (float64, error) {
+	balance, err := f.trader.BalanceAllowance(ctx, "CONDITIONAL", tokenID)
+	if err != nil {
+		return 0, fmt.Errorf("read token balance: %w", err)
+	}
+	raw, err := strconv.ParseFloat(balance.Balance, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse token balance %q: %w", balance.Balance, err)
+	}
+	return floorTo(raw/conditionalUnit, digits), nil
+}
+
+// recordFill remembers the shares a copy buy matched, so a following sell on
+// the token can wait for them to settle; a copy sell consumes that record.
+// A matched BUY receives its shares as the taker amount.
+func (f *Follower) recordFill(order clobclient.UserOrder, resp *clobclient.OrderResponse) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if order.Side == clobclient.SideSell {
+		delete(f.bought, order.TokenID)
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(resp.Status), "matched") {
+		return
+	}
+	if shares, err := strconv.ParseFloat(resp.TakingAmount, 64); err == nil && shares > 0 {
+		f.bought[order.TokenID] = recentBuy{at: f.cfg.Now(), shares: shares}
+	}
+}
+
+// recentBuyShares is the shares of a copy buy on the token matched within
+// the settle window, or 0.
+func (f *Follower) recentBuyShares(tokenID string) float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	buy, ok := f.bought[tokenID]
+	if !ok || f.cfg.Now().Sub(buy.at) >= f.cfg.SettleWait {
+		return 0
+	}
+	return buy.shares
 }
 
 func (f *Follower) checkMinSize(ctx context.Context, tokenID string, shares float64) error {

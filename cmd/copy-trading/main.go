@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -75,25 +74,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Deferred calls run in reverse: stop NATS delivery first, then let the
+	// copies in flight finish.
+	defer follower.Close()
 	if err := bus.Init(ctx); err != nil {
 		return err
 	}
 	defer bus.Close(context.Background())
 
-	// Each copy runs on its own goroutine: the NATS callback is serial, and a
-	// slow order on one market must not delay the copy of the next trade.
-	var inflight sync.WaitGroup
-	defer inflight.Wait()
-	err = bus.Subscribe(cfg.Subject, func(ctx context.Context, payload []byte) error {
+	// The NATS callback is serial, so copies run in the follower's background
+	// queues: a slow order on one market must not delay the next trade.
+	err = bus.Subscribe(cfg.Subject, func(_ context.Context, payload []byte) error {
 		activity, err := natsbus.DecodeJSON[copytrading.Activity](payload)
 		if err != nil {
 			return err
 		}
-		inflight.Add(1)
-		go func() {
-			defer inflight.Done()
-			follower.Handle(ctx, activity)
-		}()
+		if !follower.Enqueue(activity) {
+			log.Printf("drop %s %s %s: shutting down", activity.Address, activity.Side, activity.AssetID)
+		}
 		return nil
 	})
 	if err != nil {
