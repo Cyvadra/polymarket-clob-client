@@ -18,6 +18,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/nats"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
@@ -35,6 +36,9 @@ type config struct {
 	MissingOrderGrace     time.Duration
 	MaxTradeAge           time.Duration
 	ResultPriceWait       time.Duration
+	BalanceCacheTTL       time.Duration
+	EquityMaxQuoteAge     time.Duration
+	MaxEquityFraction     float64
 	ConnectTimeout        time.Duration
 	ShutdownGracePeriod   time.Duration
 }
@@ -155,6 +159,24 @@ func run() error {
 	if err := nats.SubscribePositionQuery(bus, store, time.Now); err != nil {
 		return err
 	}
+	wallet, err := equity.New(clob, store, quotes, time.Now)
+	if err != nil {
+		return err
+	}
+	wallet.SetCashTTL(cfg.BalanceCacheTTL)
+	wallet.SetMaxQuoteAge(cfg.EquityMaxQuoteAge)
+	// A fill moves the exchange balance and shrinks the open-buy reservations
+	// at once; a cached pre-fill balance would count that cash twice.
+	fills.SetFillHook(wallet.Invalidate)
+	if err := nats.SubscribeBalanceQuery(bus, wallet); err != nil {
+		return err
+	}
+	sizer, err := equity.NewSizer(wallet, store)
+	if err != nil {
+		return err
+	}
+	sizer.SetMaxFraction(cfg.MaxEquityFraction)
+	execution.SetEntrySizer(sizer)
 	modules := []namedModule{
 		{name: "nats", module: bus},
 		{name: "executor", module: execution},
@@ -275,13 +297,23 @@ func configFromEnv() (config, error) {
 		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
 		MaxTradeAge:           durationEnv("EXECUTION_RECONCILE_MAX_TRADE_AGE", 24*time.Hour),
 		ResultPriceWait:       durationEnv("EXECUTION_RESULT_PRICE_WAIT", accountfeed.DefaultPriceWait),
+		BalanceCacheTTL:       durationEnv("EXECUTION_BALANCE_CACHE_TTL", equity.DefaultCashTTL),
+		EquityMaxQuoteAge:     durationEnv("EXECUTION_EQUITY_MAX_QUOTE_AGE", 30*time.Second),
+		MaxEquityFraction:     equity.DefaultMaxFraction,
 		ConnectTimeout:        durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		ShutdownGracePeriod:   durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
 	}
-	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_EQUITY_FRACTION")); value != "" {
+		fraction, err := strconv.ParseFloat(value, 64)
+		if err != nil || fraction <= 0 || fraction > 1 {
+			return config{}, fmt.Errorf("EXECUTION_MAX_EQUITY_FRACTION must be in (0, 1]")
+		}
+		cfg.MaxEquityFraction = fraction
+	}
+	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
 	return cfg, nil

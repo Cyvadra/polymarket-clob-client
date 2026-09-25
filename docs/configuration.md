@@ -107,6 +107,7 @@ them produces orders the exchange rejects.
 | --- | --- | --- |
 | `EXECUTION_NATS_URL` | No | Core NATS server URL; defaults to `nats://127.0.0.1:4222`. |
 | `EXECUTION_POSTGRES_URL` | No | PostgreSQL connection URL; defaults to `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable`. The default is a placeholder and must be replaced outside local development. |
+| `EXECUTION_MAX_EQUITY_FRACTION` | No | Largest `target_equity_fraction` an open request may carry, in (0, 1]; defaults to `0.25`. Larger fractions are rejected with `INVALID_INTENT`. It catches unit mistakes (`3` meant as 3%), and is not a risk limit. |
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | Cap on the total notional of active BUY reservations, checked inside the reservation transaction. Unset means no cap; over-cap buys are rejected with `EXPOSURE_LIMIT`. |
 | `POLYMARKET_PROXY_URL` | No | Absolute `http`, `https`, or `socks5` URL for outbound CLOB traffic. Unset means a direct connection. |
 
@@ -156,12 +157,15 @@ deviate from the default.
 | `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | `2m` | How long an unresolved submitted order may return REST 404 before it is failed. |
 | `EXECUTION_RECONCILE_MAX_TRADE_AGE` | `24h` | How far back trade replay looks on each reconciliation pass. Trades older than this are skipped rather than replayed. |
 | `EXECUTION_RESULT_PRICE_WAIT` | `3500ms` | How long a terminal open or close result waits for the fills that price it before publishing. The order message that ends an order can arrive ahead of its trade messages; if the fills still have not landed, the result carries the order's own limit price as `average_price`. `0` does not wait: the result is priced at once from whatever fills are already recorded, with the same fallback. |
+| `EXECUTION_BALANCE_CACHE_TTL` | `5s` | How long a USDC balance read from the CLOB is reused by the equity valuation. `0` reads on every query. |
+| `EXECUTION_EQUITY_MAX_QUOTE_AGE` | `30s` | A position whose latest PMM quote is older than this is valued at its entry price instead of the best bid, and counted in `unmarked_positions`. `0` accepts any age. |
 | `EXECUTION_CONNECT_TIMEOUT` | `10s` | NATS and PostgreSQL connection timeout. |
 | `EXECUTION_SHUTDOWN_GRACE_PERIOD` | `10s` | Graceful shutdown deadline. |
 
 Durations accept Go duration strings such as `500ms` and `30s`; positive
 integer values are interpreted as milliseconds. All seven must be positive or
-startup fails, except `EXECUTION_RESULT_PRICE_WAIT`, which may also be `0`.
+startup fails, except `EXECUTION_RESULT_PRICE_WAIT`, `EXECUTION_BALANCE_CACHE_TTL`, and
+`EXECUTION_EQUITY_MAX_QUOTE_AGE`, which may also be `0`.
 
 ## Advanced client variables
 

@@ -56,27 +56,31 @@ const IntentStatusSuperseded = "SUPERSEDED"
 const StrategyChildSequence = 1
 
 type OrderIntentRecord struct {
-	IntentID           string
-	UniqueTag          string
-	Strategy           string
-	Kind               IntentKind
-	MarketID           string
-	EventSlug          string
-	ConditionID        string
-	TokenID            string
-	Outcome            string
-	Side               Side
-	TargetUSD          string
-	LimitPrice         string
-	TimeInForce        TimeInForce
-	PostOnly           bool
-	FeatureSeq         int64
-	FeatureCompletedAt time.Time
-	ExpiresAt          time.Time
-	Status             statemachine.State
-	Policy             json.RawMessage
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	IntentID    string
+	UniqueTag   string
+	Strategy    string
+	Kind        IntentKind
+	MarketID    string
+	EventSlug   string
+	ConditionID string
+	TokenID     string
+	Outcome     string
+	Side        Side
+	TargetUSD   string
+	// TargetEquityFraction and SizedEquityUSD record how an equity-sized open
+	// resolved to TargetUSD; both are empty for a dollar-sized one.
+	TargetEquityFraction string
+	SizedEquityUSD       string
+	LimitPrice           string
+	TimeInForce          TimeInForce
+	PostOnly             bool
+	FeatureSeq           int64
+	FeatureCompletedAt   time.Time
+	ExpiresAt            time.Time
+	Status               statemachine.State
+	Policy               json.RawMessage
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type SignedOrderRecord struct {

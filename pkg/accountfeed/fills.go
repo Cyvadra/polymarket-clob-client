@@ -31,6 +31,7 @@ type FillConsumer struct {
 	store   store.AccountFillStore
 	now     func() time.Time
 	onError func(error)
+	onFill  func()
 	fees    FeeSchedules
 
 	mu              sync.Mutex
@@ -52,6 +53,12 @@ func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*
 // from, such as a fill whose exchange order is unknown to the store.
 func (c *FillConsumer) SetErrorHandler(handler func(error)) {
 	c.onError = handler
+}
+
+// SetFillHook is called after each fill is newly stored, so caches of the
+// wallet balance a fill moves can be dropped.
+func (c *FillConsumer) SetFillHook(hook func()) {
+	c.onFill = hook
 }
 
 // SetFeeSchedules makes the consumer record the fee each fill paid. The
@@ -94,13 +101,17 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	if fill.Fee == "" {
 		fill.Fee = c.fee(ctx, fill)
 	}
-	return c.store.ApplyFill(ctx, store.FillRecord{
+	inserted, err := c.store.ApplyFill(ctx, store.FillRecord{
 		FillID: fill.FillID, ExchangeOrderID: fill.ExchangeOrderID, IntentID: order.IntentID, UniqueTag: intent.UniqueTag,
 		MarketID: fill.MarketID, ConditionID: fill.ConditionID, TokenID: fill.TokenID,
 		Outcome: fill.Outcome, Side: store.Side(fill.Side), Shares: fill.Shares, Price: fill.Price,
 		Fee: fill.Fee, FeeRateBps: fill.FeeRateBps, TradeStatus: fill.TradeStatus,
 		TraderSide: fill.TraderSide, ExchangeTime: fill.ExchangeTime, ReceivedAt: receivedAt,
 	})
+	if inserted && c.onFill != nil {
+		c.onFill()
+	}
+	return inserted, err
 }
 
 // fee derives what fill paid from its market's schedule. A fill is stored

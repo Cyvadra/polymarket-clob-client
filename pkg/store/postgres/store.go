@@ -144,18 +144,21 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 			intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
-			status, policy, created_at, updated_at
+			status, policy, created_at, updated_at,
+			target_equity_fraction, sized_equity_usd
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, NULLIF($11, '')::numeric, $12,
 			$13, $14, $15, $16, $17,
-			$18, $19, $20, $21
+			$18, $19, $20, $21,
+			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric
 		)
 		ON CONFLICT (intent_id) DO NOTHING
 	`, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
-		status, policy, createdAt, updatedAt)
+		status, policy, createdAt, updatedAt,
+		record.TargetEquityFraction, record.SizedEquityUSD)
 	if err != nil {
 		return false, fmt.Errorf("insert intent: %w", err)
 	}
@@ -744,6 +747,31 @@ func (s *Store) Reservation(ctx context.Context, reservationID string) (store.Re
 		record.ChildSequence = *childSequence
 	}
 	return record, nil
+}
+
+// OpenBuyNotional sums the unfilled notional of active BUY reservations: the
+// USD the wallet has committed to working buys that the CLOB still reports as
+// cash. The filled part of a partly filled buy has already left the balance,
+// so each reservation counts only its unfilled share.
+func (s *Store) OpenBuyNotional(ctx context.Context) (string, error) {
+	var total string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(
+			CASE WHEN r.shares > 0
+				THEN r.notional * GREATEST(0, 1 - LEAST(r.shares, GREATEST(
+					COALESCE(o.matched_shares, 0),
+					COALESCE((SELECT SUM(f.shares) FROM fills f
+						WHERE f.exchange_order_id = o.exchange_order_id AND f.trade_status <> 'FAILED'), 0)
+				)) / r.shares)
+				ELSE r.notional END
+		), 0)::text
+		FROM reservations r
+		LEFT JOIN orders o ON o.intent_id = r.intent_id AND o.child_sequence = r.child_sequence
+		WHERE r.state = 'active' AND r.side = 'BUY'
+	`).Scan(&total); err != nil {
+		return "", fmt.Errorf("query open buy notional: %w", err)
+	}
+	return total, nil
 }
 
 // checkOpenBuyExposure rejects a BUY reservation that would push the total

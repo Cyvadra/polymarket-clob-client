@@ -20,10 +20,30 @@
 | `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Cached quote snapshot for tactics. |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest position snapshot. |
 | `strategy.execution.position.query` | strategy -> executiond (request/reply) | `PositionQueryRequest` | Query positions by condition or market. |
+| `strategy.execution.balance.query` | strategy -> executiond (request/reply) | `BalanceQueryRequest` | Query the wallet's USDC cash and equity. |
 
 Subject tokens must not be empty or include `*` or `>`.
 
 `execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. `unique_tag` carries the lane the order belongs to so an observer can filter the shared subject to its own orders; it is omitted when the event's intent could not be resolved. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
+
+## Equity-fraction sizing
+
+An open request may carry `target_equity_fraction` (a decimal string, `"0.03"` = 3%) instead of `target_usd`. Exactly one of the two may be set, and only a BUY may use the fraction. executiond resolves it when the request arrives:
+
+`target_usd = floor(fraction × equity_usd, 6 decimals)`, with `equity_usd` as in the balance query below. From there the open is planned exactly as a dollar-sized one. The resolved `target_usd`, the fraction, and the equity it was taken from are stored with the intent.
+
+Every open sized this way uses the same equity. Placing a buy does not change equity, because the order is still cash until it fills, so each concurrent entry gets its full fraction. What entries can run out of is free cash: `cash_usd` minus the notional of working buys and of entries still being placed. An entry larger than that is rejected with `EXPOSURE_LIMIT` rather than shrunk. A partly filled buy commits only its unfilled notional; the filled part has already left cash. A fraction above `EXECUTION_MAX_EQUITY_FRACTION`, or not above zero, is rejected with `INVALID_INTENT`. If equity cannot be read, the open fails with `EXECUTION_FAILED`.
+
+## Balance query
+
+`BalanceQueryRequest` carries only `schema_version`. The reply is a `BalanceQueryResponse`:
+
+- `cash_usd`: the wallet's USDC collateral balance as the CLOB reports it. Resting orders are not deducted: a working buy is still cash until it fills. The read is cached for `EXECUTION_BALANCE_CACHE_TTL`; `cash_as_of` says when it was taken.
+- `positions_value_usd`: the sum over recorded lanes holding shares of `position_size` × the token's best bid in the latest PMM quote. A fresh quote with no bid values the lane at zero. A lane with no quote, or one older than `EXECUTION_EQUITY_MAX_QUOTE_AGE`, is valued at its entry price and counted in `unmarked_positions`.
+- `equity_usd`: `cash_usd + positions_value_usd`.
+- `positions`: how many lanes were valued.
+
+Only positions executiond recorded are valued; shares the wallet holds outside any lane are not. If the balance cannot be read, the reply carries `error` and zero values, never a guessed equity.
 
 ## PositionFeature
 
@@ -35,7 +55,7 @@ Subject tokens must not be empty or include `*` or `>`.
 
 ## ExecutionOpenRequest
 
-Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request. A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
+Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request, or `target_equity_fraction` sizes it from wallet equity (see Equity-fraction sizing). A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
 
 | Field | Rules |
 | --- | --- |

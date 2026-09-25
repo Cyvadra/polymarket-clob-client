@@ -67,7 +67,17 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		ExpiresAt:          req.ExpiresAt,
 		Policy:             req.Policy,
 	}
-	if err := e.Execute(ctx, intent); err != nil {
+	release, err := e.sizeEntry(ctx, req, &intent)
+	if err != nil {
+		e.publishOpenRejection(intent, err)
+		return err
+	}
+	// Hold the entry's claim on free cash until Execute has reserved its buy
+	// in the store, which takes the claim over, or has failed. placeChild
+	// releases it as soon as the reservation exists, so the entry is not
+	// counted twice while the order is signed and submitted.
+	defer release()
+	if err := e.Execute(withCashHold(ctx, release), intent); err != nil {
 		var unresolved unresolvedSubmission
 		if !errors.As(err, &unresolved) {
 			e.publishOpenRejection(intent, err)
@@ -161,6 +171,7 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 	if err := e.reserveChild(ctx, intent, child, reservationID); err != nil {
 		return err
 	}
+	releaseCashHold(ctx)
 	releaseOnFailure := true
 	defer func() {
 		if releaseOnFailure {

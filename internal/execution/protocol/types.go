@@ -25,6 +25,7 @@ const (
 	SubjectMarketQuotes                   = "pmm.market.quotes"
 	SubjectPositionFeaturesPrefix         = "position.features"
 	SubjectStrategyExecutionPositionQuery = "strategy.execution.position.query"
+	SubjectStrategyExecutionBalanceQuery  = "strategy.execution.balance.query"
 )
 
 type Side = clobclient.Side
@@ -79,47 +80,54 @@ type ExecutionPolicy struct {
 }
 
 type ExecutionIntent struct {
-	SchemaVersion      string          `json:"schema_version"`
-	IntentID           string          `json:"intent_id"`
-	UniqueTag          string          `json:"unique_tag"`
-	Strategy           string          `json:"strategy"`
-	Kind               IntentKind      `json:"kind"`
-	MarketID           string          `json:"market_id,omitempty"`
-	EventSlug          string          `json:"event_slug,omitempty"`
-	ConditionID        string          `json:"condition_id"`
-	TokenID            string          `json:"token_id"`
-	Outcome            string          `json:"outcome"`
-	Side               Side            `json:"side"`
-	TargetUSD          string          `json:"target_usd,omitempty"`
-	LimitPrice         string          `json:"limit_price"`
-	TimeInForce        TimeInForce     `json:"time_in_force"`
-	PostOnly           bool            `json:"post_only"`
-	FeatureSeq         int64           `json:"feature_seq,omitempty"`
-	FeatureCompletedAt time.Time       `json:"feature_completed_at"`
-	CreatedAt          time.Time       `json:"created_at"`
-	ExpiresAt          time.Time       `json:"expires_at"`
-	Policy             ExecutionPolicy `json:"policy,omitempty"`
+	SchemaVersion string     `json:"schema_version"`
+	IntentID      string     `json:"intent_id"`
+	UniqueTag     string     `json:"unique_tag"`
+	Strategy      string     `json:"strategy"`
+	Kind          IntentKind `json:"kind"`
+	MarketID      string     `json:"market_id,omitempty"`
+	EventSlug     string     `json:"event_slug,omitempty"`
+	ConditionID   string     `json:"condition_id"`
+	TokenID       string     `json:"token_id"`
+	Outcome       string     `json:"outcome"`
+	Side          Side       `json:"side"`
+	TargetUSD     string     `json:"target_usd,omitempty"`
+	// TargetEquityFraction and SizedEquityUSD record how an equity-sized open
+	// resolved to TargetUSD.
+	TargetEquityFraction string          `json:"target_equity_fraction,omitempty"`
+	SizedEquityUSD       string          `json:"sized_equity_usd,omitempty"`
+	LimitPrice           string          `json:"limit_price"`
+	TimeInForce          TimeInForce     `json:"time_in_force"`
+	PostOnly             bool            `json:"post_only"`
+	FeatureSeq           int64           `json:"feature_seq,omitempty"`
+	FeatureCompletedAt   time.Time       `json:"feature_completed_at"`
+	CreatedAt            time.Time       `json:"created_at"`
+	ExpiresAt            time.Time       `json:"expires_at"`
+	Policy               ExecutionPolicy `json:"policy,omitempty"`
 }
 
 type ExecutionOpenRequest struct {
-	SchemaVersion      string          `json:"schema_version"`
-	UniqueTag          string          `json:"unique_tag"`
-	Strategy           string          `json:"strategy"`
-	MarketID           string          `json:"market_id,omitempty"`
-	EventSlug          string          `json:"event_slug,omitempty"`
-	ConditionID        string          `json:"condition_id"`
-	TokenID            string          `json:"token_id"`
-	Outcome            string          `json:"outcome"`
-	Side               Side            `json:"side"`
-	TargetUSD          string          `json:"target_usd,omitempty"`
-	LimitPrice         string          `json:"limit_price"`
-	TimeInForce        TimeInForce     `json:"time_in_force"`
-	PostOnly           bool            `json:"post_only"`
-	FeatureSeq         int64           `json:"feature_seq,omitempty"`
-	FeatureCompletedAt time.Time       `json:"feature_completed_at"`
-	CreatedAt          time.Time       `json:"created_at"`
-	ExpiresAt          time.Time       `json:"expires_at"`
-	Policy             ExecutionPolicy `json:"policy,omitempty"`
+	SchemaVersion string `json:"schema_version"`
+	UniqueTag     string `json:"unique_tag"`
+	Strategy      string `json:"strategy"`
+	MarketID      string `json:"market_id,omitempty"`
+	EventSlug     string `json:"event_slug,omitempty"`
+	ConditionID   string `json:"condition_id"`
+	TokenID       string `json:"token_id"`
+	Outcome       string `json:"outcome"`
+	Side          Side   `json:"side"`
+	TargetUSD     string `json:"target_usd,omitempty"`
+	// TargetEquityFraction sizes the open as a fraction of wallet equity
+	// (0.03 = 3%) instead of TargetUSD. Exactly one of the two must be set.
+	TargetEquityFraction string          `json:"target_equity_fraction,omitempty"`
+	LimitPrice           string          `json:"limit_price"`
+	TimeInForce          TimeInForce     `json:"time_in_force"`
+	PostOnly             bool            `json:"post_only"`
+	FeatureSeq           int64           `json:"feature_seq,omitempty"`
+	FeatureCompletedAt   time.Time       `json:"feature_completed_at"`
+	CreatedAt            time.Time       `json:"created_at"`
+	ExpiresAt            time.Time       `json:"expires_at"`
+	Policy               ExecutionPolicy `json:"policy,omitempty"`
 }
 
 type ExecutionCloseMode string
@@ -290,4 +298,23 @@ type PositionFeature struct {
 	SourceRevision    int64      `json:"source_revision,omitempty"`
 	UpdatedAt         time.Time  `json:"updated_at"`
 	PublishedAt       time.Time  `json:"published_at"`
+}
+
+type BalanceQueryRequest struct {
+	SchemaVersion string `json:"schema_version"`
+}
+
+// BalanceQueryResponse values the wallet: USDC cash plus recorded positions
+// marked at the best bid. Positions with no fresh quote are valued at their
+// entry price and counted in UnmarkedPositions.
+type BalanceQueryResponse struct {
+	SchemaVersion     string    `json:"schema_version"`
+	CashUSD           float64   `json:"cash_usd"`
+	PositionsValueUSD float64   `json:"positions_value_usd"`
+	EquityUSD         float64   `json:"equity_usd"`
+	Positions         int       `json:"positions"`
+	UnmarkedPositions int       `json:"unmarked_positions"`
+	CashAsOf          time.Time `json:"cash_as_of"`
+	AsOf              time.Time `json:"as_of"`
+	Error             string    `json:"error,omitempty"`
 }

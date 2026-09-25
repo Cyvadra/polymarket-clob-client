@@ -44,6 +44,7 @@ type Executor struct {
 	now     func() time.Time
 	onError func(error)
 	publish protocol.ExecutionEventPublisher
+	sizer   EntrySizer
 
 	// laneRevisions holds each lane's position revision as of the previous
 	// maintenance pass, so the pass can tell a position that is still filling
@@ -66,6 +67,12 @@ func New(repository repository, clob CLOB, now func() time.Time) (*Executor, err
 		now = time.Now
 	}
 	return &Executor{store: repository, clob: clob, now: now}, nil
+}
+
+// SetEntrySizer enables opens sized by target_equity_fraction. Without one,
+// such opens are rejected.
+func (e *Executor) SetEntrySizer(sizer EntrySizer) {
+	e.sizer = sizer
 }
 
 func (e *Executor) SetQuoteProvider(provider QuoteProvider) {

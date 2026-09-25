@@ -28,7 +28,7 @@ func IntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 	return store.OrderIntentRecord{
 		IntentID: intent.IntentID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, MarketID: intent.MarketID,
 		Kind: store.IntentKind(intent.Kind), EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
-		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
+		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, TargetEquityFraction: intent.TargetEquityFraction, SizedEquityUSD: intent.SizedEquityUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
 		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
 		Status: statemachine.StateIntentReceived, Policy: policy, CreatedAt: now, UpdatedAt: now,
 	}

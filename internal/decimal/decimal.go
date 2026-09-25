@@ -175,5 +175,10 @@ func DivideAndRoundDown(numerator, denominator string, digits int) (string, bool
 }
 
 func FormatPrice(value float64) string {
-	return strconv.FormatFloat(math.Round(value*1e6)/1e6, 'f', -1, 64)
+	return strconv.FormatFloat(RoundUSDC(value), 'f', -1, 64)
+}
+
+// RoundUSDC rounds value to USDC's 6-decimal precision.
+func RoundUSDC(value float64) float64 {
+	return math.Round(value*1e6) / 1e6
 }
