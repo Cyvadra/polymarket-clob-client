@@ -208,10 +208,13 @@ type fakeCLOB struct {
 	// minOrderSizeErr, when set, is what the market answers instead of a
 	// minimum — a settled market reports clobclient.ErrBookGone.
 	minOrderSizeErr error
+	// minOrderSizeCalls counts lookups, each a round trip on the real client.
+	minOrderSizeCalls int
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
 func (c *fakeCLOB) MinOrderSize(context.Context, string) (float64, error) {
+	c.minOrderSizeCalls++
 	if c.minOrderSizeErr != nil {
 		return 0, c.minOrderSizeErr
 	}

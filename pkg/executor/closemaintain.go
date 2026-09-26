@@ -197,6 +197,14 @@ func (e *Executor) sweepResidual(ctx context.Context, position store.PositionRec
 	if err != nil {
 		return nil
 	}
+	if _, quoted := e.laneBid(position); !quoted {
+		// No live quote means no bid to wait for, so there is nothing this
+		// pass could do. Checking first keeps lanes on ended markets, which
+		// drop out of the quotes, off the exchange: after a restart empties
+		// the book-gone cache, looking up a few hundred of them one by one
+		// stalled this loop for nearly two minutes.
+		return nil
+	}
 	minimum, err := e.clob.MinOrderSize(ctx, position.TokenID)
 	if err != nil {
 		if errors.Is(err, clobclient.ErrBookGone) {
@@ -258,17 +266,8 @@ func (e *Executor) residualSweepDue(lane laneKey) bool {
 // bidReached reports whether the lane's best bid has come up to the close's
 // limit price.
 func (e *Executor) bidReached(position store.PositionRecord, limitPrice string) bool {
-	snapshot, ok := e.quotes.Get(position.ConditionID)
+	bid, ok := e.laneBid(position)
 	if !ok {
-		return false
-	}
-	var bid float64
-	switch strings.TrimSpace(position.TokenID) {
-	case strings.TrimSpace(snapshot.Up.AssetID):
-		bid = snapshot.Up.Bid
-	case strings.TrimSpace(snapshot.Down.AssetID):
-		bid = snapshot.Down.Bid
-	default:
 		return false
 	}
 	limit, err := decimal.Price(limitPrice)
@@ -276,6 +275,22 @@ func (e *Executor) bidReached(position store.PositionRecord, limitPrice string) 
 		return false
 	}
 	return bid >= limit
+}
+
+// laneBid is the best bid on the lane's token from the quote cache, and
+// whether the cache quotes it at all.
+func (e *Executor) laneBid(position store.PositionRecord) (float64, bool) {
+	snapshot, ok := e.quotes.Get(position.ConditionID)
+	if !ok {
+		return 0, false
+	}
+	switch strings.TrimSpace(position.TokenID) {
+	case strings.TrimSpace(snapshot.Up.AssetID):
+		return snapshot.Up.Bid, true
+	case strings.TrimSpace(snapshot.Down.AssetID):
+		return snapshot.Down.Bid, true
+	}
+	return 0, false
 }
 
 // takeResidual sells the residual at the close's limit price with a FAK. It is

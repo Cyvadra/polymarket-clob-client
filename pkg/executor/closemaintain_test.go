@@ -234,3 +234,23 @@ func TestMaintainClosesTreatsASettledMarketAsTheEndOfTheLane(t *testing.T) {
 		t.Fatalf("expected nothing placed on a settled market, got %d submissions", client.submissions)
 	}
 }
+
+// A lane on a market that is no longer quoted has no bid to wait for, so the
+// pass must not look its market up: after a restart, hundreds of such lanes
+// on ended markets each cost an uncached round trip and stalled the loop.
+func TestMaintainClosesSkipsTheExchangeForAnUnquotedLane(t *testing.T) {
+	storer := laneWithResidual()
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-new"}, minOrderSize: 5}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&resultPublisher{})
+	exec.SetQuoteProvider(fakeQuotes{})
+	if err := exec.maintainCloses(context.Background()); err != nil {
+		t.Fatalf("maintenance pass: %v", err)
+	}
+	if client.minOrderSizeCalls != 0 || client.submissions != 0 {
+		t.Fatalf("expected no exchange calls for an unquoted lane, got %d lookups and %d submissions", client.minOrderSizeCalls, client.submissions)
+	}
+}
