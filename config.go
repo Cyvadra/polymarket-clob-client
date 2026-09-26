@@ -42,7 +42,8 @@ func (c Config) withDefaults() Config {
 		c.ChainID = ChainPolygonMainnet
 	}
 	if c.RPCEndpoint == "" && c.ChainID == ChainPolygonMainnet {
-		c.RPCEndpoint = "https://polygon-rpc.com"
+		// polygon-rpc.com answers every call with 403 (tenant disabled).
+		c.RPCEndpoint = "https://polygon-bor-rpc.publicnode.com"
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = 20 * time.Second

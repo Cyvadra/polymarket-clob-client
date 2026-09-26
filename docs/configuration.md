@@ -177,7 +177,7 @@ standard `executiond` deployment and are omitted from `.env.example`.
 | --- | --- | --- |
 | `POLYMARKET_HOST` | `https://clob.polymarket.com` | CLOB REST base URL. |
 | `POLYMARKET_CHAIN_ID` | `137` | `137` Polygon mainnet, `80002` Amoy testnet. |
-| `POLYMARKET_RPC_ENDPOINT` | `https://polygon-rpc.com` on mainnet | Only used as the on-chain fallback inside `Client.ResolveProxyWallet`, which `executiond` never calls. Relevant to library callers, not to the service. |
+| `POLYMARKET_RPC_ENDPOINT` | `https://polygon-bor-rpc.publicnode.com` on mainnet | Polygon JSON-RPC. `executiond` reads winning outcome-token balances from the ConditionalTokens contract through it (`Client.TokenBalance`), because the CLOB refuses balance reads once a settled market's book is gone; it is also the on-chain fallback inside `Client.ResolveProxyWallet`. |
 | `POLYMARKET_BUILDER_API_KEY` / `_SECRET` / `_PASSPHRASE` | unset | Builder credentials for fee-sharing order headers. Must be set together, or not at all. Only relevant under a builder agreement. |
 
 ## Notes

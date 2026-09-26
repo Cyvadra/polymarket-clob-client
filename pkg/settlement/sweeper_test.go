@@ -29,12 +29,9 @@ type fakeBalances struct {
 	reads  map[string]int
 }
 
-func (f *fakeBalances) UpdateBalanceAllowance(_ context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error) {
-	if assetType != "CONDITIONAL" {
-		return nil, errors.New("unexpected asset")
-	}
+func (f *fakeBalances) TokenBalance(_ context.Context, tokenID string) (string, error) {
 	f.reads[tokenID]++
-	return &clobclient.BalanceAllowance{Balance: f.tokens[tokenID]}, nil
+	return f.tokens[tokenID], nil
 }
 
 type fakeStore struct {

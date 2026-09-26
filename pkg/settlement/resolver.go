@@ -23,11 +23,13 @@ type MarketReader interface {
 	Market(ctx context.Context, conditionID string) (*clobclient.Market, error)
 }
 
-// BalanceReader reads a wallet balance from the CLOB, refreshing the CLOB's
-// own cached view of it first: the plain balance-allowance read can lag the
-// chain, and a stale zero would read as a redeemed winner.
+// BalanceReader reads the wallet's balance of an outcome token, in base units.
+// It must come from the chain, not the CLOB: the CLOB's balance endpoints
+// refuse a token once its market's order book is removed ("No orderbook
+// exists"), which is exactly when a settled lane needs valuing, and its
+// cached view can lag the chain, where a stale zero reads as a redeemed winner.
 type BalanceReader interface {
-	UpdateBalanceAllowance(ctx context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error)
+	TokenBalance(ctx context.Context, tokenID string) (string, error)
 }
 
 const (
@@ -195,10 +197,10 @@ func (r *Resolver) walletShares(ctx context.Context, tokenID string) (float64, e
 		}
 	}
 	entry := tokenBalance{at: now, used: now}
-	balance, err := r.balances.UpdateBalanceAllowance(ctx, "CONDITIONAL", tokenID)
+	balance, err := r.balances.TokenBalance(ctx, tokenID)
 	if err != nil {
 		entry.err = fmt.Errorf("read token balance %s: %w", tokenID, err)
-	} else if entry.shares, err = decimal.FromBaseUnits(balance.Balance); err != nil {
+	} else if entry.shares, err = decimal.FromBaseUnits(balance); err != nil {
 		entry.err = fmt.Errorf("token balance %s: %w", tokenID, err)
 	}
 	r.mu.Lock()

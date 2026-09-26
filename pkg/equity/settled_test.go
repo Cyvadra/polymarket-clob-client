@@ -20,8 +20,12 @@ type walletBalances struct {
 	reads map[string]int
 }
 
-func (w *walletBalances) UpdateBalanceAllowance(ctx context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error) {
-	return w.BalanceAllowance(ctx, assetType, tokenID)
+func (w *walletBalances) TokenBalance(ctx context.Context, tokenID string) (string, error) {
+	balance, err := w.BalanceAllowance(ctx, "CONDITIONAL", tokenID)
+	if err != nil {
+		return "", err
+	}
+	return balance.Balance, nil
 }
 
 func (w *walletBalances) BalanceAllowance(_ context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error) {

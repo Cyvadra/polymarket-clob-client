@@ -17,6 +17,7 @@ type Client struct {
 	signer    string
 	transport *transport.Client
 	metadata  *metadataCache
+	rpc       *rpcConn
 }
 
 type metadataCache struct {
@@ -58,6 +59,7 @@ func New(cfg Config) (*Client, error) {
 		cfg: cfg, key: key, signer: signer,
 		transport: transport.New(cfg.Host, cfg.HTTPClient, cfg.Timeout, cfg.Retry.MaxAttempts, cfg.Retry.BaseDelay, cfg.QPS),
 		metadata:  &metadataCache{tickSize: map[string]float64{}, minSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}, bookGone: map[string]struct{}{}, feeSchedule: map[string]FeeSchedule{}},
+		rpc:       &rpcConn{},
 	}, nil
 }
 
