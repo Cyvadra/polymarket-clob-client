@@ -6,19 +6,15 @@ package equity
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
-
-// collateralUnit converts the CLOB's collateral balance, reported in USDC's
-// 6-decimal base units, to dollars.
-const collateralUnit = 1_000_000
 
 // DefaultCashTTL is how long a collateral balance read is reused. Sizing may
 // run for many intents a second; the exchange balance moves only on fills.
@@ -37,10 +33,17 @@ type Snapshot struct {
 	CashUSD      float64
 	PositionsUSD float64
 	EquityUSD    float64
-	// Positions counts the lanes holding shares; UnmarkedPositions counts those
-	// among them with no usable bid, which are valued at their entry price.
+	// Positions counts the lanes holding shares. SettledPositions counts those
+	// among them in resolved markets, valued at $1 per winning share still in
+	// the wallet and 0 for a loser; UnmarkedPositions those with neither a
+	// usable bid nor a resolution, which are valued at their entry price.
+	// LookupFailures counts the unmarked lanes whose market or balance could
+	// not be read: they are among UnmarkedPositions, and the failure is what
+	// the settlement sweeper reports.
 	Positions         int
+	SettledPositions  int
 	UnmarkedPositions int
+	LookupFailures    int
 	CashAsOf          time.Time
 	AsOf              time.Time
 }
@@ -53,6 +56,9 @@ type Tracker struct {
 
 	cashTTL     time.Duration
 	maxQuoteAge time.Duration
+	// settled values positions in markets that have resolved; nil values
+	// them like any other unquoted position (SetSettlements).
+	settled *settlement.Resolver
 
 	mu     sync.Mutex
 	cash   float64
@@ -102,11 +108,10 @@ func (t *Tracker) Cash(ctx context.Context) (float64, time.Time, error) {
 	if err != nil {
 		return 0, time.Time{}, fmt.Errorf("read collateral balance: %w", err)
 	}
-	units, ok := decimal.Rat(balance.Balance)
-	if !ok || units.Sign() < 0 {
-		return 0, time.Time{}, fmt.Errorf("invalid collateral balance %q", balance.Balance)
+	cash, err := decimal.FromBaseUnits(balance.Balance)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("collateral balance: %w", err)
 	}
-	cash, _ := new(big.Rat).Quo(units, big.NewRat(collateralUnit, 1)).Float64()
 	t.cash, t.cashAt = cash, now
 	return cash, now, nil
 }
@@ -124,6 +129,7 @@ func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	now := t.now()
 	snapshot := Snapshot{CashUSD: cash, CashAsOf: cashAt.UTC(), AsOf: now.UTC()}
+	var unquoted []held
 	for _, record := range records {
 		if !decimal.Positive(record.PositionSize) {
 			continue
@@ -132,19 +138,109 @@ func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("position %s/%s/%s: %w", record.ConditionID, record.TokenID, record.UniqueTag, err)
 		}
-		price, marked := t.bid(record.ConditionID, record.TokenID, now)
-		if !marked {
-			snapshot.UnmarkedPositions++
-			price, err = decimal.NonNegativeFloat(record.EntryPrice)
-			if err != nil {
-				return Snapshot{}, fmt.Errorf("position %s/%s/%s has no quote and no usable entry price: %w", record.ConditionID, record.TokenID, record.UniqueTag, err)
-			}
-		}
 		snapshot.Positions++
-		snapshot.PositionsUSD += shares * price
+		if price, marked := t.bid(record.ConditionID, record.TokenID, now); marked {
+			snapshot.PositionsUSD += shares * price
+			continue
+		}
+		unquoted = append(unquoted, held{record: record, shares: shares})
+	}
+	for i, value := range t.settledValues(ctx, unquoted, now) {
+		position := unquoted[i]
+		if value.ok {
+			snapshot.SettledPositions++
+			snapshot.PositionsUSD += value.usd
+			continue
+		}
+		snapshot.UnmarkedPositions++
+		if value.failed {
+			snapshot.LookupFailures++
+		}
+		price, err := decimal.NonNegativeFloat(position.record.EntryPrice)
+		if err != nil {
+			r := position.record
+			return Snapshot{}, fmt.Errorf("position %s/%s/%s has no quote and no usable entry price: %w", r.ConditionID, r.TokenID, r.UniqueTag, err)
+		}
+		snapshot.PositionsUSD += position.shares * price
 	}
 	snapshot.EquityUSD = snapshot.CashUSD + snapshot.PositionsUSD
 	return snapshot, nil
+}
+
+// settleLookups bounds concurrent CLOB reads for unquoted positions, which
+// on the first valuation after a start can be every settled lane at once.
+const settleLookups = 8
+
+// SetSettlements lets the tracker value positions in markets that have
+// resolved: $1 per winning share the wallet still holds, never more than the
+// lanes recorded (redeemed shares are already cash), and nothing for a loser.
+// Without it such a position has no quote and is valued at its entry price.
+func (t *Tracker) SetSettlements(resolver *settlement.Resolver) { t.settled = resolver }
+
+type held struct {
+	record store.PositionRecord
+	shares float64
+}
+
+type settledValue struct {
+	usd    float64
+	ok     bool
+	failed bool
+}
+
+// settledValues values the unquoted positions whose markets have resolved. A
+// lane whose lookup fails is valued at its entry price like an unresolved
+// one, so one market the CLOB cannot serve does not stop every valuation; the
+// resolver holds the failure for a while, so it costs one request per
+// interval, and the sweeper reports it. Lanes holding the same winning token
+// share its wallet balance, handed out in store order, so no two of them
+// count the same shares; a lane that changed within settlement.SettleGrace
+// is taken to hold what it recorded, since its tokens may not have landed.
+func (t *Tracker) settledValues(ctx context.Context, positions []held, now time.Time) []settledValue {
+	values := make([]settledValue, len(positions))
+	if t.settled == nil || len(positions) == 0 {
+		return values
+	}
+	outcomes := make([]settlement.Outcome, len(positions))
+	failed := make([]bool, len(positions))
+	var (
+		wg    sync.WaitGroup
+		slots = make(chan struct{}, settleLookups)
+	)
+	for i, position := range positions {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			r := position.record
+			outcome, err := t.settled.Outcome(ctx, r.ConditionID, r.TokenID)
+			outcomes[i], failed[i] = outcome, err != nil
+		}()
+	}
+	wg.Wait()
+	remaining := map[string]float64{}
+	for i, position := range positions {
+		outcome := outcomes[i]
+		switch {
+		case failed[i]:
+			values[i] = settledValue{failed: true}
+		case !outcome.Resolved:
+		case !outcome.Winner:
+			values[i] = settledValue{ok: true}
+		default:
+			token := position.record.TokenID
+			if _, seen := remaining[token]; !seen {
+				remaining[token] = outcome.WalletShares
+			}
+			usd := position.shares
+			if settlement.Settled(position.record, now) {
+				usd = min(position.shares, max(remaining[token], 0))
+			}
+			remaining[token] -= usd
+			values[i] = settledValue{usd: usd, ok: true}
+		}
+	}
+	return values
 }
 
 // bid is the price a position could be sold at now: the best bid of its token

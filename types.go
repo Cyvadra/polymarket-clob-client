@@ -126,6 +126,8 @@ type Token struct {
 	TokenID string  `json:"token_id"`
 	Outcome string  `json:"outcome"`
 	Price   float64 `json:"price"`
+	// Winner is set on the winning token once the market has resolved.
+	Winner bool `json:"winner"`
 }
 
 type Trade struct {

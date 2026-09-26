@@ -213,6 +213,18 @@ type PositionReconciler interface {
 	ReconcilePositionSize(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) error
 }
 
+// PositionSettler ends a lane whose market has resolved.
+type PositionSettler interface {
+	// SettlePosition lowers a lane to shares: what the wallet still holds of a
+	// winning token, or nothing for a loser. Like ReconcilePositionSize it
+	// never raises a lane. A lane with shares reserved is left untouched, in
+	// the same statement, since a close is working on it and owns it until the
+	// reservation ends. Settling to zero clears the lane like a sell that
+	// empties it does, so entry_time and the open-lot count reset with it.
+	// It reports whether the lane changed.
+	SettlePosition(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) (bool, error)
+}
+
 type ReservationStore interface {
 	Reserve(context.Context, ReservationRecord) error
 	Reservation(context.Context, string) (ReservationRecord, error)

@@ -39,13 +39,15 @@ Every open sized this way uses the same equity. Placing a buy does not change eq
 `BalanceQueryRequest` carries only `schema_version`. The reply is a `BalanceQueryResponse`:
 
 - `cash_usd`: the wallet's USDC collateral balance as the CLOB reports it. Resting orders are not deducted: a working buy is still cash until it fills. The read is cached for `EXECUTION_BALANCE_CACHE_TTL`; `cash_as_of` says when it was taken.
-- `positions_value_usd`: the sum over recorded lanes holding shares of `position_size` × the token's best bid in the latest PMM quote. A fresh quote with no bid values the lane at zero. A lane with no quote, or one older than `EXECUTION_EQUITY_MAX_QUOTE_AGE`, is valued at its entry price and counted in `unmarked_positions`.
+- `positions_value_usd`: the sum over recorded lanes holding shares of `position_size` × the token's best bid in the latest PMM quote. A fresh quote with no bid values the lane at zero. A lane with no quote, or one older than `EXECUTION_EQUITY_MAX_QUOTE_AGE`, is looked up on the CLOB: if its market has resolved, it is counted in `settled_positions` and valued at $1 per winning share the wallet still holds (never more than the lanes recorded; redeemed shares are already in `cash_usd`), or zero for a losing token. Lanes holding the same winning token share its wallet balance rather than each counting it. A lane that changed in the last two minutes is taken to hold what it recorded, since its tokens may not have reached the wallet yet. Anything else, including a lane whose market or balance could not be read, is valued at its entry price and counted in `unmarked_positions`.
 - `equity_usd`: `cash_usd + positions_value_usd`.
 - `positions`: how many lanes were valued.
 
 Only positions executiond recorded are valued; shares the wallet holds outside any lane are not. If the balance cannot be read, the reply carries `error` and zero values, never a guessed equity.
 
 ## PositionFeature
+
+A lane in a market that has resolved is emptied by executiond once its shares are worth nothing: at once for a losing token, and for a winning one as the wallet's balance falls through redemption (a winner still held is shrunk to that balance and kept; lanes holding the same token share that balance). The lane is republished with `position_size` 0 and `entry_time` null like any other close, so `open_lots` resets with it. A lane with shares reserved for a working close is left to the close path, and a winning lane that changed in the last two minutes is left until its tokens can have reached the wallet. The check runs every `EXECUTION_SETTLEMENT_SWEEP_INTERVAL`.
 
 `position.features.<condition_id>.<token_id>` and `PositionQueryResponse.positions` use JSON numbers for `entry_price`, `position_size`, `actual_shares`, `available_size`, `reserved_size`, and `seconds_since_entry`. An empty position has `entry_price: null` and `entry_time: null`; zero-valued numeric fields may be omitted. The storage layer may retain decimal text, but it is converted to rounded JSON floating-point values at this wire boundary.
 

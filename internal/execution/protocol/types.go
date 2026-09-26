@@ -306,13 +306,15 @@ type BalanceQueryRequest struct {
 
 // BalanceQueryResponse values the wallet: USDC cash plus recorded positions
 // marked at the best bid. Positions with no fresh quote are valued at their
-// entry price and counted in UnmarkedPositions.
+// entry price and counted in UnmarkedPositions, unless their market has
+// resolved (SettledPositions).
 type BalanceQueryResponse struct {
 	SchemaVersion     string    `json:"schema_version"`
 	CashUSD           float64   `json:"cash_usd"`
 	PositionsValueUSD float64   `json:"positions_value_usd"`
 	EquityUSD         float64   `json:"equity_usd"`
 	Positions         int       `json:"positions"`
+	SettledPositions  int       `json:"settled_positions"`
 	UnmarkedPositions int       `json:"unmarked_positions"`
 	CashAsOf          time.Time `json:"cash_as_of"`
 	AsOf              time.Time `json:"as_of"`

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 )
 
 // DefaultSubject is where pmm forwards the listened wallets' trades.
@@ -83,9 +84,8 @@ type recentBuy struct {
 const (
 	// sellPrice is the floor limit every copied sell uses: a FAK at the
 	// minimum price takes whatever bids exist, like executiond's FORCE_CLOSE.
-	sellPrice       = 0.01
-	maxBuyPrice     = 0.99
-	conditionalUnit = 1e6 // conditional token balances are reported in 6-decimal base units
+	sellPrice   = 0.01
+	maxBuyPrice = 0.99
 	// dustUSD folds a leftover position worth less than this into the sell,
 	// so a copied exit does not strand an unsellable remainder.
 	dustUSD = 1.0
@@ -278,11 +278,11 @@ func (f *Follower) heldShares(ctx context.Context, tokenID string, digits int) (
 	if err != nil {
 		return 0, fmt.Errorf("read token balance: %w", err)
 	}
-	raw, err := strconv.ParseFloat(balance.Balance, 64)
+	held, err := decimal.FromBaseUnits(balance.Balance)
 	if err != nil {
-		return 0, fmt.Errorf("parse token balance %q: %w", balance.Balance, err)
+		return 0, fmt.Errorf("token balance: %w", err)
 	}
-	return floorTo(raw/conditionalUnit, digits), nil
+	return floorTo(held, digits), nil
 }
 
 // recordFill remembers the shares a copy buy matched, so a following sell on

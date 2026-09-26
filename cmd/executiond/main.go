@@ -24,6 +24,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/positionfeatures"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/reconciler"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store/postgres"
 )
 
@@ -33,6 +34,7 @@ type config struct {
 	MaxOpenBuyNotionalUSD string
 	FeatureInterval       time.Duration
 	ReconcileInterval     time.Duration
+	SettlementInterval    time.Duration
 	MissingOrderGrace     time.Duration
 	MaxTradeAge           time.Duration
 	ResultPriceWait       time.Duration
@@ -165,6 +167,22 @@ func run() error {
 	}
 	wallet.SetCashTTL(cfg.BalanceCacheTTL)
 	wallet.SetMaxQuoteAge(cfg.EquityMaxQuoteAge)
+	resolver, err := settlement.NewResolver(clob, clob, time.Now)
+	if err != nil {
+		return err
+	}
+	wallet.SetSettlements(resolver)
+	// Lanes in resolved markets that hold nothing of value are emptied, so
+	// they stop showing up as positions and stop being looked up.
+	sweeper, err := settlement.NewSweeper(store, resolver, time.Now, cfg.SettlementInterval)
+	if err != nil {
+		return err
+	}
+	sweeper.SetErrorHandler(func(err error) { log.Printf("settlement sweep error: %v", err) })
+	sweeper.SetSweepHandler(func(s settlement.Sweep) {
+		log.Printf("settlement sweep: %d lanes checked, emptied %d lost and %d redeemed, shrank %d to the wallet, left %d to a working close and %d still settling",
+			s.Checked, s.Lost, s.Redeemed, s.Shrunk, s.Reserved, s.Settling)
+	})
 	// A fill moves the exchange balance and shrinks the open-buy reservations
 	// at once; a cached pre-fill balance would count that cash twice.
 	fills.SetFillHook(wallet.Invalidate)
@@ -183,6 +201,7 @@ func run() error {
 		{name: "account-stream", module: accountStream},
 		{name: "reconciler", module: repair},
 		{name: "position-features", module: positions},
+		{name: "settlement-sweeper", module: sweeper},
 	}
 	if err := initModules(ctx, modules); err != nil {
 		return err
@@ -294,6 +313,7 @@ func configFromEnv() (config, error) {
 		MaxOpenBuyNotionalUSD: strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD")),
 		FeatureInterval:       durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
 		ReconcileInterval:     durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
+		SettlementInterval:    durationEnv("EXECUTION_SETTLEMENT_SWEEP_INTERVAL", time.Minute),
 		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
 		MaxTradeAge:           durationEnv("EXECUTION_RECONCILE_MAX_TRADE_AGE", 24*time.Hour),
 		ResultPriceWait:       durationEnv("EXECUTION_RESULT_PRICE_WAIT", accountfeed.DefaultPriceWait),
@@ -313,7 +333,7 @@ func configFromEnv() (config, error) {
 		}
 		cfg.MaxEquityFraction = fraction
 	}
-	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
+	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
 	return cfg, nil

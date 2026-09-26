@@ -182,3 +182,18 @@ func FormatPrice(value float64) string {
 func RoundUSDC(value float64) float64 {
 	return math.Round(value*1e6) / 1e6
 }
+
+// baseUnitScale is the scale of a balance the CLOB reports: USDC's six
+// decimals, which outcome tokens share.
+const baseUnitScale = 1_000_000
+
+// FromBaseUnits converts a balance the CLOB reports in 6-decimal base units
+// to dollars or shares. A negative or unparsable balance is an error.
+func FromBaseUnits(balance string) (float64, error) {
+	units, ok := Rat(balance)
+	if !ok || units.Sign() < 0 {
+		return 0, fmt.Errorf("invalid balance %q", balance)
+	}
+	value, _ := new(big.Rat).Quo(units, big.NewRat(baseUnitScale, 1)).Float64()
+	return value, nil
+}

@@ -57,6 +57,7 @@ func balanceQueryResponse(ctx context.Context, wallet EquitySource, payload []by
 		PositionsValueUSD: decimal.RoundUSDC(snapshot.PositionsUSD),
 		EquityUSD:         decimal.RoundUSDC(snapshot.EquityUSD),
 		Positions:         snapshot.Positions,
+		SettledPositions:  snapshot.SettledPositions,
 		UnmarkedPositions: snapshot.UnmarkedPositions,
 		CashAsOf:          snapshot.CashAsOf,
 		AsOf:              snapshot.AsOf,

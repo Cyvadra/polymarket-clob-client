@@ -154,6 +154,7 @@ deviate from the default.
 | --- | --- | --- |
 | `EXECUTION_POSITION_FEATURE_INTERVAL` | `500ms` | Position snapshot publish frequency. |
 | `EXECUTION_RECONCILE_INTERVAL` | `30s` | REST reconciliation frequency. |
+| `EXECUTION_SETTLEMENT_SWEEP_INTERVAL` | `1m` | How often lanes in resolved markets are checked and emptied once their shares are worth nothing. |
 | `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | `2m` | How long an unresolved submitted order may return REST 404 before it is failed. |
 | `EXECUTION_RECONCILE_MAX_TRADE_AGE` | `24h` | How far back trade replay looks on each reconciliation pass. Trades older than this are skipped rather than replayed. |
 | `EXECUTION_RESULT_PRICE_WAIT` | `3500ms` | How long a terminal open or close result waits for the fills that price it before publishing. The order message that ends an order can arrive ahead of its trade messages; if the fills still have not landed, the result carries the order's own limit price as `average_price`. `0` does not wait: the result is priced at once from whatever fills are already recorded, with the same fallback. |
@@ -163,7 +164,7 @@ deviate from the default.
 | `EXECUTION_SHUTDOWN_GRACE_PERIOD` | `10s` | Graceful shutdown deadline. |
 
 Durations accept Go duration strings such as `500ms` and `30s`; positive
-integer values are interpreted as milliseconds. All seven must be positive or
+integer values are interpreted as milliseconds. All of them must be positive or
 startup fails, except `EXECUTION_RESULT_PRICE_WAIT`, `EXECUTION_BALANCE_CACHE_TTL`, and
 `EXECUTION_EQUITY_MAX_QUOTE_AGE`, which may also be `0`.
 

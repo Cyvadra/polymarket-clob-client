@@ -456,3 +456,62 @@ func TestReconcilePositionSizeClampsDownOnly(t *testing.T) {
 		t.Fatalf("expected 3 reserved and 1 available after the clamp, got %+v", got)
 	}
 }
+
+// SettlePosition ends a lane in a resolved market: it refuses a lane with
+// shares reserved, in the statement itself, and emptying one clears its entry
+// like a sell that empties it, so open_lots resets.
+func TestSettlePositionSkipsReservedAndClearsAnEmptiedLane(t *testing.T) {
+	s := testStore(t)
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
+
+	ctx := context.Background()
+	if _, err := s.ApplyFill(ctx, store.FillRecord{
+		FillID: lane.id("fill-settle"), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
+		Side: store.SideBuy, Shares: "10", Price: "0.5", TradeStatus: "CONFIRMED",
+	}); err != nil {
+		t.Fatalf("seed position: %v", err)
+	}
+	reservation := store.ReservationRecord{
+		ReservationID: lane.id("reserve-settle"), IntentID: intentID, UniqueTag: lane.tag, ConditionID: lane.conditionID, TokenID: lane.tokenID,
+		Outcome: "Up", Side: store.SideSell, Shares: "3", Notional: "1.5", State: "active",
+	}
+	if err := s.Reserve(ctx, reservation); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	// A lane with a close working on it is left exactly as it was.
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0"); err != nil || changed {
+		t.Fatalf("settle reserved lane: changed=%v err=%v, want it left alone", changed, err)
+	}
+	if got := lane.position(t, s); got.PositionSize != "10.000000000000000000" || got.OpenLots != 1 {
+		t.Fatalf("expected the reserved lane untouched, got %+v", got)
+	}
+	if err := s.Release(ctx, reservation.ReservationID, "test"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// Shrinking keeps the entry; a report above the lane changes nothing.
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "12"); err != nil || changed {
+		t.Fatalf("settle upward: changed=%v err=%v", changed, err)
+	}
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "4"); err != nil || !changed {
+		t.Fatalf("settle downward: changed=%v err=%v", changed, err)
+	}
+	got := lane.position(t, s)
+	if got.PositionSize != "4.000000000000000000" || got.AvailableSize != "4.000000000000000000" || got.EntryTime.IsZero() || got.OpenLots != 1 {
+		t.Fatalf("expected the lane shrunk to 4 with its entry kept, got %+v", got)
+	}
+
+	// Emptying clears the entry, so the lane counts no open lots.
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0"); err != nil || !changed {
+		t.Fatalf("settle to zero: changed=%v err=%v", changed, err)
+	}
+	got = lane.position(t, s)
+	if got.PositionSize != "0.000000000000000000" || got.State != "empty" || !got.EntryTime.IsZero() || got.EntryPrice != "" || got.OpenLots != 0 {
+		t.Fatalf("expected an emptied lane with no entry, got %+v", got)
+	}
+}

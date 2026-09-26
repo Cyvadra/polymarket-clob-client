@@ -893,6 +893,35 @@ func (s *Store) ReconcilePositionSize(ctx context.Context, conditionID, tokenID,
 	return nil
 }
 
+// SettlePosition lowers a lane in a resolved market to the shares that are
+// still worth something. The reserved_size = 0 guard is in the statement so a
+// close that reserved shares after the caller looked is never clamped under.
+// Emptying the lane nulls entry_price and entry_time exactly as a sell that
+// empties it does, which is what resets open_lots in positionSelectSQL.
+func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) (bool, error) {
+	if conditionID == "" || tokenID == "" || uniqueTag == "" || shares == "" {
+		return false, fmt.Errorf("condition ID, token ID, unique tag, and shares are required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE positions
+		SET position_size = LEAST(position_size, $1::numeric),
+			actual_shares = LEAST(actual_shares, $1::numeric),
+			available_size = GREATEST(LEAST(available_size, $1::numeric), 0),
+			entry_price = CASE WHEN $1::numeric <= 0 THEN NULL ELSE entry_price END,
+			entry_time = CASE WHEN $1::numeric <= 0 THEN NULL ELSE entry_time END,
+			state = CASE WHEN $1::numeric <= 0 THEN 'empty' ELSE state END,
+			source_revision = source_revision + 1,
+			updated_at = now()
+		WHERE condition_id = $2 AND token_id = $3 AND unique_tag = $4
+			AND reserved_size = 0
+			AND actual_shares > $1::numeric
+	`, shares, conditionID, tokenID, uniqueTag)
+	if err != nil {
+		return false, fmt.Errorf("settle position: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *Store) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
 	rows, err := s.pool.Query(ctx, positionSelectSQL()+" ORDER BY condition_id, token_id, unique_tag")
 	if err != nil {
