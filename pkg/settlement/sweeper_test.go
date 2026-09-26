@@ -236,3 +236,28 @@ func TestResolverDropsIdleEntries(t *testing.T) {
 		t.Fatalf("resolved=%v wallet=%v", resolver.resolved, resolver.wallet)
 	}
 }
+
+// A winner still in the wallet is reused only within one pass, since
+// redemption can move it into cash at any moment and a reused balance would
+// count it twice. Once the wallet is empty, the zero is reused for longer.
+func TestResolverRereadsAHeldWinnerButReusesAZero(t *testing.T) {
+	markets := &fakeMarkets{reads: map[string]int{}, markets: map[string]clobclient.Market{"m": resolved("w", "l")}}
+	balances := &fakeBalances{reads: map[string]int{}, tokens: map[string]string{"w": "5000000"}}
+	now := sweepNow
+	resolver, _ := NewResolver(markets, balances, func() time.Time { return now })
+	ctx := context.Background()
+	check := func(want float64, reads int) {
+		t.Helper()
+		outcome, err := resolver.Outcome(ctx, "m", "w")
+		if err != nil || outcome.WalletShares != want || balances.reads["w"] != reads {
+			t.Fatalf("outcome=%+v err=%v reads=%d, want %v shares after %d reads", outcome, err, balances.reads["w"], want, reads)
+		}
+	}
+	check(5, 1)
+	check(5, 1)                // same pass
+	balances.tokens["w"] = "0" // redeemed
+	now = now.Add(heldBalanceTTL)
+	check(0, 2)
+	now = now.Add(winnerBalanceTTL / 2)
+	check(0, 2)
+}

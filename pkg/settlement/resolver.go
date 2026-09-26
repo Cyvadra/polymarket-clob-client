@@ -37,10 +37,16 @@ const (
 	// its word before asking again. Up/down markets resolve minutes after they
 	// close.
 	openMarketTTL = 30 * time.Second
-	// winnerBalanceTTL is how long a winning token's wallet balance is reused.
-	// It only ever falls, on redemption, which moves the value into cash: a
-	// stale read counts that value twice for at most this long.
+	// winnerBalanceTTL is how long a winning token's zero wallet balance is
+	// reused. A stale zero can only undercount, if tokens from a fill that
+	// settled late arrive, and those lanes are valued at their recorded
+	// shares within SettleGrace.
 	winnerBalanceTTL = time.Minute
+	// heldBalanceTTL is how long a balance above zero is reused: only long
+	// enough for one pass over the lanes sharing a token. Redemption,
+	// automatic minutes after the market ends, moves the balance into cash,
+	// and a stale read counts it twice for as long as it is reused.
+	heldBalanceTTL = 2 * time.Second
 	// failureTTL is how long a failed lookup is held before it is tried again,
 	// so a lane the CLOB cannot serve costs one request per interval rather
 	// than one per valuation.
@@ -192,7 +198,8 @@ func (r *Resolver) walletShares(ctx context.Context, tokenID string) (float64, e
 		switch {
 		case cached.err != nil && now.Sub(cached.at) < failureTTL:
 			return 0, cached.err
-		case cached.err == nil && now.Sub(cached.at) < winnerBalanceTTL:
+		case cached.err == nil && cached.shares == 0 && now.Sub(cached.at) < winnerBalanceTTL,
+			cached.err == nil && now.Sub(cached.at) < heldBalanceTTL:
 			return cached.shares, nil
 		}
 	}
