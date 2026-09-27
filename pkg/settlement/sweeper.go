@@ -42,10 +42,15 @@ type Sweeper struct {
 
 // Sweep reports one pass. Settling counts the winners left alone because
 // their lane changed too recently for the wallet balance to be trusted;
-// Reserved those left to a working close.
+// Reserved those left to a working close, ReservedWinners the winners among
+// them. A winner left alone may already have been redeemed with no payout
+// recorded for it yet.
 type Sweep struct {
-	Checked, Lost, Redeemed, Shrunk, Reserved, Settling int
+	Checked, Lost, Redeemed, Shrunk, Reserved, ReservedWinners, Settling int
 }
+
+// WinnersHeld counts the winning lanes this pass left alone.
+func (s Sweep) WinnersHeld() int { return s.ReservedWinners + s.Settling }
 
 func NewSweeper(s Store, resolver *Resolver, now func() time.Time, interval time.Duration) (*Sweeper, error) {
 	if s == nil || resolver == nil {
@@ -62,7 +67,8 @@ func NewSweeper(s Store, resolver *Resolver, now func() time.Time, interval time
 
 func (s *Sweeper) SetErrorHandler(handler func(error)) { s.onError = handler }
 
-// SetSweepHandler observes every pass that changed a lane or skipped one.
+// SetSweepHandler observes every pass, including those that found nothing to
+// do, so work deferred until lanes are clear can run when they are.
 func (s *Sweeper) SetSweepHandler(handler func(Sweep)) { s.onSwept = handler }
 
 func (s *Sweeper) Init(context.Context) error  { return nil }
@@ -86,7 +92,7 @@ func (s *Sweeper) pass(ctx context.Context) {
 	if err != nil && s.onError != nil {
 		s.onError(err)
 	}
-	if s.onSwept != nil && sweep.Lost+sweep.Redeemed+sweep.Shrunk+sweep.Reserved+sweep.Settling > 0 {
+	if s.onSwept != nil {
 		s.onSwept(sweep)
 	}
 }
@@ -135,6 +141,9 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 		switch {
 		case decimal.Positive(p.ReservedSize):
 			sweep.Reserved++
+			if outcome.Winner {
+				sweep.ReservedWinners++
+			}
 			remaining[p.TokenID] -= size
 			continue
 		case outcome.Winner && !Settled(p, now):
@@ -154,7 +163,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 		}
 		remaining[p.TokenID] -= keep
 		shares := strconv.FormatFloat(keep, 'f', 6, 64)
-		changed, err := s.store.SettlePosition(ctx, p.ConditionID, p.TokenID, p.UniqueTag, shares)
+		changed, err := s.store.SettlePosition(ctx, p.ConditionID, p.TokenID, p.UniqueTag, shares, outcome.Winner)
 		if err != nil {
 			errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
 			continue
@@ -164,6 +173,9 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 			// it already shrank; either way the store declined and the lane
 			// is not counted as swept.
 			sweep.Reserved++
+			if outcome.Winner {
+				sweep.ReservedWinners++
+			}
 			continue
 		}
 		switch {

@@ -108,6 +108,9 @@ them produces orders the exchange rejects.
 | `EXECUTION_NATS_URL` | No | Core NATS server URL; defaults to `nats://127.0.0.1:4222`. |
 | `EXECUTION_POSTGRES_URL` | No | PostgreSQL connection URL; defaults to `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable`. The default is a placeholder and must be replaced outside local development. |
 | `EXECUTION_MAX_EQUITY_FRACTION` | No | Largest `target_equity_fraction` an open request may carry, in (0, 1]; defaults to `0.25`. Larger fractions are rejected with `INVALID_INTENT`. It catches unit mistakes (`3` meant as 3%), and is not a risk limit. |
+| `EXECUTION_MAX_DRAWDOWN` | No | Suspends new opens while the trading drawdown since `EXECUTION_DRAWDOWN_START` exceeds this fraction, in (0, 1): `0.2` is 20%. Suspended opens are rejected with `DRAWDOWN_LIMIT`. Closes are never held back. Unset means no limit. See [Drawdown limit](#drawdown-limit). |
+| `EXECUTION_DRAWDOWN_START` | With `EXECUTION_MAX_DRAWDOWN` | Where the drawdown is measured from: an RFC 3339 time or a `YYYY-MM-DD` date (UTC midnight). Set it when a strategy starts; moving it later forgets the earlier peak. |
+| `EXECUTION_EQUITY_FLOW_THRESHOLD_USD` | No | The smallest unexplained cash change between equity snapshots that counts as a deposit or withdrawal; defaults to `1`. Smaller residuals, such as rounding or rebates, stay in the trading return. |
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | Cap on the total notional of active BUY reservations, checked inside the reservation transaction. Unset means no cap; over-cap buys are rejected with `EXPOSURE_LIMIT`. |
 | `POLYMARKET_PROXY_URL` | No | Absolute `http`, `https`, or `socks5` URL for outbound CLOB traffic. Unset means a direct connection. |
 
@@ -189,3 +192,13 @@ standard `executiond` deployment and are omitted from `.env.example`.
   version of the system, is gitignored, and is not read by any code in this
   repository. It is kept only for reference and must not be treated as live
   configuration.
+
+## Drawdown limit
+
+The daemon records equity in `equity_snapshots` after each settlement sweep that empties or shrinks a lane. It records nothing between settlements, so the history has gaps.
+
+Each snapshot separates trading from transfers. The cash moved by recorded trading that no earlier snapshot counted (fills, plus $1 a share for redeemed winners, stored in `settlement_payouts`) is `trade_cash_usd`. Each fill and payout is counted by exactly one snapshot: the first whose valuation began after it was stored, marked in its `equity_snapshot_id`. A fill stored late, such as one backfilled by reconciliation, is counted by the next snapshot instead of being lost. Any other cash change of at least `EXECUTION_EQUITY_FLOW_THRESHOLD_USD` is `external_flow_usd`: a deposit when positive, a withdrawal when negative. `trade_index` chains each interval's return, which is the equity change less the flow over the equity it was earned on. Because it's a time-weighted return, a deposit or withdrawal leaves it unchanged, and a loss counts at its size relative to the capital at the time.
+
+The drawdown is how far the latest `trade_index` sits below its highest value at or after `EXECUTION_DRAWDOWN_START`, counting the last snapshot before the start, which is the level trading started from. The daemon reads it at startup and after each snapshot, so it changes only when positions settle. Once the limit is crossed, opens stay suspended until the index recovers or the start is moved later and the daemon is restarted.
+
+A snapshot is skipped when some position cannot be valued, so a guessed price can't show up as a loss. It's also deferred while a resolved winner is left unsettled (a close is working on it, or it changed too recently), since a winner the wallet already redeemed has no payout recorded yet. The snapshot is taken on the first sweep after that. A fill whose cash moved before a snapshot but which was stored after it shows up as a flow in two intervals that cancel out. It can briefly lift the peak, but only by that fill's size.

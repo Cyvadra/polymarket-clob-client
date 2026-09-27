@@ -114,7 +114,7 @@ Order events use the same numeric representation for `matched_shares` when the f
 
 ## Reason codes
 
-`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `DRAWDOWN_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
 
 `BELOW_MIN_ORDER_SIZE` means the position is smaller than the market's minimum order size, so no order can be placed for it. It is not a permanent failure: executiond keeps the shares and retries as the lane grows, and takes the residual with a FAK if the bid reaches the close's limit price before settlement.
 

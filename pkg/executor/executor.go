@@ -45,6 +45,7 @@ type Executor struct {
 	onError func(error)
 	publish protocol.ExecutionEventPublisher
 	sizer   EntrySizer
+	gate    OpenGate
 
 	// laneRevisions holds each lane's position revision as of the previous
 	// maintenance pass, so the pass can tell a position that is still filling
@@ -73,6 +74,16 @@ func New(repository repository, clob CLOB, now func() time.Time) (*Executor, err
 // such opens are rejected.
 func (e *Executor) SetEntrySizer(sizer EntrySizer) {
 	e.sizer = sizer
+}
+
+// OpenGate can hold back new positions; closes are never gated.
+type OpenGate interface {
+	Suspended() (bool, string)
+}
+
+// SetOpenGate rejects opens while gate reports trading suspended.
+func (e *Executor) SetOpenGate(gate OpenGate) {
+	e.gate = gate
 }
 
 func (e *Executor) SetQuoteProvider(provider QuoteProvider) {

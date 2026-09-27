@@ -202,6 +202,53 @@ type PositionStore interface {
 	PositionFeatures(context.Context) ([]PositionRecord, error)
 }
 
+// EquitySnapshotRecord is one recorded valuation of the wallet. TradeCashUSD
+// is the cash that recorded trading moved since the previous snapshot,
+// ExternalFlowUSD what the cash change left unexplained (a deposit when
+// positive, a withdrawal when negative), and TradeIndex the time-weighted
+// return of trading alone, chained from 1 at the first snapshot.
+type EquitySnapshotRecord struct {
+	ID                int64
+	TakenAt           time.Time
+	Reason            string
+	CashUSD           string
+	PositionsUSD      string
+	EquityUSD         string
+	TradeCashUSD      string
+	ExternalFlowUSD   string
+	TradeIndex        string
+	UnmarkedPositions int
+}
+
+// PendingTradeCash is the cash moved by fills and settlement payouts that no
+// snapshot has counted yet: sells and payouts in, buys and fees out. The IDs
+// are the rows it was summed from.
+type PendingTradeCash struct {
+	USD       string
+	FillIDs   []string
+	PayoutIDs []int64
+}
+
+// ErrTradeCashCounted is returned when a snapshot would count trade cash
+// another snapshot already has.
+var ErrTradeCashCounted = errors.New("trade cash already counted by another snapshot")
+
+type EquityStore interface {
+	// PendingTradeCash reads the trade cash not yet counted. Read it before
+	// the wallet's balance, so every row it counts is already in that balance.
+	PendingTradeCash(context.Context) (PendingTradeCash, error)
+	// RecordEquitySnapshot inserts the snapshot and marks the rows of counted
+	// as counted by it, together. It fails with ErrTradeCashCounted, saving
+	// nothing, when any of them already were.
+	RecordEquitySnapshot(ctx context.Context, record EquitySnapshotRecord, counted PendingTradeCash) (EquitySnapshotRecord, error)
+	// LatestEquitySnapshot reports false when nothing has been recorded yet.
+	LatestEquitySnapshot(context.Context) (EquitySnapshotRecord, bool, error)
+	// PeakTradeIndexSince is the highest TradeIndex among the snapshots at or
+	// after since and the last one before it, the level trading at since
+	// started from; it reports false when there is none.
+	PeakTradeIndexSince(ctx context.Context, since time.Time) (string, bool, error)
+}
+
 // PositionReconciler adopts the exchange's own view of a lane's size. It is
 // kept apart from PositionStore because most consumers only read positions.
 type PositionReconciler interface {
@@ -221,8 +268,10 @@ type PositionSettler interface {
 	// the same statement, since a close is working on it and owns it until the
 	// reservation ends. Settling to zero clears the lane like a sell that
 	// empties it does, so entry_time and the open-lot count reset with it.
+	// A winner's removed shares are recorded as a $1-a-share payout in the
+	// same statement, since the wallet redeemed them for cash.
 	// It reports whether the lane changed.
-	SettlePosition(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) (bool, error)
+	SettlePosition(ctx context.Context, conditionID, tokenID, uniqueTag, shares string, winner bool) (bool, error)
 }
 
 type ReservationStore interface {

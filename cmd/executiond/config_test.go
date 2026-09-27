@@ -62,3 +62,35 @@ func TestConfigFromEnvRejectsNegativeMaxTradeAge(t *testing.T) {
 		t.Fatal("expected error for negative max trade age")
 	}
 }
+
+func TestConfigFromEnvDrawdownLimit(t *testing.T) {
+	withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "0.2", "EXECUTION_DRAWDOWN_START": "2026-09-28"})
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if cfg.MaxDrawdown != 0.2 || !cfg.DrawdownStart.Equal(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)) || cfg.EquityFlowThresholdUSD != 1 {
+		t.Fatalf("cfg=%+v", cfg)
+	}
+
+	withEnv(t, map[string]string{"EXECUTION_DRAWDOWN_START": "2026-09-28T08:00:00+08:00"})
+	if cfg, err = configFromEnv(); err != nil || !cfg.DrawdownStart.Equal(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("RFC 3339 start: %v %v", cfg.DrawdownStart, err)
+	}
+
+	for name, kv := range map[string]map[string]string{
+		"no start":       {"EXECUTION_DRAWDOWN_START": ""},
+		"bad start":      {"EXECUTION_DRAWDOWN_START": "yesterday"},
+		"limit of 1":     {"EXECUTION_MAX_DRAWDOWN": "1"},
+		"percent":        {"EXECUTION_MAX_DRAWDOWN": "20"},
+		"negative flows": {"EXECUTION_EQUITY_FLOW_THRESHOLD_USD": "-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "0.2", "EXECUTION_DRAWDOWN_START": "2026-09-28"})
+			withEnv(t, kv)
+			if _, err := configFromEnv(); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}

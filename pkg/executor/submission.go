@@ -67,6 +67,13 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		ExpiresAt:          req.ExpiresAt,
 		Policy:             req.Policy,
 	}
+	if e.gate != nil {
+		if suspended, reason := e.gate.Suspended(); suspended {
+			err := reject(protocol.ReasonDrawdownLimit, "%s", reason)
+			e.publishOpenRejection(intent, err)
+			return err
+		}
+	}
 	release, err := e.sizeEntry(ctx, req, &intent)
 	if err != nil {
 		e.publishOpenRejection(intent, err)

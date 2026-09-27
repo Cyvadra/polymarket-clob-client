@@ -96,3 +96,33 @@ func TestExecuteOpenRejectsEquitySizingProblems(t *testing.T) {
 		})
 	}
 }
+
+type fakeGate struct{ suspended bool }
+
+func (f fakeGate) Suspended() (bool, string) {
+	if f.suspended {
+		return true, "trading drawdown 12.00% exceeds the 10.00% limit"
+	}
+	return false, ""
+}
+
+func TestExecuteOpenRejectsWhileTheGateIsShut(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{}
+	exec, _ := New(storer, client, time.Now)
+	sizer := &fakeSizer{entry: equity.Entry{TargetUSD: "3", EquityUSD: 100}}
+	exec.SetEntrySizer(sizer)
+	exec.SetOpenGate(fakeGate{suspended: true})
+	pub := &resultPublisher{}
+	exec.SetEventPublisher(pub)
+	if err := exec.ExecuteOpen(context.Background(), equityOpenRequest()); err == nil {
+		t.Fatal("expected rejection")
+	}
+	result, ok := pub.value.(protocol.ExecutionOpenResult)
+	if !ok || result.ReasonCode != protocol.ReasonDrawdownLimit || result.Reason == "" {
+		t.Fatalf("result=%+v", pub.value)
+	}
+	if sizer.fraction != "" || len(storer.insertedIntents) != 0 || client.submissions != 0 {
+		t.Fatal("a suspended open was sized, stored, or submitted")
+	}
+}

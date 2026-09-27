@@ -4,9 +4,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -51,6 +54,7 @@ func newTestLane(t *testing.T, s *Store) testLane {
 		ctx := context.Background()
 		for _, statement := range []string{
 			`DELETE FROM reservations WHERE unique_tag = $1`,
+			`DELETE FROM settlement_payouts WHERE unique_tag = $1`,
 			`DELETE FROM fills WHERE unique_tag = $1`,
 			`DELETE FROM positions WHERE unique_tag = $1`,
 			`DELETE FROM order_events WHERE intent_id IN (SELECT intent_id FROM order_intents WHERE unique_tag = $1)`,
@@ -484,7 +488,7 @@ func TestSettlePositionSkipsReservedAndClearsAnEmptiedLane(t *testing.T) {
 	}
 
 	// A lane with a close working on it is left exactly as it was.
-	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0"); err != nil || changed {
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0", false); err != nil || changed {
 		t.Fatalf("settle reserved lane: changed=%v err=%v, want it left alone", changed, err)
 	}
 	if got := lane.position(t, s); got.PositionSize != "10.000000000000000000" || got.OpenLots != 1 {
@@ -495,11 +499,20 @@ func TestSettlePositionSkipsReservedAndClearsAnEmptiedLane(t *testing.T) {
 	}
 
 	// Shrinking keeps the entry; a report above the lane changes nothing.
-	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "12"); err != nil || changed {
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "12", true); err != nil || changed {
 		t.Fatalf("settle upward: changed=%v err=%v", changed, err)
 	}
-	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "4"); err != nil || !changed {
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "4", true); err != nil || !changed {
 		t.Fatalf("settle downward: changed=%v err=%v", changed, err)
+	}
+	// A winner's removed shares are paid out at $1; a refused settle pays nothing.
+	var payouts int
+	var paid string
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*), COALESCE(SUM(payout_usd), 0)::text FROM settlement_payouts WHERE unique_tag = $1`, lane.tag).Scan(&payouts, &paid); err != nil {
+		t.Fatal(err)
+	}
+	if payouts != 1 || paid != "6.000000000000000000" {
+		t.Fatalf("expected one $6 payout, got %d totalling %s", payouts, paid)
 	}
 	got := lane.position(t, s)
 	if got.PositionSize != "4.000000000000000000" || got.AvailableSize != "4.000000000000000000" || got.EntryTime.IsZero() || got.OpenLots != 1 {
@@ -507,11 +520,114 @@ func TestSettlePositionSkipsReservedAndClearsAnEmptiedLane(t *testing.T) {
 	}
 
 	// Emptying clears the entry, so the lane counts no open lots.
-	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0"); err != nil || !changed {
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0", false); err != nil || !changed {
 		t.Fatalf("settle to zero: changed=%v err=%v", changed, err)
 	}
 	got = lane.position(t, s)
 	if got.PositionSize != "0.000000000000000000" || got.State != "empty" || !got.EntryTime.IsZero() || got.EntryPrice != "" || got.OpenLots != 0 {
 		t.Fatalf("expected an emptied lane with no entry, got %+v", got)
+	}
+}
+
+func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
+	s := testStore(t)
+	lane := newTestLane(t, s)
+	ctx := context.Background()
+	reason := "test-" + lane.tag
+	t.Cleanup(func() {
+		// Rows these snapshots counted, other writers' included, go back
+		// to pending.
+		for _, statement := range []string{
+			`UPDATE fills SET equity_snapshot_id = NULL WHERE equity_snapshot_id IN (SELECT id FROM equity_snapshots WHERE reason = $1)`,
+			`UPDATE settlement_payouts SET equity_snapshot_id = NULL WHERE equity_snapshot_id IN (SELECT id FROM equity_snapshots WHERE reason = $1)`,
+			`DELETE FROM equity_snapshots WHERE reason = $1`,
+		} {
+			if _, err := s.pool.Exec(context.Background(), statement, reason); err != nil {
+				t.Errorf("clean up equity snapshots: %v", err)
+			}
+		}
+	})
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
+	applyFill := func(i int, side store.Side, shares, price, fee string, exchangeTime time.Time) {
+		t.Helper()
+		if _, err := s.ApplyFill(ctx, store.FillRecord{
+			FillID: lane.id(fmt.Sprint("fill-cash-", i)), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+			MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
+			Side: side, Shares: shares, Price: price, Fee: fee, TradeStatus: "CONFIRMED", ExchangeTime: exchangeTime,
+		}); err != nil {
+			t.Fatalf("fill: %v", err)
+		}
+	}
+	snapshot := func(takenAt time.Time, index string, counted store.PendingTradeCash) (store.EquitySnapshotRecord, error) {
+		return s.RecordEquitySnapshot(ctx, store.EquitySnapshotRecord{
+			TakenAt: takenAt, Reason: reason, CashUSD: "1", PositionsUSD: "0", EquityUSD: "1",
+			TradeCashUSD: "0", ExternalFlowUSD: "0", TradeIndex: index,
+		}, counted)
+	}
+	// Other writers to this database leave their own rows pending; a first
+	// snapshot counts them all, so what is pending after it is this test's.
+	pending, err := s.PendingTradeCash(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Add(time.Hour)
+	if _, err := snapshot(start.Add(-3*time.Minute), "5", pending); err != nil {
+		t.Fatal(err)
+	}
+	applyFill(0, store.SideBuy, "10", "0.4", "0.1", time.Time{})
+	applyFill(1, store.SideSell, "4", "0.5", "0", time.Time{})
+	if changed, err := s.SettlePosition(ctx, lane.conditionID, lane.tokenID, lane.tag, "0", true); err != nil || !changed {
+		t.Fatalf("settle: changed=%v err=%v", changed, err)
+	}
+	// -4 - 0.1 for the buy, +2 for the sell, +6 for the redeemed winner.
+	pending, err = s.PendingTradeCash(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := strconv.ParseFloat(pending.USD, 64); math.Abs(got-3.9) > 1e-9 || len(pending.FillIDs) != 2 || len(pending.PayoutIDs) != 1 {
+		t.Fatalf("pending trade cash %+v, want 3.9 from 2 fills and 1 payout", pending)
+	}
+	counted := pending
+	// A fill stored after the read, matched long before, is left pending
+	// for the next snapshot rather than lost.
+	applyFill(2, store.SideSell, "1", "0.5", "0", time.Now().Add(-24*time.Hour))
+	if _, err := snapshot(start.Add(-2*time.Minute), "1.2", counted); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = s.PendingTradeCash(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := strconv.ParseFloat(pending.USD, 64); math.Abs(got-0.5) > 1e-9 || len(pending.FillIDs) != 1 {
+		t.Fatalf("late fill not pending: %+v", pending)
+	}
+	// Counting the same rows twice is refused, and saves nothing.
+	if _, err := snapshot(start.Add(-time.Minute), "9", counted); !errors.Is(err, store.ErrTradeCashCounted) {
+		t.Fatalf("expected ErrTradeCashCounted, got %v", err)
+	}
+	if _, err := snapshot(start.Add(-time.Minute), "1.6", pending); err != nil {
+		t.Fatal(err)
+	}
+
+	// The peak is read from snapshots at or after the start and the last one
+	// before it (1.6), not from earlier ones (5).
+	empty := store.PendingTradeCash{}
+	for i, index := range []string{"1.5", "1.1"} {
+		if _, err := snapshot(start.Add(time.Duration(i)*time.Minute), index, empty); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peak, ok, err := s.PeakTradeIndexSince(ctx, start)
+	if err != nil || !ok {
+		t.Fatalf("peak: %v %v", ok, err)
+	}
+	if got, _ := strconv.ParseFloat(peak, 64); got != 1.6 {
+		t.Fatalf("peak %s, want 1.6", peak)
+	}
+	latest, ok, err := s.LatestEquitySnapshot(ctx)
+	if err != nil || !ok || latest.Reason != reason || latest.TradeIndex != "1.100000000000000000" {
+		t.Fatalf("latest snapshot %+v, %v, %v", latest, ok, err)
 	}
 }

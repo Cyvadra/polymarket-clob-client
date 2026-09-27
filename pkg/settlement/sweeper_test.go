@@ -38,18 +38,23 @@ type fakeStore struct {
 	positions []store.PositionRecord
 	settled   map[string]string
 	declined  map[string]bool
+	winners   map[string]bool
 }
 
 func (f *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, error) {
 	return f.positions, nil
 }
 
-func (f *fakeStore) SettlePosition(_ context.Context, conditionID, tokenID, uniqueTag, shares string) (bool, error) {
+func (f *fakeStore) SettlePosition(_ context.Context, conditionID, tokenID, uniqueTag, shares string, winner bool) (bool, error) {
 	lane := conditionID + "/" + tokenID + "/" + uniqueTag
 	if f.declined[lane] {
 		return false, nil
 	}
 	f.settled[lane] = shares
+	if f.winners == nil {
+		f.winners = map[string]bool{}
+	}
+	f.winners[lane] = winner
 	return true, nil
 }
 
@@ -119,6 +124,10 @@ func TestSweepEmptiesLanesWorthNothing(t *testing.T) {
 			t.Fatalf("settled=%v, want %v", st.settled, want)
 		}
 	}
+	// Winners are settled as such, so their removed shares are paid out.
+	if st.winners["lost/l1/a"] || !st.winners["part/w2/c"] || !st.winners["redeemed/w3/d"] {
+		t.Fatalf("winners=%v", st.winners)
+	}
 	if sweep != (Sweep{Checked: 10, Lost: 1, Redeemed: 1, Shrunk: 1, Reserved: 2, Settling: 2}) {
 		t.Fatalf("sweep=%+v", sweep)
 	}
@@ -149,7 +158,7 @@ func TestSweepSharesAWalletBalanceAcrossLanesOfOneToken(t *testing.T) {
 	if len(st.settled) != len(want) || st.settled["m/w/c"] != want["m/w/c"] || st.settled["m/w/d"] != want["m/w/d"] {
 		t.Fatalf("settled=%v, want %v", st.settled, want)
 	}
-	if sweep != (Sweep{Checked: 4, Redeemed: 1, Shrunk: 1, Reserved: 1}) {
+	if sweep != (Sweep{Checked: 4, Redeemed: 1, Shrunk: 1, Reserved: 1, ReservedWinners: 1}) {
 		t.Fatalf("sweep=%+v", sweep)
 	}
 	if balances.reads["w"] != 1 {

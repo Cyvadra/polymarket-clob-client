@@ -29,20 +29,23 @@ import (
 )
 
 type config struct {
-	NATSURL               string
-	PostgresURL           string
-	MaxOpenBuyNotionalUSD string
-	FeatureInterval       time.Duration
-	ReconcileInterval     time.Duration
-	SettlementInterval    time.Duration
-	MissingOrderGrace     time.Duration
-	MaxTradeAge           time.Duration
-	ResultPriceWait       time.Duration
-	BalanceCacheTTL       time.Duration
-	EquityMaxQuoteAge     time.Duration
-	MaxEquityFraction     float64
-	ConnectTimeout        time.Duration
-	ShutdownGracePeriod   time.Duration
+	NATSURL                string
+	PostgresURL            string
+	MaxOpenBuyNotionalUSD  string
+	FeatureInterval        time.Duration
+	ReconcileInterval      time.Duration
+	SettlementInterval     time.Duration
+	MissingOrderGrace      time.Duration
+	MaxTradeAge            time.Duration
+	ResultPriceWait        time.Duration
+	BalanceCacheTTL        time.Duration
+	EquityMaxQuoteAge      time.Duration
+	MaxEquityFraction      float64
+	MaxDrawdown            float64
+	DrawdownStart          time.Time
+	EquityFlowThresholdUSD float64
+	ConnectTimeout         time.Duration
+	ShutdownGracePeriod    time.Duration
 }
 
 type module interface {
@@ -179,9 +182,41 @@ func run() error {
 		return err
 	}
 	sweeper.SetErrorHandler(func(err error) { log.Printf("settlement sweep error: %v", err) })
+	recorder, err := equity.NewRecorder(wallet, store, cfg.EquityFlowThresholdUSD)
+	if err != nil {
+		return err
+	}
+	var guard *equity.DrawdownGuard
+	if cfg.MaxDrawdown > 0 {
+		guard, err = equity.NewDrawdownGuard(store, cfg.DrawdownStart, cfg.MaxDrawdown)
+		if err != nil {
+			return err
+		}
+		if err := refreshDrawdown(ctx, guard); err != nil {
+			return err
+		}
+		execution.SetOpenGate(guard)
+	}
+	// Equity is recorded once lanes have settled and no winner is left
+	// unsettled: one the wallet already redeemed has no payout recorded yet,
+	// and its cash would read as a deposit and its lane as a loss.
+	equityDue := false
 	sweeper.SetSweepHandler(func(s settlement.Sweep) {
-		log.Printf("settlement sweep: %d lanes checked, emptied %d lost and %d redeemed, shrank %d to the wallet, left %d to a working close and %d still settling",
-			s.Checked, s.Lost, s.Redeemed, s.Shrunk, s.Reserved, s.Settling)
+		if s.Lost+s.Redeemed+s.Shrunk+s.Reserved+s.Settling > 0 {
+			log.Printf("settlement sweep: %d lanes checked, emptied %d lost and %d redeemed, shrank %d to the wallet, left %d to a working close and %d still settling",
+				s.Checked, s.Lost, s.Redeemed, s.Shrunk, s.Reserved, s.Settling)
+		}
+		if s.Lost+s.Redeemed+s.Shrunk > 0 {
+			equityDue = true
+		}
+		if !equityDue {
+			return
+		}
+		if held := s.WinnersHeld(); held > 0 {
+			log.Printf("equity snapshot deferred: %d winning lanes not yet settled", held)
+			return
+		}
+		equityDue = !recordSettledEquity(ctx, recorder, guard)
 	})
 	// A fill moves the exchange balance and shrinks the open-buy reservations
 	// at once; a cached pre-fill balance would count that cash twice.
@@ -308,20 +343,21 @@ func closeModules(ctx context.Context, modules []namedModule) error {
 
 func configFromEnv() (config, error) {
 	cfg := config{
-		NATSURL:               env("EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
-		PostgresURL:           env("EXECUTION_POSTGRES_URL", "postgres://user:password@127.0.0.1:5432/execution?sslmode=disable"),
-		MaxOpenBuyNotionalUSD: strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD")),
-		FeatureInterval:       durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
-		ReconcileInterval:     durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
-		SettlementInterval:    durationEnv("EXECUTION_SETTLEMENT_SWEEP_INTERVAL", time.Minute),
-		MissingOrderGrace:     durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
-		MaxTradeAge:           durationEnv("EXECUTION_RECONCILE_MAX_TRADE_AGE", 24*time.Hour),
-		ResultPriceWait:       durationEnv("EXECUTION_RESULT_PRICE_WAIT", accountfeed.DefaultPriceWait),
-		BalanceCacheTTL:       durationEnv("EXECUTION_BALANCE_CACHE_TTL", equity.DefaultCashTTL),
-		EquityMaxQuoteAge:     durationEnv("EXECUTION_EQUITY_MAX_QUOTE_AGE", 30*time.Second),
-		MaxEquityFraction:     equity.DefaultMaxFraction,
-		ConnectTimeout:        durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
-		ShutdownGracePeriod:   durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
+		NATSURL:                env("EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
+		PostgresURL:            env("EXECUTION_POSTGRES_URL", "postgres://user:password@127.0.0.1:5432/execution?sslmode=disable"),
+		MaxOpenBuyNotionalUSD:  strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD")),
+		FeatureInterval:        durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
+		ReconcileInterval:      durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
+		SettlementInterval:     durationEnv("EXECUTION_SETTLEMENT_SWEEP_INTERVAL", time.Minute),
+		MissingOrderGrace:      durationEnv("EXECUTION_MISSING_ORDER_GRACE_PERIOD", 2*time.Minute),
+		MaxTradeAge:            durationEnv("EXECUTION_RECONCILE_MAX_TRADE_AGE", 24*time.Hour),
+		ResultPriceWait:        durationEnv("EXECUTION_RESULT_PRICE_WAIT", accountfeed.DefaultPriceWait),
+		BalanceCacheTTL:        durationEnv("EXECUTION_BALANCE_CACHE_TTL", equity.DefaultCashTTL),
+		EquityMaxQuoteAge:      durationEnv("EXECUTION_EQUITY_MAX_QUOTE_AGE", 30*time.Second),
+		MaxEquityFraction:      equity.DefaultMaxFraction,
+		EquityFlowThresholdUSD: equity.DefaultFlowThresholdUSD,
+		ConnectTimeout:         durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
+		ShutdownGracePeriod:    durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
@@ -333,10 +369,46 @@ func configFromEnv() (config, error) {
 		}
 		cfg.MaxEquityFraction = fraction
 	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_DRAWDOWN")); value != "" {
+		limit, err := strconv.ParseFloat(value, 64)
+		if err != nil || limit <= 0 || limit >= 1 {
+			return config{}, fmt.Errorf("EXECUTION_MAX_DRAWDOWN must be in (0, 1)")
+		}
+		cfg.MaxDrawdown = limit
+		start, err := parseStart(os.Getenv("EXECUTION_DRAWDOWN_START"))
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_DRAWDOWN_START: %w", err)
+		}
+		cfg.DrawdownStart = start
+	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_EQUITY_FLOW_THRESHOLD_USD")); value != "" {
+		threshold, err := strconv.ParseFloat(value, 64)
+		if err != nil || threshold < 0 {
+			return config{}, fmt.Errorf("EXECUTION_EQUITY_FLOW_THRESHOLD_USD must be a non-negative number")
+		}
+		cfg.EquityFlowThresholdUSD = threshold
+	}
 	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
 	return cfg, nil
+}
+
+// parseStart reads the drawdown start: an RFC 3339 time, or a UTC date.
+// It is required with a drawdown limit, since the peak it is measured from
+// belongs to whatever strategy is running, which only the operator knows.
+func parseStart(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, fmt.Errorf("required with EXECUTION_MAX_DRAWDOWN")
+	}
+	if start, err := time.Parse(time.RFC3339, value); err == nil {
+		return start, nil
+	}
+	if start, err := time.Parse(time.DateOnly, value); err == nil {
+		return start, nil
+	}
+	return time.Time{}, fmt.Errorf("%q is neither an RFC 3339 time nor a YYYY-MM-DD date", value)
 }
 
 func env(name, fallback string) string {
@@ -358,4 +430,37 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 		return time.Duration(milliseconds) * time.Millisecond
 	}
 	return -1
+}
+
+// recordSettledEquity saves the wallet's equity once positions have settled
+// and refreshes the drawdown limit from it. It reports whether a snapshot
+// was recorded; one that was not is retried after the next sweep.
+func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, guard *equity.DrawdownGuard) bool {
+	snapshot, err := recorder.Record(ctx, "settlement")
+	if err != nil {
+		log.Printf("record equity after settlement: %v", err)
+		return false
+	}
+	log.Printf("equity after settlement: $%s (trade cash $%s, external flow $%s, trade index %s)",
+		snapshot.EquityUSD, snapshot.TradeCashUSD, snapshot.ExternalFlowUSD, snapshot.TradeIndex)
+	if guard == nil {
+		return true
+	}
+	if err := refreshDrawdown(ctx, guard); err != nil {
+		log.Printf("refresh drawdown limit: %v", err)
+	}
+	return true
+}
+
+func refreshDrawdown(ctx context.Context, guard *equity.DrawdownGuard) error {
+	drawdown, err := guard.Refresh(ctx)
+	if err != nil {
+		return err
+	}
+	if suspended, reason := guard.Suspended(); suspended {
+		log.Printf("opens suspended: %s", reason)
+		return nil
+	}
+	log.Printf("trading drawdown %.2f%%, opens allowed", drawdown*100)
+	return nil
 }

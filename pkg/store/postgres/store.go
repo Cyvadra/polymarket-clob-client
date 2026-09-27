@@ -898,11 +898,31 @@ func (s *Store) ReconcilePositionSize(ctx context.Context, conditionID, tokenID,
 // close that reserved shares after the caller looked is never clamped under.
 // Emptying the lane nulls entry_price and entry_time exactly as a sell that
 // empties it does, which is what resets open_lots in positionSelectSQL.
-func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, uniqueTag, shares string) (bool, error) {
+func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, uniqueTag, shares string, winner bool) (bool, error) {
 	if conditionID == "" || tokenID == "" || uniqueTag == "" || shares == "" {
 		return false, fmt.Errorf("condition ID, token ID, unique tag, and shares are required")
 	}
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return false, fmt.Errorf("begin settle position: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The lane is locked first, so the size the payout is taken from is the
+	// one the update lowers.
+	var before string
+	err = tx.QueryRow(ctx, `
+		SELECT position_size::text FROM positions
+		WHERE condition_id = $1 AND token_id = $2 AND unique_tag = $3
+		FOR UPDATE
+	`, conditionID, tokenID, uniqueTag).Scan(&before)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock position to settle: %w", err)
+	}
+	var after string
+	err = tx.QueryRow(ctx, `
 		UPDATE positions
 		SET position_size = LEAST(position_size, $1::numeric),
 			actual_shares = LEAST(actual_shares, $1::numeric),
@@ -915,11 +935,27 @@ func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, unique
 		WHERE condition_id = $2 AND token_id = $3 AND unique_tag = $4
 			AND reserved_size = 0
 			AND actual_shares > $1::numeric
-	`, shares, conditionID, tokenID, uniqueTag)
+		RETURNING position_size::text
+	`, shares, conditionID, tokenID, uniqueTag).Scan(&after)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("settle position: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	if winner {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO settlement_payouts (condition_id, token_id, unique_tag, shares, payout_usd)
+			SELECT $1, $2, $3, $4::numeric - $5::numeric, $4::numeric - $5::numeric
+			WHERE $4::numeric > $5::numeric
+		`, conditionID, tokenID, uniqueTag, before, after); err != nil {
+			return false, fmt.Errorf("record settlement payout: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit settle position: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
@@ -1152,3 +1188,114 @@ func zeroTimeToNil(value time.Time) any {
 }
 
 var _ store.Store = (*Store)(nil)
+
+// RecordEquitySnapshot inserts a valuation as given, marking the trade cash
+// it counted in the same transaction; the recorder works out its flow and
+// index from the previous one.
+func (s *Store) RecordEquitySnapshot(ctx context.Context, record store.EquitySnapshotRecord, counted store.PendingTradeCash) (store.EquitySnapshotRecord, error) {
+	if record.Reason == "" || record.CashUSD == "" || record.PositionsUSD == "" || record.EquityUSD == "" ||
+		record.TradeCashUSD == "" || record.ExternalFlowUSD == "" || record.TradeIndex == "" {
+		return store.EquitySnapshotRecord{}, fmt.Errorf("reason, cash, positions, equity, trade cash, flow, and index are required")
+	}
+	takenAt := record.TakenAt
+	if takenAt.IsZero() {
+		takenAt = time.Now().UTC()
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return store.EquitySnapshotRecord{}, fmt.Errorf("begin record equity snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx, `
+		INSERT INTO equity_snapshots (
+			taken_at, reason, cash_usd, positions_usd, equity_usd,
+			trade_cash_usd, external_flow_usd, trade_index, unmarked_positions
+		) VALUES ($1, $2, $3::numeric, $4::numeric, $5::numeric, $6::numeric, $7::numeric, $8::numeric, $9)
+		RETURNING `+equitySnapshotColumns+`
+	`, takenAt, record.Reason, record.CashUSD, record.PositionsUSD, record.EquityUSD,
+		record.TradeCashUSD, record.ExternalFlowUSD, record.TradeIndex, record.UnmarkedPositions)
+	saved, err := scanEquitySnapshot(row)
+	if err != nil {
+		return store.EquitySnapshotRecord{}, fmt.Errorf("record equity snapshot: %w", err)
+	}
+	fills, err := tx.Exec(ctx, `UPDATE fills SET equity_snapshot_id = $1 WHERE fill_id = ANY($2) AND equity_snapshot_id IS NULL`,
+		saved.ID, counted.FillIDs)
+	if err != nil {
+		return store.EquitySnapshotRecord{}, fmt.Errorf("mark counted fills: %w", err)
+	}
+	payouts, err := tx.Exec(ctx, `UPDATE settlement_payouts SET equity_snapshot_id = $1 WHERE id = ANY($2) AND equity_snapshot_id IS NULL`,
+		saved.ID, counted.PayoutIDs)
+	if err != nil {
+		return store.EquitySnapshotRecord{}, fmt.Errorf("mark counted payouts: %w", err)
+	}
+	if fills.RowsAffected() != int64(len(counted.FillIDs)) || payouts.RowsAffected() != int64(len(counted.PayoutIDs)) {
+		return store.EquitySnapshotRecord{}, store.ErrTradeCashCounted
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.EquitySnapshotRecord{}, fmt.Errorf("commit equity snapshot: %w", err)
+	}
+	return saved, nil
+}
+
+func (s *Store) LatestEquitySnapshot(ctx context.Context) (store.EquitySnapshotRecord, bool, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+equitySnapshotColumns+` FROM equity_snapshots ORDER BY id DESC LIMIT 1`)
+	record, err := scanEquitySnapshot(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.EquitySnapshotRecord{}, false, nil
+	}
+	if err != nil {
+		return store.EquitySnapshotRecord{}, false, fmt.Errorf("load latest equity snapshot: %w", err)
+	}
+	return record, true, nil
+}
+
+// PendingTradeCash reads the sum and the rows it came from in one statement,
+// so they agree.
+func (s *Store) PendingTradeCash(ctx context.Context) (store.PendingTradeCash, error) {
+	var pending store.PendingTradeCash
+	err := s.pool.QueryRow(ctx, `
+		WITH f AS (
+			SELECT fill_id, CASE WHEN side = 'SELL' THEN shares * price ELSE -shares * price END - fee AS cash
+			FROM fills
+			WHERE equity_snapshot_id IS NULL AND trade_status <> 'FAILED'
+		), p AS (
+			SELECT id, payout_usd FROM settlement_payouts WHERE equity_snapshot_id IS NULL
+		)
+		SELECT
+			((SELECT COALESCE(SUM(cash), 0) FROM f) + (SELECT COALESCE(SUM(payout_usd), 0) FROM p))::text,
+			COALESCE((SELECT array_agg(fill_id) FROM f), '{}'::text[]),
+			COALESCE((SELECT array_agg(id) FROM p), '{}'::bigint[])
+	`).Scan(&pending.USD, &pending.FillIDs, &pending.PayoutIDs)
+	if err != nil {
+		return store.PendingTradeCash{}, fmt.Errorf("sum pending trade cash: %w", err)
+	}
+	return pending, nil
+}
+
+func (s *Store) PeakTradeIndexSince(ctx context.Context, since time.Time) (string, bool, error) {
+	var peak *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT MAX(trade_index)::text FROM (
+			SELECT trade_index FROM equity_snapshots WHERE taken_at >= $1
+			UNION ALL
+			(SELECT trade_index FROM equity_snapshots WHERE taken_at < $1 ORDER BY taken_at DESC, id DESC LIMIT 1)
+		) candidates
+	`, since).Scan(&peak)
+	if err != nil {
+		return "", false, fmt.Errorf("load peak trade index: %w", err)
+	}
+	if peak == nil {
+		return "", false, nil
+	}
+	return *peak, true, nil
+}
+
+const equitySnapshotColumns = `id, taken_at, reason, cash_usd::text, positions_usd::text, equity_usd::text,
+	trade_cash_usd::text, external_flow_usd::text, trade_index::text, unmarked_positions`
+
+func scanEquitySnapshot(row pgx.Row) (store.EquitySnapshotRecord, error) {
+	var record store.EquitySnapshotRecord
+	err := row.Scan(&record.ID, &record.TakenAt, &record.Reason, &record.CashUSD, &record.PositionsUSD, &record.EquityUSD,
+		&record.TradeCashUSD, &record.ExternalFlowUSD, &record.TradeIndex, &record.UnmarkedPositions)
+	return record, err
+}
