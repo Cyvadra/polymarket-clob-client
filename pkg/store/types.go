@@ -243,6 +243,12 @@ type EquityStore interface {
 	RecordEquitySnapshot(ctx context.Context, record EquitySnapshotRecord, counted PendingTradeCash) (EquitySnapshotRecord, error)
 	// LatestEquitySnapshot reports false when nothing has been recorded yet.
 	LatestEquitySnapshot(context.Context) (EquitySnapshotRecord, bool, error)
+	// LatestEquitySnapshotWithReason is the latest snapshot recorded under
+	// any of reasons; it reports false when there is none.
+	LatestEquitySnapshotWithReason(ctx context.Context, reasons ...string) (EquitySnapshotRecord, bool, error)
+	// ExternalFlowAfter sums ExternalFlowUSD over the snapshots recorded
+	// after the one with id.
+	ExternalFlowAfter(ctx context.Context, id int64) (string, error)
 	// PeakTradeIndexSince is the highest TradeIndex among the snapshots at or
 	// after since and the last one before it, the level trading at since
 	// started from; it reports false when there is none.

@@ -1249,6 +1249,27 @@ func (s *Store) LatestEquitySnapshot(ctx context.Context) (store.EquitySnapshotR
 	return record, true, nil
 }
 
+func (s *Store) LatestEquitySnapshotWithReason(ctx context.Context, reasons ...string) (store.EquitySnapshotRecord, bool, error) {
+	row := s.pool.QueryRow(ctx, `SELECT `+equitySnapshotColumns+` FROM equity_snapshots WHERE reason = ANY($1) ORDER BY id DESC LIMIT 1`, reasons)
+	record, err := scanEquitySnapshot(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.EquitySnapshotRecord{}, false, nil
+	}
+	if err != nil {
+		return store.EquitySnapshotRecord{}, false, fmt.Errorf("load latest equity snapshot by reason: %w", err)
+	}
+	return record, true, nil
+}
+
+func (s *Store) ExternalFlowAfter(ctx context.Context, id int64) (string, error) {
+	var flow string
+	err := s.pool.QueryRow(ctx, `SELECT COALESCE(SUM(external_flow_usd), 0)::text FROM equity_snapshots WHERE id > $1`, id).Scan(&flow)
+	if err != nil {
+		return "", fmt.Errorf("sum external flow: %w", err)
+	}
+	return flow, nil
+}
+
 // PendingTradeCash reads the sum and the rows it came from in one statement,
 // so they agree.
 func (s *Store) PendingTradeCash(ctx context.Context) (store.PendingTradeCash, error) {

@@ -34,6 +34,8 @@ An open request may carry `target_equity_fraction` (a decimal string, `"0.03"` =
 
 Every open sized this way uses the same equity. Placing a buy does not change equity, because the order is still cash until it fills, so each concurrent entry gets its full fraction. What entries can run out of is free cash: `cash_usd` minus the notional of working buys and of entries still being placed. An entry larger than that is rejected with `EXPOSURE_LIMIT` rather than shrunk. A partly filled buy commits only its unfilled notional; the filled part has already left cash. A fraction above `EXECUTION_MAX_EQUITY_FRACTION`, or not above zero, is rejected with `INVALID_INTENT`. If equity cannot be read, the open fails with `EXECUTION_FAILED`.
 
+With `EXECUTION_SIZE_AFTER_LOSS_ONLY=true`, `equity_usd` here is not live: it is the equity recorded after the latest settled loss, moved by deposits and withdrawals since (see [Loss-anchored sizing](../configuration.md#loss-anchored-sizing)), and the stored equity is that value.
+
 ## Balance query
 
 `BalanceQueryRequest` carries only `schema_version`. The reply is a `BalanceQueryResponse`:

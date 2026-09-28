@@ -108,6 +108,7 @@ them produces orders the exchange rejects.
 | `EXECUTION_NATS_URL` | No | Core NATS server URL; defaults to `nats://127.0.0.1:4222`. |
 | `EXECUTION_POSTGRES_URL` | No | PostgreSQL connection URL; defaults to `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable`. The default is a placeholder and must be replaced outside local development. |
 | `EXECUTION_MAX_EQUITY_FRACTION` | No | Largest `target_equity_fraction` an open request may carry, in (0, 1]; defaults to `0.25`. Larger fractions are rejected with `INVALID_INTENT`. It catches unit mistakes (`3` meant as 3%), and is not a risk limit. |
+| `EXECUTION_SIZE_AFTER_LOSS_ONLY` | No | `true` sizes `target_equity_fraction` opens from the equity recorded after the latest settled loss instead of live equity, so entry size changes only after a loss. Defaults to `false`. See [Loss-anchored sizing](#loss-anchored-sizing). |
 | `EXECUTION_MAX_DRAWDOWN` | No | Suspends new opens while the trading drawdown since `EXECUTION_DRAWDOWN_START` exceeds this fraction, in (0, 1): `0.2` is 20%. Suspended opens are rejected with `DRAWDOWN_LIMIT`. Closes are never held back. Unset means no limit. See [Drawdown limit](#drawdown-limit). |
 | `EXECUTION_DRAWDOWN_START` | With `EXECUTION_MAX_DRAWDOWN` | Where the drawdown is measured from: an RFC 3339 time or a `YYYY-MM-DD` date (UTC midnight). Set it when a strategy starts; moving it later forgets the earlier peak. |
 | `EXECUTION_EQUITY_FLOW_THRESHOLD_USD` | No | The smallest unexplained cash change between equity snapshots that counts as a deposit or withdrawal; defaults to `1`. Smaller residuals, such as rounding or rebates, stay in the trading return. |
@@ -192,6 +193,16 @@ standard `executiond` deployment and are omitted from `.env.example`.
   version of the system, is gitignored, and is not read by any code in this
   repository. It is kept only for reference and must not be treated as live
   configuration.
+
+## Loss-anchored sizing
+
+With `EXECUTION_SIZE_AFTER_LOSS_ONLY=true`, `target_equity_fraction` multiplies a stored equity instead of the live one: the `equity_usd` of the latest snapshot recorded as `settlement-loss` or `sizing-base`, plus the `external_flow_usd` of every snapshot after it. A snapshot is `settlement-loss` when a lane was emptied as a losing token since the previous one. Winning streaks don't raise entry size. The first confirmed loss after them resets it to the equity at that point, which is higher or lower depending on how the streak and the loss net out.
+
+When the mode is enabled and neither kind of snapshot exists, the first settlement sweep records a `sizing-base` snapshot. Until then, fraction-sized opens fail with `EXECUTION_FAILED`. The base lives in `equity_snapshots`, so a restart keeps it. Free cash is still checked against the live balance.
+
+Deposits and withdrawals move the base by their amount once a snapshot records them, which is at the next settlement. Profits don't move it. A withdrawal larger than the base leaves nothing to size from, so fraction-sized opens are then rejected with `EXPOSURE_LIMIT` until the next loss.
+
+Only losses at resolution count. A lane closed by a sell below its entry price does not move the base.
 
 ## Drawdown limit
 

@@ -44,6 +44,7 @@ type config struct {
 	MaxDrawdown            float64
 	DrawdownStart          time.Time
 	EquityFlowThresholdUSD float64
+	SizeAfterLossOnly      bool
 	ConnectTimeout         time.Duration
 	ShutdownGracePeriod    time.Duration
 }
@@ -197,10 +198,22 @@ func run() error {
 		}
 		execution.SetOpenGate(guard)
 	}
+	// Loss-anchored sizing takes its base from the snapshot after the latest
+	// settled loss. With none recorded yet, the first sweep records one.
+	var anchor *equity.LossAnchor
+	if cfg.SizeAfterLossOnly {
+		anchor, err = equity.NewLossAnchor(store)
+		if err != nil {
+			return err
+		}
+		if err := refreshAnchor(ctx, anchor); err != nil {
+			return err
+		}
+	}
 	// Equity is recorded once lanes have settled and no winner is left
 	// unsettled: one the wallet already redeemed has no payout recorded yet,
 	// and its cash would read as a deposit and its lane as a loss.
-	equityDue := false
+	equityDue, lossDue := false, false
 	sweeper.SetSweepHandler(func(s settlement.Sweep) {
 		if s.Lost+s.Redeemed+s.Shrunk+s.Reserved+s.Settling > 0 {
 			log.Printf("settlement sweep: %d lanes checked, emptied %d lost and %d redeemed, shrank %d to the wallet, left %d to a working close and %d still settling",
@@ -209,14 +222,34 @@ func run() error {
 		if s.Lost+s.Redeemed+s.Shrunk > 0 {
 			equityDue = true
 		}
-		if !equityDue {
+		if s.Lost > 0 {
+			lossDue = true
+		}
+		baseDue := anchor != nil && !anchor.Ready()
+		if !equityDue && !baseDue {
 			return
 		}
 		if held := s.WinnersHeld(); held > 0 {
 			log.Printf("equity snapshot deferred: %d winning lanes not yet settled", held)
 			return
 		}
-		equityDue = !recordSettledEquity(ctx, recorder, guard)
+		reason := equity.ReasonSettlement
+		switch {
+		case lossDue:
+			reason = equity.ReasonSettlementLoss
+		case baseDue:
+			reason = equity.ReasonSizingBase
+		}
+		if !recordSettledEquity(ctx, recorder, reason, guard) {
+			return
+		}
+		equityDue, lossDue = false, false
+		// Any snapshot may carry a deposit or withdrawal the base follows.
+		if anchor != nil {
+			if err := refreshAnchor(ctx, anchor); err != nil {
+				log.Printf("refresh sizing base: %v", err)
+			}
+		}
 	})
 	// A fill moves the exchange balance and shrinks the open-buy reservations
 	// at once; a cached pre-fill balance would count that cash twice.
@@ -229,6 +262,9 @@ func run() error {
 		return err
 	}
 	sizer.SetMaxFraction(cfg.MaxEquityFraction)
+	if anchor != nil {
+		sizer.SetLossAnchor(anchor)
+	}
 	execution.SetEntrySizer(sizer)
 	modules := []namedModule{
 		{name: "nats", module: bus},
@@ -388,6 +424,13 @@ func configFromEnv() (config, error) {
 		}
 		cfg.EquityFlowThresholdUSD = threshold
 	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_SIZE_AFTER_LOSS_ONLY")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_SIZE_AFTER_LOSS_ONLY must be true or false")
+		}
+		cfg.SizeAfterLossOnly = enabled
+	}
 	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
@@ -435,14 +478,14 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 // recordSettledEquity saves the wallet's equity once positions have settled
 // and refreshes the drawdown limit from it. It reports whether a snapshot
 // was recorded; one that was not is retried after the next sweep.
-func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, guard *equity.DrawdownGuard) bool {
-	snapshot, err := recorder.Record(ctx, "settlement")
+func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason string, guard *equity.DrawdownGuard) bool {
+	snapshot, err := recorder.Record(ctx, reason)
 	if err != nil {
 		log.Printf("record equity after settlement: %v", err)
 		return false
 	}
-	log.Printf("equity after settlement: $%s (trade cash $%s, external flow $%s, trade index %s)",
-		snapshot.EquityUSD, snapshot.TradeCashUSD, snapshot.ExternalFlowUSD, snapshot.TradeIndex)
+	log.Printf("equity after settlement (%s): $%s (trade cash $%s, external flow $%s, trade index %s)",
+		reason, snapshot.EquityUSD, snapshot.TradeCashUSD, snapshot.ExternalFlowUSD, snapshot.TradeIndex)
 	if guard == nil {
 		return true
 	}
@@ -450,6 +493,20 @@ func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, guard *
 		log.Printf("refresh drawdown limit: %v", err)
 	}
 	return true
+}
+
+func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
+	base, ok, err := anchor.Refresh(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		log.Printf("equity-fraction opens wait for a sizing base, recorded on the next settlement sweep")
+		return nil
+	}
+	log.Printf("sizing equity-fraction opens from $%.6f: $%s recorded %s (%s), external flow since $%.6f",
+		base.EquityUSD, base.Snapshot.EquityUSD, base.Snapshot.TakenAt.Format(time.RFC3339), base.Snapshot.Reason, base.FlowUSD)
+	return nil
 }
 
 func refreshDrawdown(ctx context.Context, guard *equity.DrawdownGuard) error {

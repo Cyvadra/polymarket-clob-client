@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -57,6 +58,26 @@ func (f *fakeEquityStore) LatestEquitySnapshot(context.Context) (store.EquitySna
 		return store.EquitySnapshotRecord{}, false, nil
 	}
 	return f.saved[len(f.saved)-1], true, nil
+}
+
+func (f *fakeEquityStore) LatestEquitySnapshotWithReason(_ context.Context, reasons ...string) (store.EquitySnapshotRecord, bool, error) {
+	for i := len(f.saved) - 1; i >= 0; i-- {
+		if slices.Contains(reasons, f.saved[i].Reason) {
+			return f.saved[i], true, nil
+		}
+	}
+	return store.EquitySnapshotRecord{}, false, nil
+}
+
+func (f *fakeEquityStore) ExternalFlowAfter(_ context.Context, id int64) (string, error) {
+	var flow float64
+	for _, r := range f.saved {
+		if r.ID > id && r.ExternalFlowUSD != "" {
+			v, _ := strconv.ParseFloat(r.ExternalFlowUSD, 64)
+			flow += v
+		}
+	}
+	return strconv.FormatFloat(flow, 'f', -1, 64), nil
 }
 
 func (f *fakeEquityStore) PeakTradeIndexSince(_ context.Context, since time.Time) (string, bool, error) {

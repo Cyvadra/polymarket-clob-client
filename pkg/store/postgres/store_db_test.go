@@ -630,4 +630,14 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 	if err != nil || !ok || latest.Reason != reason || latest.TradeIndex != "1.100000000000000000" {
 		t.Fatalf("latest snapshot %+v, %v, %v", latest, ok, err)
 	}
+	byReason, ok, err := s.LatestEquitySnapshotWithReason(ctx, "other-"+lane.tag, reason)
+	if err != nil || !ok || byReason.ID != latest.ID {
+		t.Fatalf("latest by reason %+v, %v, %v; want id %d", byReason, ok, err, latest.ID)
+	}
+	if _, ok, err := s.LatestEquitySnapshotWithReason(ctx, "other-"+lane.tag); err != nil || ok {
+		t.Fatalf("unrecorded reason: ok=%v err=%v", ok, err)
+	}
+	if flow, err := s.ExternalFlowAfter(ctx, latest.ID); err != nil || flow != "0" {
+		t.Fatalf("flow after the latest snapshot %q, %v", flow, err)
+	}
 }

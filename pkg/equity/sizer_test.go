@@ -82,3 +82,88 @@ func TestSizeRejectsBadFractions(t *testing.T) {
 }
 
 var _ store.PositionStore = fakePositions{}
+
+func TestSizeFromLossAnchorIgnoresLiveEquity(t *testing.T) {
+	// Live equity is $100 ($50 cash + $50 of shares); the anchor says $40.
+	sizer := newTestSizer(t, "50000000", "0")
+	snapshots := &fakeEquityStore{}
+	anchor, err := NewLossAnchor(snapshots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizer.SetLossAnchor(anchor)
+	if _, err := sizer.Size(context.Background(), "0.1"); !errors.Is(err, ErrNoSizingBase) {
+		t.Fatalf("before any base: err=%v", err)
+	}
+
+	record := func(reason, equity string) {
+		snapshots.saved = append(snapshots.saved, store.EquitySnapshotRecord{ID: int64(len(snapshots.saved) + 1), Reason: reason, EquityUSD: equity})
+		if _, _, err := anchor.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size := func() Entry {
+		t.Helper()
+		entry, err := sizer.Size(context.Background(), "0.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry.Release()
+		return entry
+	}
+	record(ReasonSizingBase, "40")
+	if entry := size(); entry.TargetUSD != "4" || entry.EquityUSD != 40 {
+		t.Fatalf("from base: %+v", entry)
+	}
+	// Profitable settlements do not move the base.
+	record(ReasonSettlement, "90")
+	if entry := size(); entry.TargetUSD != "4" {
+		t.Fatalf("after a win: %+v", entry)
+	}
+	// A loss resets it to the equity recorded after the loss.
+	record(ReasonSettlementLoss, "70")
+	if entry := size(); entry.TargetUSD != "7" || entry.EquityUSD != 70 {
+		t.Fatalf("after a loss: %+v", entry)
+	}
+	// A deposit, then a withdrawal, move it by their amount.
+	flow := func(usd string) {
+		snapshots.saved = append(snapshots.saved, store.EquitySnapshotRecord{ID: int64(len(snapshots.saved) + 1), Reason: ReasonSettlement, EquityUSD: "999", ExternalFlowUSD: usd})
+		if _, _, err := anchor.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	flow("30")
+	if entry := size(); entry.TargetUSD != "10" {
+		t.Fatalf("after a $30 deposit: %+v", entry)
+	}
+	flow("-50")
+	if entry := size(); entry.TargetUSD != "5" {
+		t.Fatalf("after a $50 withdrawal: %+v", entry)
+	}
+	// Withdrawing more than the base leaves nothing to size from.
+	flow("-100")
+	if _, err := sizer.Size(context.Background(), "0.1"); !errors.Is(err, ErrInsufficientCash) {
+		t.Fatalf("base below zero: err=%v", err)
+	}
+	// The next loss anchors afresh; flows before it are in its equity.
+	record(ReasonSettlementLoss, "60")
+	if entry := size(); entry.TargetUSD != "6" {
+		t.Fatalf("after the next loss: %+v", entry)
+	}
+}
+
+func TestSizeFromLossAnchorStillChecksLiveCash(t *testing.T) {
+	// $5 cash; an anchored $100 at 10% needs $10.
+	sizer := newTestSizer(t, "5000000", "0")
+	anchor, err := NewLossAnchor(&fakeEquityStore{saved: []store.EquitySnapshotRecord{{ID: 1, Reason: ReasonSettlementLoss, EquityUSD: "100"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := anchor.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sizer.SetLossAnchor(anchor)
+	if _, err := sizer.Size(context.Background(), "0.1"); !errors.Is(err, ErrInsufficientCash) {
+		t.Fatalf("err=%v, want insufficient cash", err)
+	}
+}
