@@ -21,7 +21,7 @@ func OwnedFillsFromTrade(trade clobclient.Trade, apiKey string, receivedAt time.
 	if receivedAt.IsZero() {
 		receivedAt = time.Now().UTC()
 	}
-	exchangeTime := streamTime(trade.Timestamp)
+	exchangeTime := trade.Time()
 	fills := make([]AccountFill, 0, len(trade.MakerOrders)+1)
 	if trade.TakerOrderID != "" && ownsTakerTrade(trade.TraderSide) {
 		fills = append(fills, AccountFill{SchemaVersion: protocol.SchemaVersionV1, FillID: trade.ID, ExchangeOrderID: trade.TakerOrderID, MarketID: trade.Market, ConditionID: trade.Market, TokenID: trade.AssetID, Outcome: trade.Outcome, Side: trade.Side, Shares: trade.Size, Price: trade.Price, FeeRateBps: trade.FeeRateBps, TradeStatus: status, TraderSide: trade.TraderSide, ExchangeTime: exchangeTime, ReceivedAt: receivedAt})

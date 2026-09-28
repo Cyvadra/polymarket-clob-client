@@ -1,5 +1,11 @@
 package clobclient
 
+import (
+	"strconv"
+	"strings"
+	"time"
+)
+
 type Side string
 
 const (
@@ -131,21 +137,47 @@ type Token struct {
 }
 
 type Trade struct {
-	ID           string       `json:"id"`
-	TakerOrderID string       `json:"taker_order_id"`
-	AssetID      string       `json:"asset_id"`
-	Market       string       `json:"market"`
-	Side         Side         `json:"side"`
-	Price        string       `json:"price"`
-	Size         string       `json:"size"`
-	Outcome      string       `json:"outcome"`
-	Status       string       `json:"status"`
-	FeeRateBps   string       `json:"fee_rate_bps"`
-	TraderSide   string       `json:"trader_side"`
-	Owner        string       `json:"owner"`
-	TradeOwner   string       `json:"trade_owner"`
-	Timestamp    string       `json:"timestamp"`
-	MakerOrders  []MakerTrade `json:"maker_orders"`
+	ID           string `json:"id"`
+	TakerOrderID string `json:"taker_order_id"`
+	AssetID      string `json:"asset_id"`
+	Market       string `json:"market"`
+	Side         Side   `json:"side"`
+	Price        string `json:"price"`
+	Size         string `json:"size"`
+	Outcome      string `json:"outcome"`
+	Status       string `json:"status"`
+	FeeRateBps   string `json:"fee_rate_bps"`
+	TraderSide   string `json:"trader_side"`
+	Owner        string `json:"owner"`
+	TradeOwner   string `json:"trade_owner"`
+	// Timestamp is the user stream's event time in Unix milliseconds;
+	// MatchTime is the REST trade history's match time in Unix seconds.
+	Timestamp   string       `json:"timestamp"`
+	MatchTime   unixString   `json:"match_time"`
+	MakerOrders []MakerTrade `json:"maker_orders"`
+}
+
+// Time is when the trade happened, from whichever of Timestamp and MatchTime
+// the source set, or zero when neither parses.
+func (t Trade) Time() time.Time {
+	if ms, err := strconv.ParseInt(strings.TrimSpace(t.Timestamp), 10, 64); err == nil && ms > 0 {
+		return time.UnixMilli(ms).UTC()
+	}
+	if s, err := strconv.ParseInt(strings.TrimSpace(string(t.MatchTime)), 10, 64); err == nil && s > 0 {
+		return time.Unix(s, 0).UTC()
+	}
+	return time.Time{}
+}
+
+// unixString decodes a Unix time the API sends as a string or a number.
+type unixString string
+
+func (u *unixString) UnmarshalJSON(data []byte) error {
+	*u = unixString(strings.Trim(string(data), `"`))
+	if *u == "null" {
+		*u = ""
+	}
+	return nil
 }
 
 type MakerTrade struct {

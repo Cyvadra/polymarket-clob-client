@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -318,6 +319,29 @@ func TestReconcileSkipsTradesOlderThanMaxTradeAge(t *testing.T) {
 	}
 	if len(repository.fills) != 0 {
 		t.Fatalf("expected old trade to be skipped, got %+v", repository.fills)
+	}
+}
+
+func TestReconcileSkipsOldRESTTradesByMatchTime(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
+	now := time.Unix(1_000_000, 0).UTC()
+	fills, err := accountfeed.NewFillConsumer(repository, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	var trade clobclient.Trade
+	body := `{"id":"trade-1","match_time":"` + strconv.FormatInt(now.Add(-48*time.Hour).Unix(), 10) + `","market":"condition","asset_id":"token","outcome":"Up","status":"CONFIRMED","trader_side":"MAKER","maker_orders":[{"order_id":"order-1","owner":"key","matched_amount":"2","price":"0.5","asset_id":"token","outcome":"Up","side":"SELL"}]}`
+	if err := json.Unmarshal([]byte(body), &trade); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeCLOB{orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE"}}, trades: []clobclient.Trade{trade}}
+	reconciler, _ := New(repository, client, fills, "key", func() time.Time { return now }, time.Second)
+	reconciler.SetMaxTradeAge(24 * time.Hour)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.fills) != 0 {
+		t.Fatalf("expected old REST trade to be skipped, got %+v", repository.fills)
 	}
 }
 

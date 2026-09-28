@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -136,7 +135,7 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 		cutoff = r.now().UTC().Add(-r.maxTradeAge)
 	}
 	process := func(trade clobclient.Trade) error {
-		if !cutoff.IsZero() && tradeTooOld(trade.Timestamp, cutoff) {
+		if !cutoff.IsZero() && tradeTooOld(trade.Time(), cutoff) {
 			return nil
 		}
 		for _, fill := range accountfeed.OwnedFillsFromTrade(trade, r.apiKey, r.now().UTC()) {
@@ -191,12 +190,8 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 // tradeTooOld reports whether a trade's exchange timestamp falls before
 // cutoff. An unparseable or missing timestamp is treated as not old, so a
 // malformed value never hides a fill executiond actually needs.
-func tradeTooOld(timestamp string, cutoff time.Time) bool {
-	milliseconds, err := strconv.ParseInt(strings.TrimSpace(timestamp), 10, 64)
-	if err != nil || milliseconds <= 0 {
-		return false
-	}
-	return time.UnixMilli(milliseconds).UTC().Before(cutoff)
+func tradeTooOld(at time.Time, cutoff time.Time) bool {
+	return !at.IsZero() && at.Before(cutoff)
 }
 
 // isSettled reports whether a fill can no longer change, so replaying it again
