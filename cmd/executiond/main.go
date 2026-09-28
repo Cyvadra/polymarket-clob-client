@@ -220,8 +220,17 @@ func run() error {
 	// Equity is recorded once lanes have settled and no winner is left
 	// unsettled: one the wallet already redeemed has no payout recorded yet,
 	// and its cash would read as a deposit and its lane as a loss.
-	equityDue, lossDue := false, false
+	equityDue, lossDue, anchorStale := false, false, false
 	sweeper.SetSweepHandler(func(s settlement.Sweep) {
+		// A failed refresh would leave sizing on the pre-loss base until
+		// another snapshot happened to be recorded; retry it every sweep.
+		if anchorStale {
+			if err := refreshAnchor(ctx, anchor); err != nil {
+				log.Printf("refresh sizing base: %v", err)
+			} else {
+				anchorStale = false
+			}
+		}
 		if s.Lost+s.Redeemed+s.Shrunk+s.Reserved+s.Settling > 0 {
 			log.Printf("settlement sweep: %d lanes checked, emptied %d lost and %d redeemed, shrank %d to the wallet, left %d to a working close and %d still settling",
 				s.Checked, s.Lost, s.Redeemed, s.Shrunk, s.Reserved, s.Settling)
@@ -255,6 +264,7 @@ func run() error {
 		if anchor != nil {
 			if err := refreshAnchor(ctx, anchor); err != nil {
 				log.Printf("refresh sizing base: %v", err)
+				anchorStale = true
 			}
 		}
 	})
@@ -513,7 +523,7 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
 		return err
 	}
 	if !ok {
-		log.Printf("equity-fraction opens wait for a sizing base, recorded on the next settlement sweep")
+		log.Printf("equity-fraction opens size from live equity until a sizing base is recorded on a settlement sweep")
 		return nil
 	}
 	log.Printf("sizing equity-fraction opens from $%.6f: $%s recorded %s (%s), external flow since $%.6f",

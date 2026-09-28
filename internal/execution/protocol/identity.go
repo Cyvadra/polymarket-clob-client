@@ -48,37 +48,56 @@ func (p identityPublisher) PublishJSON(subject string, payload any) error {
 	return p.publisher.PublishJSON(subject, p.identity.Stamp(payload))
 }
 
+// stampable is implemented by every message executiond publishes. Its
+// methods have value receivers, so a pointer to a message stamps too, and a
+// new message type gets its addresses by implementing it here.
+type stampable interface {
+	stamped(Identity) any
+}
+
 // Stamp returns payload with the wallet's addresses set when it is an
 // execution message, and payload itself otherwise.
 func (i Identity) Stamp(payload any) any {
-	switch message := payload.(type) {
-	case ExecutionOpenResult:
-		message.WalletAddress, message.SignerAddress = i.WalletAddress, i.SignerAddress
-		return message
-	case ExecutionCloseResult:
-		message.WalletAddress, message.SignerAddress = i.WalletAddress, i.SignerAddress
-		return message
-	case ExecutionOrderEvent:
-		message.WalletAddress, message.SignerAddress = i.WalletAddress, i.SignerAddress
-		return message
-	case PositionFeature:
-		message.WalletAddress, message.SignerAddress = i.WalletAddress, i.SignerAddress
-		return message
-	case PositionQueryResponse:
-		message.WalletAddress, message.SignerAddress = i.WalletAddress, i.SignerAddress
-		message.AllowedStrategies = i.Strategies()
-		positions := make([]PositionFeature, len(message.Positions))
-		for index, position := range message.Positions {
-			position.WalletAddress, position.SignerAddress = i.WalletAddress, i.SignerAddress
-			positions[index] = position
-		}
-		message.Positions = positions
-		return message
-	case BalanceQueryResponse:
-		message.WalletAddress, message.SignerAddress = i.WalletAddress, i.SignerAddress
-		message.AllowedStrategies = i.Strategies()
-		return message
-	default:
-		return payload
+	if message, ok := payload.(stampable); ok {
+		return message.stamped(i)
 	}
+	return payload
+}
+
+func (m ExecutionOpenResult) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	return m
+}
+
+func (m ExecutionCloseResult) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	return m
+}
+
+func (m ExecutionOrderEvent) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	return m
+}
+
+func (m PositionFeature) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	return m
+}
+
+func (m PositionQueryResponse) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	m.AllowedStrategies = i.Strategies()
+	positions := make([]PositionFeature, len(m.Positions))
+	for index, position := range m.Positions {
+		position.WalletAddress, position.SignerAddress = i.WalletAddress, i.SignerAddress
+		positions[index] = position
+	}
+	m.Positions = positions
+	return m
+}
+
+func (m BalanceQueryResponse) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	m.AllowedStrategies = i.Strategies()
+	return m
 }

@@ -112,12 +112,12 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	// A fill the store cannot apply must not stall order reconciliation. Order
 	// state comes from REST order lookups, not from fills, and an order left
 	// unresolved keeps its reservation and never reports a terminal result.
-	reconcileErr := r.replayTrades(ctx)
-	fillsCurrent := reconcileErr == nil
 	orders, err := r.store.OpenOrders(ctx)
 	if err != nil {
-		return errors.Join(reconcileErr, fmt.Errorf("load unresolved orders: %w", err))
+		return fmt.Errorf("load unresolved orders: %w", err)
 	}
+	reconcileErr := r.replayTrades(ctx, oldestCreated(orders))
+	fillsCurrent := reconcileErr == nil
 	for _, order := range orders {
 		if err := r.reconcileOrder(ctx, order, fillsCurrent); err != nil {
 			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("reconcile %s/%d: %w", order.IntentID, order.ChildSequence, err))
@@ -126,13 +126,20 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	return reconcileErr
 }
 
-func (r *Reconciler) replayTrades(ctx context.Context) error {
+// replayTrades replays account trades newer than the max trade age. The
+// cutoff never falls after oldest, the creation of the oldest order still
+// unresolved in the store: an order that filled while executiond was down for
+// longer than the max age must still have those fills applied.
+func (r *Reconciler) replayTrades(ctx context.Context, oldest time.Time) error {
 	if r.fills == nil {
 		return nil
 	}
 	cutoff := time.Time{}
 	if r.maxTradeAge > 0 {
 		cutoff = r.now().UTC().Add(-r.maxTradeAge)
+		if floor := oldest.Add(-orderTradeSlack); !oldest.IsZero() && floor.Before(cutoff) {
+			cutoff = floor
+		}
 	}
 	process := func(trade clobclient.Trade) error {
 		if !cutoff.IsZero() && tradeTooOld(trade.Time(), cutoff) {
@@ -185,6 +192,21 @@ func (r *Reconciler) replayTrades(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// orderTradeSlack widens the replay window below an unresolved order's
+// creation, since the store's clock and the exchange's are not the same.
+const orderTradeSlack = time.Minute
+
+// oldestCreated is the earliest creation time among orders, or zero.
+func oldestCreated(orders []store.SignedOrderRecord) time.Time {
+	var oldest time.Time
+	for _, order := range orders {
+		if !order.CreatedAt.IsZero() && (oldest.IsZero() || order.CreatedAt.Before(oldest)) {
+			oldest = order.CreatedAt
+		}
+	}
+	return oldest
 }
 
 // tradeTooOld reports whether a trade's exchange timestamp falls before

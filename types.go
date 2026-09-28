@@ -1,6 +1,7 @@
 package clobclient
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -153,7 +154,7 @@ type Trade struct {
 	// Timestamp is the user stream's event time in Unix milliseconds;
 	// MatchTime is the REST trade history's match time in Unix seconds.
 	Timestamp   string       `json:"timestamp"`
-	MatchTime   unixString   `json:"match_time"`
+	MatchTime   string       `json:"match_time"`
 	MakerOrders []MakerTrade `json:"maker_orders"`
 }
 
@@ -163,19 +164,26 @@ func (t Trade) Time() time.Time {
 	if ms, err := strconv.ParseInt(strings.TrimSpace(t.Timestamp), 10, 64); err == nil && ms > 0 {
 		return time.UnixMilli(ms).UTC()
 	}
-	if s, err := strconv.ParseInt(strings.TrimSpace(string(t.MatchTime)), 10, 64); err == nil && s > 0 {
+	if s, err := strconv.ParseInt(strings.TrimSpace(t.MatchTime), 10, 64); err == nil && s > 0 {
 		return time.Unix(s, 0).UTC()
 	}
 	return time.Time{}
 }
 
-// unixString decodes a Unix time the API sends as a string or a number.
-type unixString string
-
-func (u *unixString) UnmarshalJSON(data []byte) error {
-	*u = unixString(strings.Trim(string(data), `"`))
-	if *u == "null" {
-		*u = ""
+// UnmarshalJSON accepts match_time as a string or a number: the REST trade
+// history has sent it both ways.
+func (t *Trade) UnmarshalJSON(data []byte) error {
+	type plain Trade
+	aux := struct {
+		*plain
+		MatchTime json.RawMessage `json:"match_time"`
+	}{plain: (*plain)(t)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	t.MatchTime = strings.Trim(string(aux.MatchTime), `"`)
+	if t.MatchTime == "null" {
+		t.MatchTime = ""
 	}
 	return nil
 }

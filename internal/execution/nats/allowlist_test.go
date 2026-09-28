@@ -171,3 +171,59 @@ func assertIdentity(t *testing.T, wallet, signer string, strategies []string) {
 		t.Fatalf("wallet=%q signer=%q strategies=%v", wallet, signer, strategies)
 	}
 }
+
+// An open with no strategy belongs to no wallet; it must still be answered
+// with the validation failure rather than time out unexplained.
+func TestSubscribeOpenAnswersAnOpenWithoutAStrategy(t *testing.T) {
+	execution, err := executor.New(fakeStore{}, fakeCLOB{}, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	publisher := &recordedPublisher{}
+	execution.SetEventPublisher(publisher)
+	subscriber := &fakeSubscriber{}
+	if err := SubscribeOpen(subscriber, execution, testAllowlist(t)); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
+	payload, err := json.Marshal(intent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_ = subscriber.handler(context.Background(), payload)
+	if publisher.value == nil {
+		t.Fatal("expected a failure result for an open without a strategy")
+	}
+}
+
+type holdingCloseExecutor struct {
+	fakeCloseExecutor
+	held bool
+}
+
+func (h *holdingCloseExecutor) HoldsLane(context.Context, protocol.ExecutionCloseRequest) (bool, error) {
+	return h.held, nil
+}
+
+// A strategy taken off the allowlist must still close lanes this wallet holds.
+func TestCloseDispatcherClosesAHeldLaneOfAnotherStrategy(t *testing.T) {
+	for _, held := range []bool{true, false} {
+		exec := &holdingCloseExecutor{held: held}
+		d := newCloseDispatcher(context.Background(), exec, testAllowlist(t), func(err error) {
+			t.Errorf("unexpected error: %v", err)
+		})
+		request := closeReq("lane-a", string(protocol.ExecutionCloseModeForce))
+		request.Strategy = "other"
+		payload, err := json.Marshal(request)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if err := d.handle(context.Background(), payload); err != nil {
+			t.Fatalf("handle: %v", err)
+		}
+		waitFor(t, d.idle)
+		if calls := exec.recorded(); (len(calls) == 1) != held {
+			t.Fatalf("held=%v: calls=%+v", held, calls)
+		}
+	}
+}

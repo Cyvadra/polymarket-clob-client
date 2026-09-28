@@ -92,8 +92,11 @@ func TestSizeFromLossAnchorIgnoresLiveEquity(t *testing.T) {
 		t.Fatal(err)
 	}
 	sizer.SetLossAnchor(anchor)
-	if _, err := sizer.Size(context.Background(), "0.1"); !errors.Is(err, ErrNoSizingBase) {
-		t.Fatalf("before any base: err=%v", err)
+	// Before any base, live equity ($100) is used.
+	if entry, err := sizer.Size(context.Background(), "0.1"); err != nil || entry.TargetUSD != "10" {
+		t.Fatalf("before any base: entry=%+v err=%v", entry, err)
+	} else {
+		entry.Release()
 	}
 
 	record := func(reason, equity string) {

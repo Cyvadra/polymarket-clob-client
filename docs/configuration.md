@@ -218,7 +218,7 @@ standard `executiond` deployment and are omitted from `.env.example`.
 
 With `EXECUTION_SIZE_AFTER_LOSS_ONLY=true`, `target_equity_fraction` multiplies a stored equity instead of the live one: the `equity_usd` of the latest snapshot recorded as `settlement-loss` or `sizing-base`, plus the `external_flow_usd` of every snapshot after it. A snapshot is `settlement-loss` when a lane was emptied as a losing token since the previous one. Winning streaks don't raise entry size. The first confirmed loss after them resets it to the equity at that point, which is higher or lower depending on how the streak and the loss net out.
 
-When the mode is enabled and neither kind of snapshot exists, the first settlement sweep records a `sizing-base` snapshot. Until then, fraction-sized opens fail with `EXECUTION_FAILED`. The base lives in `equity_snapshots`, so a restart keeps it. Free cash is still checked against the live balance.
+When the mode is enabled and neither kind of snapshot exists, the first settlement sweep with no unredeemed winner records a `sizing-base` snapshot. Until then, fraction-sized opens are sized from live equity. The base lives in `equity_snapshots`, so a restart keeps it. Free cash is still checked against the live balance.
 
 Deposits and withdrawals move the base by their amount once a snapshot records them, which is at the next settlement. Profits don't move it. A withdrawal larger than the base leaves nothing to size from, so fraction-sized opens are then rejected with `EXPOSURE_LIMIT` until the next loss.
 

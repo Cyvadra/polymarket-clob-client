@@ -96,3 +96,16 @@ func TestWithIdentityPassesOtherPayloadsThrough(t *testing.T) {
 		t.Fatal("expected no publisher to stay no publisher")
 	}
 }
+
+// A message published by pointer must be stamped like one published by value.
+func TestWithIdentityStampsPointerMessages(t *testing.T) {
+	publisher := &capturedPublisher{}
+	stamped := WithIdentity(publisher, NewIdentity("0xsigner", "0xwallet", nil))
+	if err := stamped.PublishJSON("subject", &ExecutionCloseResult{UniqueTag: "lane"}); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := publisher.value.(ExecutionCloseResult)
+	if !ok || result.WalletAddress != "0xwallet" || result.SignerAddress != "0xsigner" || result.UniqueTag != "lane" {
+		t.Fatalf("published %#v", publisher.value)
+	}
+}

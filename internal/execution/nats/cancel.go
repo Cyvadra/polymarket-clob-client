@@ -14,6 +14,12 @@ type CloseExecutor interface {
 	ExecuteClose(context.Context, protocol.ExecutionCloseRequest) error
 }
 
+// LaneHolder is implemented by a CloseExecutor that can tell whether this
+// wallet holds a position on a close's lane.
+type LaneHolder interface {
+	HoldsLane(context.Context, protocol.ExecutionCloseRequest) (bool, error)
+}
+
 // SubscribeClose wires the strategy.execution.close subject to the executor.
 //
 // A close now retries a sell the exchange refused for missing balance for
@@ -26,7 +32,9 @@ type CloseExecutor interface {
 // failure, since the handler has already returned by the time it happens.
 //
 // A close for a strategy outside the allowlist belongs to another executiond
-// on the bus and is dropped silently, as an open is.
+// on the bus and is dropped silently, as an open is, unless the executor
+// reports this wallet still holds the lane: a strategy taken off the list
+// must still be able to close what it opened here.
 func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, allowed *Allowlist, onError func(error)) error {
 	if ctx == nil {
 		return fmt.Errorf("context is required")
@@ -68,7 +76,7 @@ func (d *closeDispatcher) handle(_ context.Context, payload []byte) error {
 	if err != nil {
 		return err
 	}
-	if !d.allowed.Allows(request.Strategy) {
+	if _, ok := d.exec.(LaneHolder); !ok && !d.allowed.Allows(request.Strategy) {
 		return nil
 	}
 	d.enqueue(request)
@@ -128,6 +136,17 @@ func (d *closeDispatcher) run(key string, lane *closeLane) {
 			continue
 		}
 
+		// The lane lookup runs here, off the NATS delivery goroutine, since
+		// every close for every other wallet on the bus reaches this check.
+		if !d.allowed.Allows(next.Strategy) {
+			held, err := d.exec.(LaneHolder).HoldsLane(d.ctx, *next)
+			if err != nil && d.onError != nil {
+				d.onError(fmt.Errorf("check lane of close for strategy %q: %w", next.Strategy, err))
+			}
+			if err != nil || !held {
+				continue
+			}
+		}
 		if err := d.exec.ExecuteClose(d.ctx, *next); err != nil && d.onError != nil {
 			d.onError(fmt.Errorf("handle NATS subject %s: %w", protocol.SubjectStrategyExecutionClose, err))
 		}

@@ -4,6 +4,7 @@ package nats
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
@@ -17,7 +18,9 @@ type Subscriber interface {
 // SubscribeOpen wires the strategy.execution.open subject to the executor.
 // An open for a strategy outside the allowlist belongs to another executiond
 // on the bus. It is dropped without a result or a log line: a failure result
-// would read to the strategy as the owning wallet refusing the order.
+// would read to the strategy as the owning wallet refusing the order. An open
+// with no strategy belongs to no wallet, so every instance answers it with
+// the validation failure.
 func SubscribeOpen(bus Subscriber, execution *executor.Executor, allowed *Allowlist) error {
 	if bus == nil || execution == nil || allowed == nil {
 		return fmt.Errorf("NATS subscriber, executor, and strategy allowlist are required")
@@ -27,7 +30,7 @@ func SubscribeOpen(bus Subscriber, execution *executor.Executor, allowed *Allowl
 		if err != nil {
 			return err
 		}
-		if !allowed.Allows(req.Strategy) {
+		if strings.TrimSpace(req.Strategy) != "" && !allowed.Allows(req.Strategy) {
 			return nil
 		}
 		return execution.ExecuteOpen(ctx, req)

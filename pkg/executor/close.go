@@ -493,3 +493,11 @@ func (e *Executor) positionFor(ctx context.Context, conditionID, tokenID, unique
 	}
 	return store.PositionRecord{}, false, nil
 }
+
+// HoldsLane reports whether this wallet holds a position on the close's lane.
+// A close for a strategy no longer in the allowlist is still honored for a
+// lane the wallet opened under it, or the position could never be closed.
+func (e *Executor) HoldsLane(ctx context.Context, req protocol.ExecutionCloseRequest) (bool, error) {
+	_, ok, err := e.positionFor(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
+	return ok, err
+}

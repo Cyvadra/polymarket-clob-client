@@ -132,7 +132,12 @@ func (s *Sizer) base(ctx context.Context) (equityUSD, cash float64, err error) {
 		snapshot, err := s.tracker.Snapshot(ctx)
 		return snapshot.EquityUSD, snapshot.CashUSD, err
 	}
-	if equityUSD, err = s.anchor.Equity(); err != nil {
+	// Until the first base is recorded, which waits for any unredeemed
+	// winner to settle, entries size from live equity rather than fail.
+	if equityUSD, err = s.anchor.Equity(); errors.Is(err, ErrNoSizingBase) {
+		snapshot, err := s.tracker.Snapshot(ctx)
+		return snapshot.EquityUSD, snapshot.CashUSD, err
+	} else if err != nil {
 		return 0, 0, err
 	}
 	cash, _, err = s.tracker.Cash(ctx)

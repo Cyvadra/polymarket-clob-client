@@ -170,9 +170,11 @@ func (c *FillConsumer) UnknownOrderCount() int {
 }
 
 // staleFillMargin is how far before the start a fill must have matched to be
-// taken as history. The trade history reports match times in whole seconds,
-// so a fresh fill can read as slightly older than the start.
-const staleFillMargin = 2 * time.Second
+// taken as history. Match times come from the exchange's clock in whole
+// seconds while the start is read from this host's, so the margin covers
+// clock skew too: a fresh fill read as history loses its own report, while a
+// real pre-start fill inside the margin only costs one extra line.
+const staleFillMargin = 30 * time.Second
 
 // reportUnknownFill surfaces an out-of-band order once. The same order fills
 // many times and the reconciler replays the account trade history on every

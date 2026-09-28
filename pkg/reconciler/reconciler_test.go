@@ -509,3 +509,27 @@ func TestReconcileOrderEventNamesTheLaneAndStrategy(t *testing.T) {
 		t.Fatalf("expected one order event for the lane and strategy, got %+v", publisher.events)
 	}
 }
+
+// An order still unresolved from before the max age keeps its fills in the
+// replay window, so a long outage cannot lose them.
+func TestReconcileReplaysOldTradesOfAnUnresolvedOrder(t *testing.T) {
+	now := time.Unix(1_000_000, 0).UTC()
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3, CreatedAt: now.Add(-72 * time.Hour)}}}
+	fills, err := accountfeed.NewFillConsumer(repository, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	oldTimestamp := strconv.FormatInt(now.Add(-48*time.Hour).UnixMilli(), 10)
+	client := &fakeCLOB{
+		orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE"}},
+		trades: []clobclient.Trade{{ID: "trade-1", Timestamp: oldTimestamp, Market: "condition", AssetID: "token", Outcome: "Up", Status: "CONFIRMED", TraderSide: "MAKER", MakerOrders: []clobclient.MakerTrade{{OrderID: "order-1", Owner: "key", MatchedAmount: "2", Price: "0.5", AssetID: "token", Outcome: "Up", Side: clobclient.SideSell}}}},
+	}
+	reconciler, _ := New(repository, client, fills, "key", func() time.Time { return now }, time.Second)
+	reconciler.SetMaxTradeAge(24 * time.Hour)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(repository.fills) != 1 {
+		t.Fatalf("expected the old fill of an unresolved order replayed, got %+v", repository.fills)
+	}
+}
