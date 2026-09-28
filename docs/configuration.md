@@ -123,8 +123,13 @@ signing key and its own PostgreSQL database, and point them all at the same
 NATS server. Every instance receives every request and acts only on the
 strategies in its `EXECUTION_ALLOWED_STRATEGIES`.
 
-- Give each strategy to one wallet. Two instances that allow the same strategy
-  both place its orders. Nothing checks this across instances.
+- A strategy may be allowed on several instances to trade it on several
+  wallets: each instance sizes, places, and reports the order for its own
+  wallet, independently. The requester must merge the per-wallet answers, as
+  pmm's strategy engine does (matching by `request_id`, see
+  [the protocol](protocol/nats-v1.md#wallets-and-strategies)). Allow a strategy
+  on one instance only if its requester expects one answer per request.
+  Nothing checks this across instances.
 - Never share a database between instances: reconciliation and settlement
   treat every row as belonging to their own wallet.
 - A request for a strategy no instance allows gets no result, only a timeout

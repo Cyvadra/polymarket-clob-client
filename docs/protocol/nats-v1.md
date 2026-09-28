@@ -14,7 +14,9 @@ Each `executiond` trades one wallet and a fixed list of strategies, set by `EXEC
 
 A command for any other strategy is dropped without a result, an order event, or a log line. It belongs to another wallet, and a failure result would read as that wallet refusing the order. A command for a strategy that no instance allows therefore gets no answer at all: the strategy only sees a timeout.
 
-Give each strategy to one wallet only. Two instances that both allow a strategy both place its orders.
+A strategy may be allowed on several wallets on purpose, to spread one signal across them. Every instance that allows it acts on each command independently: each sizes the order from its own wallet (so an equity-sized open buys a different amount on each), places its own order, and publishes its own result, order events, and position features. The requester therefore gets one result per wallet for each request, and one position stream per wallet for each lane. Nothing in executiond coordinates the instances or merges their answers; that is the requester's job. It matches each result to its request by the echoed `request_id` and tells the wallets apart by `wallet_address` (see [Results](#results)). pmm's strategy engine does this in `strategy.WalletMux`: it learns each strategy's wallets from `position.query` replies, merges the open results, and reports a close as failed only when every wallet failed it.
+
+A requester that expects one answer per request must allow each of its strategies on exactly one wallet.
 
 Everything `executiond` publishes names the wallet it came from:
 
