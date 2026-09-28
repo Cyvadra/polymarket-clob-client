@@ -558,6 +558,14 @@ func TestSettlePositionSkipsReservedAndClearsAnEmptiedLane(t *testing.T) {
 	if got.PositionSize != "0.000000000000000000" || got.State != "empty" || !got.EntryTime.IsZero() || got.EntryPrice != "" || got.OpenLots != 0 {
 		t.Fatalf("expected an emptied lane with no entry, got %+v", got)
 	}
+	// A loser's removed shares are recorded as lost, with no payout.
+	var lostShares, lostPaid string
+	if err := s.pool.QueryRow(ctx, `SELECT shares::text, payout_usd::text FROM settlement_payouts WHERE unique_tag = $1 AND lost`, lane.tag).Scan(&lostShares, &lostPaid); err != nil {
+		t.Fatalf("lost row: %v", err)
+	}
+	if lostShares != "4.000000000000000000" || lostPaid != "0.000000000000000000" {
+		t.Fatalf("expected 4 lost shares paying nothing, got %s paying %s", lostShares, lostPaid)
+	}
 }
 
 func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {

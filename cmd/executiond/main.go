@@ -220,7 +220,13 @@ func run() error {
 	// Equity is recorded once lanes have settled and no winner is left
 	// unsettled: one the wallet already redeemed has no payout recorded yet,
 	// and its cash would read as a deposit and its lane as a loss.
-	equityDue, lossDue, anchorStale := false, false, false
+	// A payout or loss swept before a restart and not yet counted by a
+	// snapshot still needs one.
+	pending, err := store.PendingTradeCash(ctx)
+	if err != nil {
+		return err
+	}
+	equityDue, anchorStale := len(pending.PayoutIDs) > 0, false
 	sweeper.SetSweepHandler(func(s settlement.Sweep) {
 		// A failed refresh would leave sizing on the pre-loss base until
 		// another snapshot happened to be recorded; retry it every sweep.
@@ -238,9 +244,6 @@ func run() error {
 		if s.Lost+s.Redeemed+s.Shrunk > 0 {
 			equityDue = true
 		}
-		if s.Lost > 0 {
-			lossDue = true
-		}
 		baseDue := anchor != nil && !anchor.Ready()
 		if !equityDue && !baseDue {
 			return
@@ -249,17 +252,15 @@ func run() error {
 			log.Printf("equity snapshot deferred: %d winning lanes not yet settled", held)
 			return
 		}
+		// The recorder tags the snapshot as after a loss when it counts one.
 		reason := equity.ReasonSettlement
-		switch {
-		case lossDue:
-			reason = equity.ReasonSettlementLoss
-		case baseDue:
+		if baseDue {
 			reason = equity.ReasonSizingBase
 		}
 		if !recordSettledEquity(ctx, recorder, reason, guard) {
 			return
 		}
-		equityDue, lossDue = false, false
+		equityDue = false
 		// Any snapshot may carry a deposit or withdrawal the base follows.
 		if anchor != nil {
 			if err := refreshAnchor(ctx, anchor); err != nil {

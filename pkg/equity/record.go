@@ -56,6 +56,11 @@ func (r *Recorder) Record(ctx context.Context, reason string) (store.EquitySnaps
 	if err != nil {
 		return store.EquitySnapshotRecord{}, err
 	}
+	// The loss is read from the store rather than the caller, so one swept
+	// before a restart still tags the snapshot that counts it.
+	if pending.Lost {
+		reason = ReasonSettlementLoss
+	}
 	// Settlement moves cash on chain; a cached balance would miss it.
 	r.wallet.Invalidate()
 	snapshot, err := r.wallet.Snapshot(ctx)

@@ -221,7 +221,7 @@ standard `executiond` deployment and are omitted from `.env.example`.
 
 ## Loss-anchored sizing
 
-With `EXECUTION_SIZE_AFTER_LOSS_ONLY=true`, `target_equity_fraction` multiplies a stored equity instead of the live one: the `equity_usd` of the latest snapshot recorded as `settlement-loss` or `sizing-base`, plus the `external_flow_usd` of every snapshot after it. A snapshot is `settlement-loss` when a lane was emptied as a losing token since the previous one. Winning streaks don't raise entry size. The first confirmed loss after them resets it to the equity at that point, which is higher or lower depending on how the streak and the loss net out.
+With `EXECUTION_SIZE_AFTER_LOSS_ONLY=true`, `target_equity_fraction` multiplies a stored equity instead of the live one: the `equity_usd` of the latest snapshot recorded as `settlement-loss` or `sizing-base`, plus the `external_flow_usd` of every snapshot after it. A snapshot is `settlement-loss` when it counts a lane emptied as a losing token. The sweep stores each such lane in `settlement_payouts` with `lost` set and no payout, so a loss swept before a restart still tags the next snapshot, which the daemon takes at startup when uncounted payouts are left. Winning streaks don't raise entry size. The first confirmed loss after them resets it to the equity at that point, which is higher or lower depending on how the streak and the loss net out.
 
 When the mode is enabled and neither kind of snapshot exists, the first settlement sweep with no unredeemed winner records a `sizing-base` snapshot. Until then, fraction-sized opens are sized from live equity. The base lives in `equity_snapshots`, so a restart keeps it. Free cash is still checked against the live balance.
 

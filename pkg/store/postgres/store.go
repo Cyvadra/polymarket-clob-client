@@ -943,14 +943,14 @@ func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, unique
 	if err != nil {
 		return false, fmt.Errorf("settle position: %w", err)
 	}
-	if winner {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO settlement_payouts (condition_id, token_id, unique_tag, shares, payout_usd)
-			SELECT $1, $2, $3, $4::numeric - $5::numeric, $4::numeric - $5::numeric
-			WHERE $4::numeric > $5::numeric
-		`, conditionID, tokenID, uniqueTag, before, after); err != nil {
-			return false, fmt.Errorf("record settlement payout: %w", err)
-		}
+	// A winner pays $1 a share; a loser pays nothing but is recorded as lost,
+	// so the snapshot that counts it is tagged as after a loss.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO settlement_payouts (condition_id, token_id, unique_tag, shares, payout_usd, lost)
+		SELECT $1, $2, $3, $4::numeric - $5::numeric, CASE WHEN $6 THEN $4::numeric - $5::numeric ELSE 0 END, NOT $6
+		WHERE $4::numeric > $5::numeric
+	`, conditionID, tokenID, uniqueTag, before, after, winner); err != nil {
+		return false, fmt.Errorf("record settlement payout: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit settle position: %w", err)
@@ -1280,13 +1280,14 @@ func (s *Store) PendingTradeCash(ctx context.Context) (store.PendingTradeCash, e
 			FROM fills
 			WHERE equity_snapshot_id IS NULL AND trade_status <> 'FAILED'
 		), p AS (
-			SELECT id, payout_usd FROM settlement_payouts WHERE equity_snapshot_id IS NULL
+			SELECT id, payout_usd, lost FROM settlement_payouts WHERE equity_snapshot_id IS NULL
 		)
 		SELECT
 			((SELECT COALESCE(SUM(cash), 0) FROM f) + (SELECT COALESCE(SUM(payout_usd), 0) FROM p))::text,
 			COALESCE((SELECT array_agg(fill_id) FROM f), '{}'::text[]),
-			COALESCE((SELECT array_agg(id) FROM p), '{}'::bigint[])
-	`).Scan(&pending.USD, &pending.FillIDs, &pending.PayoutIDs)
+			COALESCE((SELECT array_agg(id) FROM p), '{}'::bigint[]),
+			EXISTS (SELECT 1 FROM p WHERE lost)
+	`).Scan(&pending.USD, &pending.FillIDs, &pending.PayoutIDs, &pending.Lost)
 	if err != nil {
 		return store.PendingTradeCash{}, fmt.Errorf("sum pending trade cash: %w", err)
 	}

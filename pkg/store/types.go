@@ -228,6 +228,8 @@ type PendingTradeCash struct {
 	USD       string
 	FillIDs   []string
 	PayoutIDs []int64
+	// Lost reports whether any of the payouts is a lane settled as a loser.
+	Lost bool
 }
 
 // ErrTradeCashCounted is returned when a snapshot would count trade cash

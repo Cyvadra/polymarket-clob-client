@@ -32,6 +32,7 @@ func (f *fakeValuer) Snapshot(context.Context) (Snapshot, error) {
 type fakeEquityStore struct {
 	saved     []store.EquitySnapshotRecord
 	tradeCash string
+	lost      bool
 	// pendingReads counts PendingTradeCash calls; counted is what each saved
 	// snapshot was told it counted.
 	pendingReads int
@@ -41,9 +42,9 @@ type fakeEquityStore struct {
 func (f *fakeEquityStore) PendingTradeCash(context.Context) (store.PendingTradeCash, error) {
 	f.pendingReads++
 	if f.tradeCash == "" {
-		return store.PendingTradeCash{USD: "0"}, nil
+		return store.PendingTradeCash{USD: "0", Lost: f.lost}, nil
 	}
-	return store.PendingTradeCash{USD: f.tradeCash, FillIDs: []string{"fill"}}, nil
+	return store.PendingTradeCash{USD: f.tradeCash, FillIDs: []string{"fill"}, Lost: f.lost}, nil
 }
 
 func (f *fakeEquityStore) RecordEquitySnapshot(_ context.Context, r store.EquitySnapshotRecord, counted store.PendingTradeCash) (store.EquitySnapshotRecord, error) {
@@ -133,6 +134,28 @@ func TestRecordValuesAfreshAndStartsTheIndexAtOne(t *testing.T) {
 	}
 	if got.CashUSD != "40.000000" || got.EquityUSD != "100.000000" || got.ExternalFlowUSD != "0.000000" || index(t, got) != 1 || !got.TakenAt.Equal(recordStart) {
 		t.Fatalf("unexpected first record %+v", got)
+	}
+}
+
+// A loss the store has not counted yet tags the snapshot, whatever reason
+// the caller gave, so one swept before a restart still resets the sizing base.
+func TestRecordTagsAPendingLoss(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	s.lost = true
+	for _, reason := range []string{ReasonSettlement, ReasonSizingBase} {
+		wallet.snapshot = Snapshot{CashUSD: 40, PositionsUSD: 60, EquityUSD: 100, CashAsOf: recordStart}
+		got, err := r.Record(context.Background(), reason)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Reason != ReasonSettlementLoss {
+			t.Fatalf("reason %q recorded as %q, want %q", reason, got.Reason, ReasonSettlementLoss)
+		}
+	}
+	s.lost = false
+	got, err := r.Record(context.Background(), ReasonSettlement)
+	if err != nil || got.Reason != ReasonSettlement {
+		t.Fatalf("no pending loss: reason %q err %v", got.Reason, err)
 	}
 }
 
