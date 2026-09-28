@@ -33,10 +33,15 @@ type FillConsumer struct {
 	onError func(error)
 	onFill  func()
 	fees    FeeSchedules
+	// started is when the consumer was created. An out-of-band fill matched
+	// before it was already seen by an earlier run, since the reconciler
+	// replays recent trade history on every start.
+	started time.Time
 
 	mu              sync.Mutex
 	unknownOrders   map[string]struct{}
 	unknownReported int
+	staleReported   bool
 }
 
 func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*FillConsumer, error) {
@@ -46,7 +51,7 @@ func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*
 	if now == nil {
 		now = time.Now
 	}
-	return &FillConsumer{store: repository, now: now, unknownOrders: map[string]struct{}{}}, nil
+	return &FillConsumer{store: repository, now: now, started: now(), unknownOrders: map[string]struct{}{}}, nil
 }
 
 // SetErrorHandler receives non-fatal observations the consumer cannot recover
@@ -158,7 +163,8 @@ func (c *FillConsumer) UnknownOrderCount() int {
 // many times and the reconciler replays the account trade history on every
 // pass, so reporting per fill repeats the same fact indefinitely; reporting
 // per order, up to unknownOrderReportLimit, keeps the signal without the
-// flood.
+// flood. Fills matched before this consumer started are history an earlier
+// run already reported, so they get one line in all rather than one each.
 func (c *FillConsumer) reportUnknownFill(fill AccountFill) {
 	if c.onError == nil {
 		return
@@ -169,6 +175,16 @@ func (c *FillConsumer) reportUnknownFill(fill AccountFill) {
 		return
 	}
 	c.unknownOrders[fill.ExchangeOrderID] = struct{}{}
+	if !fill.ExchangeTime.IsZero() && fill.ExchangeTime.Before(c.started) {
+		first := !c.staleReported
+		c.staleReported = true
+		c.mu.Unlock()
+		if first {
+			c.onError(fmt.Errorf("dropping fills of orders placed outside executiond before it started (first: exchange order %s matched %s); they are not reported individually",
+				fill.ExchangeOrderID, fill.ExchangeTime.UTC().Format(time.RFC3339)))
+		}
+		return
+	}
 	total := len(c.unknownOrders)
 	c.unknownReported++
 	reported := c.unknownReported

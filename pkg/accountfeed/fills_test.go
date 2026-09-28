@@ -181,3 +181,36 @@ func TestUnknownOrderReportsAreDedupedAndCapped(t *testing.T) {
 		t.Fatalf("unknown order count = %d, want 40", consumer.UnknownOrderCount())
 	}
 }
+
+func TestUnknownFillsFromBeforeStartAreReportedOnce(t *testing.T) {
+	start := time.Date(2026, 9, 28, 9, 0, 0, 0, time.UTC)
+	consumer, err := NewFillConsumer(&fakeFillStore{}, func() time.Time { return start })
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	var reports []string
+	consumer.SetErrorHandler(func(err error) { reports = append(reports, err.Error()) })
+	consume := func(order string, at time.Time) {
+		t.Helper()
+		fill := testFill()
+		fill.FillID, fill.ExchangeOrderID, fill.ExchangeTime = order+"-fill", order, at
+		if _, err := consumer.Consume(context.Background(), fill); err != nil {
+			t.Fatalf("consume: %v", err)
+		}
+	}
+	// A restart replays out-of-band history: one line for all of it.
+	for i := 0; i < 20; i++ {
+		consume(fmt.Sprintf("old-%d", i), start.Add(-time.Duration(i+1)*time.Minute))
+	}
+	if len(reports) != 1 || !strings.Contains(reports[0], "before it started") {
+		t.Fatalf("history reports: %v", reports)
+	}
+	// An out-of-band fill after the start is still reported on its own.
+	consume("new", start.Add(time.Second))
+	if len(reports) != 2 || !strings.Contains(reports[1], "exchange order new is not known") {
+		t.Fatalf("fresh report: %v", reports)
+	}
+	if consumer.UnknownOrderCount() != 21 {
+		t.Fatalf("unknown order count = %d, want 21", consumer.UnknownOrderCount())
+	}
+}
