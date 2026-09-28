@@ -98,7 +98,7 @@ func TestSubscribeOpenDecodesAndExecutes(t *testing.T) {
 		t.Fatalf("new executor: %v", err)
 	}
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeOpen(subscriber, execution); err != nil {
+	if err := SubscribeOpen(subscriber, execution, testAllowlist(t)); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if subscriber.subject != protocol.SubjectStrategyExecutionOpen || subscriber.handler == nil {
@@ -122,7 +122,7 @@ func TestSubscribeOpenPublishesFailureForInvalidIntent(t *testing.T) {
 	publisher := &recordedPublisher{}
 	execution.SetEventPublisher(publisher)
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeOpen(subscriber, execution); err != nil {
+	if err := SubscribeOpen(subscriber, execution, testAllowlist(t)); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}

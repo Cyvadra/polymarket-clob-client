@@ -45,7 +45,7 @@ func TestBalanceQueryReturnsEquity(t *testing.T) {
 	at := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	connector := &fakeBalanceConnector{}
 	wallet := fakeEquity{snapshot: equity.Snapshot{CashUSD: 100.5, PositionsUSD: 0.1 + 0.2, EquityUSD: 100.8, Positions: 2, UnmarkedPositions: 1, CashAsOf: at, AsOf: at}}
-	if err := SubscribeBalanceQuery(connector, wallet); err != nil {
+	if err := SubscribeBalanceQuery(connector, wallet, testIdentity); err != nil {
 		t.Fatal(err)
 	}
 	if connector.subject != protocol.SubjectStrategyExecutionBalanceQuery {
@@ -62,7 +62,7 @@ func TestBalanceQueryReturnsEquity(t *testing.T) {
 
 func TestBalanceQueryAnswersWithError(t *testing.T) {
 	connector := &fakeBalanceConnector{}
-	if err := SubscribeBalanceQuery(connector, fakeEquity{err: errors.New("exchange down")}); err != nil {
+	if err := SubscribeBalanceQuery(connector, fakeEquity{err: errors.New("exchange down")}, testIdentity); err != nil {
 		t.Fatal(err)
 	}
 	if err := deliverBalanceQuery(t, connector, protocol.SchemaVersionV1); err == nil || connector.response.Error == "" {

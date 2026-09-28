@@ -56,8 +56,10 @@ definition itself never changes between releases.
 - `executiond` uses its own PostgreSQL database from `EXECUTION_POSTGRES_URL`
   and applies its own schema on startup. The deploy refuses the placeholder
   default URL.
-- One `executiond` instance per wallet: the deploy deletes and recreates the
-  pm2 app on every run.
+- One `executiond` instance per wallet and per host: the deploy deletes and
+  recreates the pm2 app on every run. Several hosts may share one NATS server;
+  each trades only the strategies in its `EXECUTION_ALLOWED_STRATEGIES`, which
+  the deploy requires.
 
 ## Private bundle
 

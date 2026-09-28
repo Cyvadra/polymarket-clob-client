@@ -116,7 +116,7 @@ func TestIntentRecordRoundTrip(t *testing.T) {
 
 func TestTerminalResultMapsStates(t *testing.T) {
 	at := time.Unix(100, 0).UTC()
-	openIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
+	openIntent := store.OrderIntentRecord{IntentID: "intent", Strategy: "late-gap", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}
 	cases := []struct {
 		state    statemachine.State
 		status   protocol.ResultStatus
@@ -139,6 +139,9 @@ func TestTerminalResultMapsStates(t *testing.T) {
 		}
 		if result.Status != tc.status {
 			t.Fatalf("state %s status=%s want %s", tc.state, result.Status, tc.status)
+		}
+		if result.Strategy != "late-gap" {
+			t.Fatalf("expected the result to name the intent's strategy, got %+v", result)
 		}
 	}
 }
@@ -170,7 +173,7 @@ func TestTerminalResultPartiallyFilledIsNotTerminal(t *testing.T) {
 
 func TestTerminalCloseResultMapsStates(t *testing.T) {
 	at := time.Unix(100, 0).UTC()
-	closeIntent := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	closeIntent := store.OrderIntentRecord{IntentID: "intent", Strategy: "late-gap", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
 	cases := []struct {
 		state  statemachine.State
 		status protocol.ResultStatus
@@ -194,7 +197,7 @@ func TestTerminalCloseResultMapsStates(t *testing.T) {
 		if result.Status != tc.status {
 			t.Fatalf("state %s status=%s want %s", tc.state, result.Status, tc.status)
 		}
-		if result.AssetID != "token" || result.Side != protocol.SideSell {
+		if result.AssetID != "token" || result.Side != protocol.SideSell || result.Strategy != "late-gap" {
 			t.Fatalf("unexpected close identity: %+v", result)
 		}
 	}

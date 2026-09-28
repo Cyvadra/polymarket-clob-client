@@ -272,7 +272,7 @@ func TestExecuteOpenPublishesResultOnValidationFailure(t *testing.T) {
 	if pub.subject != protocol.SubjectExecutionOpenResult {
 		t.Fatalf("expected open result subject, got %q", pub.subject)
 	}
-	if result, ok := pub.value.(protocol.ExecutionOpenResult); !ok || result.Status != protocol.ResultFailed {
+	if result, ok := pub.value.(protocol.ExecutionOpenResult); !ok || result.Status != protocol.ResultFailed || result.Strategy != "strategy" {
 		t.Fatalf("unexpected result: %+v", pub.value)
 	}
 }
@@ -306,6 +306,18 @@ func TestExecuteOpenMarksUnknownWhenSubmissionTimesOut(t *testing.T) {
 	}
 	if storer.order.State != statemachine.StateSubmitUnknown {
 		t.Fatalf("expected submit unknown state, got %s", storer.order.State)
+	}
+	events := 0
+	for _, record := range pub.publishes {
+		if event, ok := record.value.(protocol.ExecutionOrderEvent); ok {
+			events++
+			if event.UniqueTag != "lane-a" || event.Strategy != "strategy" {
+				t.Fatalf("expected order events to name the lane and strategy, got %+v", event)
+			}
+		}
+	}
+	if events == 0 {
+		t.Fatal("expected order events for the submission")
 	}
 	for _, record := range pub.publishes {
 		if record.subject == protocol.SubjectExecutionOpenResult {

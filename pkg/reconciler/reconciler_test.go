@@ -11,6 +11,7 @@ import (
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -69,7 +70,7 @@ func (s *fakeStore) UpdateIntentStatus(context.Context, string, string) error { 
 func (s *fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRecord, error) {
 	for _, order := range s.orders {
 		if order.IntentID == intentID {
-			return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}, nil
+			return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a", Strategy: "late-gap", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}, nil
 		}
 	}
 	return store.OrderIntentRecord{}, store.ErrNotFound
@@ -479,5 +480,32 @@ func TestReconcileFailsSubmittingMissingOrderAfterGrace(t *testing.T) {
 	}
 	if len(repository.updates) != 1 || repository.updates[0].state != statemachine.StateFailed || repository.updates[0].event != statemachine.EventFailedObserved {
 		t.Fatalf("expected submitting order to fail after grace, got %#v", repository.updates)
+	}
+}
+
+type recordedPublisher struct {
+	events []protocol.ExecutionOrderEvent
+}
+
+func (p *recordedPublisher) PublishJSON(_ string, value any) error {
+	if event, ok := value.(protocol.ExecutionOrderEvent); ok {
+		p.events = append(p.events, event)
+	}
+	return nil
+}
+
+func TestReconcileOrderEventNamesTheLaneAndStrategy(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateSubmitUnknown, MatchedShares: "0", Revision: 3}}}
+	reconciler, err := New(repository, &fakeCLOB{orders: map[string]*clobclient.Order{"order-1": {ID: "order-1", Status: "LIVE"}}}, nil, "", time.Now, time.Second)
+	if err != nil {
+		t.Fatalf("new reconciler: %v", err)
+	}
+	publisher := &recordedPublisher{}
+	reconciler.SetEventPublisher(publisher)
+	if err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(publisher.events) != 1 || publisher.events[0].UniqueTag != "lane-a" || publisher.events[0].Strategy != "late-gap" {
+		t.Fatalf("expected one order event for the lane and strategy, got %+v", publisher.events)
 	}
 }

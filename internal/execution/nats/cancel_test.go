@@ -65,7 +65,7 @@ func closeReq(tag, mode string) protocol.ExecutionCloseRequest {
 
 func TestSubscribeCloseWiresTheSubject(t *testing.T) {
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeClose(context.Background(), subscriber, &fakeCloseExecutor{}, nil); err != nil {
+	if err := SubscribeClose(context.Background(), subscriber, &fakeCloseExecutor{}, testAllowlist(t), nil); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if subscriber.subject != protocol.SubjectStrategyExecutionClose || subscriber.handler == nil {
@@ -74,7 +74,7 @@ func TestSubscribeCloseWiresTheSubject(t *testing.T) {
 }
 
 func TestCloseDispatcherRejectsMalformedJSON(t *testing.T) {
-	d := newCloseDispatcher(context.Background(), &fakeCloseExecutor{}, nil)
+	d := newCloseDispatcher(context.Background(), &fakeCloseExecutor{}, testAllowlist(t), nil)
 	if err := d.handle(context.Background(), []byte(`{not json`)); err == nil {
 		t.Fatal("expected malformed JSON to be rejected synchronously")
 	}
@@ -82,7 +82,7 @@ func TestCloseDispatcherRejectsMalformedJSON(t *testing.T) {
 
 func TestCloseDispatcherRunsOneLaneInOrderAndKeepsOnlyLatestPending(t *testing.T) {
 	exec := &fakeCloseExecutor{entered: make(chan protocol.ExecutionCloseRequest, 1), release: make(chan struct{})}
-	d := newCloseDispatcher(context.Background(), exec, nil)
+	d := newCloseDispatcher(context.Background(), exec, testAllowlist(t), nil)
 
 	d.enqueue(closeReq("lane-a", "A"))
 	got := <-exec.entered // the worker is now inside ExecuteClose(A)
@@ -112,7 +112,7 @@ func TestCloseDispatcherRunsOneLaneInOrderAndKeepsOnlyLatestPending(t *testing.T
 
 func TestCloseDispatcherRunsDifferentLanesConcurrently(t *testing.T) {
 	exec := &fakeCloseExecutor{entered: make(chan protocol.ExecutionCloseRequest, 2), release: make(chan struct{})}
-	d := newCloseDispatcher(context.Background(), exec, nil)
+	d := newCloseDispatcher(context.Background(), exec, testAllowlist(t), nil)
 
 	d.enqueue(closeReq("lane-a", "A"))
 	d.enqueue(closeReq("lane-b", "B"))
@@ -141,7 +141,7 @@ func TestCloseDispatcherReportsExecuteErrorThroughOnError(t *testing.T) {
 	exec := &fakeCloseExecutor{err: fmt.Errorf("boom")}
 	var mu sync.Mutex
 	var got error
-	d := newCloseDispatcher(context.Background(), exec, func(err error) {
+	d := newCloseDispatcher(context.Background(), exec, testAllowlist(t), func(err error) {
 		mu.Lock()
 		got = err
 		mu.Unlock()

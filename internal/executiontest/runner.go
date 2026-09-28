@@ -26,6 +26,9 @@ type Runner struct {
 
 	tag   string
 	since time.Time
+	// wallet and signer name the executiond that filled the open; every later
+	// result and position reply must come from the same wallet.
+	wallet, signer string
 
 	openShares, openAvg   float64
 	closeShares, closeAvg float64
@@ -151,6 +154,10 @@ func (r *Runner) open(ctx context.Context) error {
 	r.report.Evidence(message)
 	var result protocol.ExecutionOpenResult
 	if err := json.Unmarshal(message.Payload, &result); err != nil {
+		return err
+	}
+	if err := r.checkIdentity("open result", result.Strategy, result.WalletAddress, result.SignerAddress); err != nil {
+		r.report.Phase("open", StatusFail, "", "", err.Error())
 		return err
 	}
 	if result.Status != protocol.ResultSucceeded || result.FilledShares <= 0 {
@@ -531,7 +538,37 @@ func (r *Runner) sendClose(ctx context.Context, mode protocol.ExecutionCloseMode
 	if err := json.Unmarshal(message.Payload, &result); err != nil {
 		return result, err
 	}
+	if err := r.checkIdentity("close result", result.Strategy, result.WalletAddress, result.SignerAddress); err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+// checkIdentity verifies that a result names the run's strategy and the
+// wallet that produced it, and that every result of the run comes from one
+// wallet. The first result fixes the wallet and notes it in the report.
+func (r *Runner) checkIdentity(source, strategy, wallet, signer string) error {
+	if err := resultIdentity(source, r.config.strategy(), r.wallet, strategy, wallet, signer); err != nil {
+		return err
+	}
+	if r.wallet == "" {
+		r.wallet, r.signer = wallet, signer
+		r.report.Note("Executing wallet", fmt.Sprintf("strategy=%s wallet_address=%s signer_address=%s", strategy, wallet, signer))
+	}
+	return nil
+}
+
+func resultIdentity(source, wantStrategy, wantWallet, strategy, wallet, signer string) error {
+	if strategy == "" || wallet == "" || signer == "" {
+		return fmt.Errorf("%s is missing its identity: strategy=%q wallet_address=%q signer_address=%q", source, strategy, wallet, signer)
+	}
+	if strategy != wantStrategy {
+		return fmt.Errorf("%s names strategy %q, expected %q", source, strategy, wantStrategy)
+	}
+	if wantWallet != "" && wallet != wantWallet {
+		return fmt.Errorf("%s came from wallet %s, but the run is on wallet %s", source, wallet, wantWallet)
+	}
+	return nil
 }
 
 func (r *Runner) waitPosition(ctx context.Context, tag string, shouldExist bool) error {
@@ -571,7 +608,7 @@ func (r *Runner) lanePosition(response protocol.PositionQueryResponse) (protocol
 }
 
 func (r *Runner) query(ctx context.Context, purpose string) (protocol.PositionQueryResponse, error) {
-	response, err := r.observer.Query(ctx, protocol.PositionQueryRequest{SchemaVersion: protocol.SchemaVersionV1, ConditionID: r.config.ConditionID})
+	response, err := r.observer.Query(ctx, protocol.PositionQueryRequest{SchemaVersion: protocol.SchemaVersionV1, ConditionID: r.config.ConditionID}, r.config.strategy(), r.wallet)
 	if err != nil {
 		return response, fmt.Errorf("%s position query: %w", purpose, err)
 	}

@@ -107,7 +107,7 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 		return protocol.ExecutionOpenResult{}, false
 	}
 	return protocol.ExecutionOpenResult{
-		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
+		UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
 		FilledShares: filledShares, AveragePrice: resultPrice(averagePrice, filledShares), OccurredAt: occurredAt,
 	}, true
@@ -144,7 +144,7 @@ func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntent
 		return protocol.ExecutionCloseResult{}, false
 	}
 	return protocol.ExecutionCloseResult{
-		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
+		UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.SideSell, Status: status, ReasonCode: reasonCode, Reason: reason,
 		FilledShares: filledShares, AveragePrice: resultPrice(averagePrice, filledShares), OccurredAt: occurredAt,
 	}, true

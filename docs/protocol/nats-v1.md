@@ -6,7 +6,32 @@
 
 - Strategy commands are at-most-once.
 - `executiond` publishes order events and results best-effort.
-- One `executiond` instance should manage one wallet.
+- One `executiond` instance manages one wallet. Several instances, one per wallet, may share one NATS server.
+
+## Wallets and strategies
+
+Each `executiond` trades one wallet and a fixed list of strategies, set by `EXECUTION_ALLOWED_STRATEGIES`. Every instance on a shared NATS server receives every command, and acts only on those whose `strategy` is on its list. A strategy name is matched exactly, including case.
+
+A command for any other strategy is dropped without a result, an order event, or a log line. It belongs to another wallet, and a failure result would read as that wallet refusing the order. A command for a strategy that no instance allows therefore gets no answer at all: the strategy only sees a timeout.
+
+Give each strategy to one wallet only. Two instances that both allow a strategy both place its orders.
+
+Everything `executiond` publishes names the wallet it came from:
+
+| Field | Meaning |
+| --- | --- |
+| `strategy` | The `strategy` of the request that created the order. On open results, close results, and order events. |
+| `wallet_address` | The address that holds the funds: `POLYMARKET_MAKER_ADDRESS` (the proxy wallet) when set, otherwise the signer. |
+| `signer_address` | The EOA that signs the orders. Equal to `wallet_address` when no proxy wallet is used. |
+| `allowed_strategies` | The strategies the instance trades. On query replies only. |
+
+`wallet_address` and `signer_address` are on open results, close results, order events, position features, and both query replies. Attribute a result by `wallet_address` together with `unique_tag`: once one strategy runs on several wallets, `unique_tag` alone no longer identifies a lane.
+
+### Queries on a shared server
+
+Every instance answers `strategy.execution.position.query` and `strategy.execution.balance.query`, each with its own wallet's data, so one request gets one reply per instance. A requester that takes the first reply gets an arbitrary wallet. Subscribe to a reply inbox, publish the request with it, and read replies until the one whose `wallet_address` or `allowed_strategies` matches arrives, or until a timeout. Error replies carry the same identity fields.
+
+`position.features.*` is likewise published by every instance on the same subjects. Positions are not recorded per strategy, so a feature carries the wallet but no `strategy`.
 
 ## Subjects
 
@@ -24,7 +49,7 @@
 
 Subject tokens must not be empty or include `*` or `>`.
 
-`execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. `unique_tag` carries the lane the order belongs to so an observer can filter the shared subject to its own orders; it is omitted when the event's intent could not be resolved. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
+`execution.order.event` is an observer subject for durable order-state transitions (including internal force-close children and close orders). Its `intent_id` is a server-side execution id for correlation/debugging, not a client-supplied key. `unique_tag` carries the lane the order belongs to and `strategy` the strategy that asked for it, so an observer can filter the shared subject to its own orders; both are omitted when the event's intent could not be resolved. The strategy normally relies on the `*.result` subjects and `position.features.*`; it may ignore order events.
 
 ## Equity-fraction sizing
 
@@ -38,7 +63,7 @@ With `EXECUTION_SIZE_AFTER_LOSS_ONLY=true`, `equity_usd` here is not live: it is
 
 ## Balance query
 
-`BalanceQueryRequest` carries only `schema_version`. The reply is a `BalanceQueryResponse`:
+`BalanceQueryRequest` carries only `schema_version`. The reply is a `BalanceQueryResponse`. Besides the identity fields (see [Wallets and strategies](#wallets-and-strategies)) it carries:
 
 - `cash_usd`: the wallet's USDC collateral balance as the CLOB reports it. Resting orders are not deducted: a working buy is still cash until it fills. The read is cached for `EXECUTION_BALANCE_CACHE_TTL`; `cash_as_of` says when it was taken.
 - `positions_value_usd`: the sum over recorded lanes holding shares of `position_size` × the token's best bid in the latest PMM quote. A fresh quote with no bid values the lane at zero. A lane with no quote, or one older than `EXECUTION_EQUITY_MAX_QUOTE_AGE`, is looked up on the CLOB: if its market has resolved, it is counted in `settled_positions` and valued at $1 per winning share the wallet still holds (never more than the lanes recorded; redeemed shares are already in `cash_usd`), or zero for a losing token. Lanes holding the same winning token share its wallet balance rather than each counting it. A lane that changed in the last two minutes is taken to hold what it recorded, since its tokens may not have reached the wallet yet. Anything else, including a lane whose market or balance could not be read, is valued at its entry price and counted in `unmarked_positions`.
@@ -92,7 +117,7 @@ Close requests also require `unique_tag` so the execution daemon can target the 
 
 ## Results
 
-Open and close results identify the affected position (`unique_tag` + `condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key. They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields. `filled_shares` and `average_price`, when present, are JSON numbers rather than decimal strings.
+Open and close results identify the affected position (`unique_tag` + `condition_id` + `token_id` / `asset_id` + `side`) so the strategy can attribute them without a correlation key, and carry `strategy`, `wallet_address`, and `signer_address` to say which strategy asked and which wallet traded (see [Wallets and strategies](#wallets-and-strategies)). They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields. `filled_shares` and `average_price`, when present, are JSON numbers rather than decimal strings.
 
 Open results are emitted **only at terminal resolution** of an open — when the child order reaches a fill (any amount counts as success, including a partial fill) or is cancelled without any fill (failure). executiond never publishes an open `SUCCEEDED` merely because a resting order was accepted, so a success always means shares were actually bought. `filled_shares` is populated on terminal open results.
 
@@ -160,5 +185,44 @@ Order events use the same numeric representation for `matched_shares` when the f
   "asset_id": "12345",
   "outcome": "Up",
   "mode": "CANCEL_OPEN"
+}
+```
+
+An open result:
+
+```json
+{
+  "schema_version": "execution.v1",
+  "unique_tag": "late-gap",
+  "strategy": "late-gap",
+  "wallet_address": "0xproxywallet",
+  "signer_address": "0xsigner",
+  "condition_id": "0xcondition",
+  "token_id": "12345",
+  "outcome": "Up",
+  "side": "BUY",
+  "status": "SUCCEEDED",
+  "filled_shares": 29.76,
+  "average_price": 0.42,
+  "occurred_at": "2026-09-04T12:00:03Z"
+}
+```
+
+A balance reply:
+
+```json
+{
+  "schema_version": "execution.v1",
+  "wallet_address": "0xproxywallet",
+  "signer_address": "0xsigner",
+  "allowed_strategies": ["late-gap"],
+  "cash_usd": 412.5,
+  "positions_value_usd": 12.5,
+  "equity_usd": 425,
+  "positions": 1,
+  "settled_positions": 0,
+  "unmarked_positions": 0,
+  "cash_as_of": "2026-09-04T12:00:00Z",
+  "as_of": "2026-09-04T12:00:03Z"
 }
 ```

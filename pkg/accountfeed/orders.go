@@ -90,8 +90,8 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	if updated.Revision == order.Revision && statemachine.IsTerminal(order.State) {
 		return nil
 	}
-	// The order event and the terminal result both carry the lane tag from the
-	// parent intent, so load it first. A missing intent is abnormal for an
+	// The order event and the terminal result both carry the lane tag and the
+	// strategy of the parent intent, so load it first. A missing intent is abnormal for an
 	// order we track; publish the event with no tag and skip the result.
 	intent, err := c.store.Intent(ctx, updated.IntentID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -99,7 +99,7 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 	} else if err != nil {
 		return fmt.Errorf("load order intent for result: %w", err)
 	}
-	if err := protocol.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, intent.UniqueTag, updated.MatchedShares, reason, c.now()); err != nil {
+	if err := protocol.PublishExecutionOrderEvent(c.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, intent.UniqueTag, intent.Strategy, updated.MatchedShares, reason, c.now()); err != nil {
 		return fmt.Errorf("publish account order event: %w", err)
 	}
 	if intent.IntentID == "" {

@@ -48,7 +48,7 @@ func TestExecuteCloseLimitRejectedPublishesFailedResult(t *testing.T) {
 		t.Fatal("expected the exchange rejection to be returned")
 	}
 	results := closeResults(pub)
-	if len(results) != 1 || results[0].Status != protocol.ResultFailed || results[0].ReasonCode != protocol.ReasonOrderRejected || results[0].UniqueTag != "lane-a" || results[0].AssetID != "token" {
+	if len(results) != 1 || results[0].Status != protocol.ResultFailed || results[0].ReasonCode != protocol.ReasonOrderRejected || results[0].UniqueTag != "lane-a" || results[0].Strategy != "strategy" || results[0].AssetID != "token" {
 		t.Fatalf("expected one FAILED ORDER_REJECTED close result for the lane, got %+v", results)
 	}
 	if client.submissions != 1 {

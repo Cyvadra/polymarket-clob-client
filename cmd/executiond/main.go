@@ -17,6 +17,7 @@ import (
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/nats"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
@@ -30,6 +31,7 @@ import (
 
 type config struct {
 	NATSURL                string
+	AllowedStrategies      *nats.Allowlist
 	PostgresURL            string
 	MaxOpenBuyNotionalUSD  string
 	FeatureInterval        time.Duration
@@ -107,6 +109,11 @@ func run() error {
 	// Log the address, never the key, so an operator can confirm which wallet
 	// was unlocked without reading it back out of the config.
 	log.Printf("signing as %s (maker %s)", clob.Address(), clob.MakerAddress())
+	log.Printf("trading strategies: %s", strings.Join(cfg.AllowedStrategies.Names(), ", "))
+	// Several executiond instances share the bus, so everything this one
+	// publishes names its wallet.
+	identity := protocol.NewIdentity(clob.Address(), clob.MakerAddress(), cfg.AllowedStrategies.Names())
+	events := protocol.WithIdentity(bus, identity)
 	credentials, err := clob.EnsureCredentials(ctx)
 	if err != nil {
 		return err
@@ -138,7 +145,7 @@ func run() error {
 	}
 	repair.SetMissingOrderGrace(cfg.MissingOrderGrace)
 	repair.SetMaxTradeAge(cfg.MaxTradeAge)
-	positions, err := positionfeatures.New(store, bus, time.Now, cfg.FeatureInterval)
+	positions, err := positionfeatures.New(store, events, time.Now, cfg.FeatureInterval)
 	if err != nil {
 		return err
 	}
@@ -149,20 +156,20 @@ func run() error {
 	orders.SetPriceWait(cfg.ResultPriceWait)
 	execution.SetErrorHandler(func(err error) { log.Printf("execution lifecycle error: %v", err) })
 	repair.SetErrorHandler(func(err error) { log.Printf("reconciliation error: %v", err) })
-	execution.SetEventPublisher(bus)
-	orders.SetEventPublisher(bus)
-	repair.SetEventPublisher(bus)
+	execution.SetEventPublisher(events)
+	orders.SetEventPublisher(events)
+	repair.SetEventPublisher(events)
 
-	if err := nats.SubscribeOpen(bus, execution); err != nil {
+	if err := nats.SubscribeOpen(bus, execution, cfg.AllowedStrategies); err != nil {
 		return err
 	}
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {
 		return err
 	}
-	if err := nats.SubscribeClose(ctx, bus, execution, onHandlerError); err != nil {
+	if err := nats.SubscribeClose(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError); err != nil {
 		return err
 	}
-	if err := nats.SubscribePositionQuery(bus, store, time.Now); err != nil {
+	if err := nats.SubscribePositionQuery(bus, store, identity, time.Now); err != nil {
 		return err
 	}
 	wallet, err := equity.New(clob, store, quotes, time.Now)
@@ -254,7 +261,7 @@ func run() error {
 	// A fill moves the exchange balance and shrinks the open-buy reservations
 	// at once; a cached pre-fill balance would count that cash twice.
 	fills.SetFillHook(wallet.Invalidate)
-	if err := nats.SubscribeBalanceQuery(bus, wallet); err != nil {
+	if err := nats.SubscribeBalanceQuery(bus, wallet, identity); err != nil {
 		return err
 	}
 	sizer, err := equity.NewSizer(wallet, store)
@@ -395,6 +402,11 @@ func configFromEnv() (config, error) {
 		ConnectTimeout:         durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		ShutdownGracePeriod:    durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
+	allowed, err := nats.ParseAllowlist(os.Getenv("EXECUTION_ALLOWED_STRATEGIES"))
+	if err != nil {
+		return config{}, fmt.Errorf("EXECUTION_ALLOWED_STRATEGIES must list the strategies this wallet trades, comma-separated: %w", err)
+	}
+	cfg.AllowedStrategies = allowed
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
 	}

@@ -29,8 +29,9 @@ type PositionStore interface {
 // strategy.execution.position.query. A request without a market or condition
 // filter returns every currently held position; otherwise the reply is
 // filtered to the requested market. Responses reuse the strategy-facing
-// PositionFeature shape.
-func SubscribePositionQuery(bus ReplyConnector, positions PositionStore, now func() time.Time) error {
+// PositionFeature shape. Every executiond on the bus answers, so each reply
+// carries the identity of the wallet that holds the positions.
+func SubscribePositionQuery(bus ReplyConnector, positions PositionStore, identity protocol.Identity, now func() time.Time) error {
 	if bus == nil || positions == nil {
 		return fmt.Errorf("NATS connector and position store are required")
 	}
@@ -47,7 +48,7 @@ func SubscribePositionQuery(bus ReplyConnector, positions PositionStore, now fun
 			// the failure would be visible in this daemon's log alone.
 			response = protocol.PositionQueryResponse{SchemaVersion: protocol.SchemaVersionV1, Positions: []protocol.PositionFeature{}, Error: err.Error()}
 		}
-		if publishErr := bus.PublishJSON(reply, response); publishErr != nil {
+		if publishErr := bus.PublishJSON(reply, identity.Stamp(response)); publishErr != nil {
 			return publishErr
 		}
 		return err

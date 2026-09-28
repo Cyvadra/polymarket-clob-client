@@ -325,7 +325,7 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	} else if err != nil {
 		return fmt.Errorf("load reconciliation intent: %w", err)
 	}
-	if err := protocol.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, intent.UniqueTag, updated.MatchedShares, reason, r.now()); err != nil {
+	if err := protocol.PublishExecutionOrderEvent(r.publish, updated.ExchangeOrderID, string(updated.State), updated.IntentID, intent.UniqueTag, intent.Strategy, updated.MatchedShares, reason, r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation event: %w", err)
 	}
 	if intent.IntentID == "" {

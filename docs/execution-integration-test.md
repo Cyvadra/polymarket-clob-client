@@ -34,8 +34,14 @@ and the subjects observed during the run.
 
 ## Prerequisites
 
-- A dedicated wallet, PostgreSQL database, and NATS account with exactly one
-  running `executiond`.
+- A dedicated wallet and PostgreSQL database, with an `executiond` whose
+  `EXECUTION_ALLOWED_STRATEGIES` includes the run's `--strategy`
+  (`executiontest` by default). Otherwise every request is ignored and the run
+  times out waiting for the open result.
+- Exactly one `executiond` on the NATS server allowing that strategy. Others
+  may share the server: the run reads position replies only from the wallet
+  that trades its strategy, and fails if a result lacks `strategy`,
+  `wallet_address`, or `signer_address`, or comes from a second wallet.
 - No other strategy or manual trading activity on the supplied asset while the
   tool runs.
 - The caller has independently verified the condition ID, asset/token ID,
@@ -86,7 +92,7 @@ All have usable defaults.
 | `--close-mode` | `auto` | `auto`, `limit`, or `force`. See [Close modes](#close-modes). |
 | `--hold` | `0` | Dwell between the confirmed open and the close. `0` skips the hold phase; it is uncapped, so only Ctrl-C interrupts a long hold. |
 | `--negative` | off | Run the invalid-schema rejection probe before the lifecycle. See [Negative probe](#negative-probe). |
-| `--strategy` | `executiontest` | Strategy and lane namespace. |
+| `--strategy` | `executiontest` | Strategy and lane namespace. It selects the `executiond` that runs the test: the one allowing this strategy. |
 | `--report-dir` | `reports/executiontest` | Directory for Markdown reports. |
 | `--case-timeout` | `5m` | Completion deadline sent to `executiond` as `complete_within_ms` (and as `expires_at`), and the base wait for a terminal open or close result. |
 | `--result-grace` | `30s` | Extra wait beyond `--case-timeout` for a terminal result, covering `executiond`'s own cancel-and-report lag once its deadline passes. |

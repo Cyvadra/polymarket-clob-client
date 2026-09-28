@@ -60,7 +60,7 @@ func deliverPositionQuery(t *testing.T, connector *fakeReplyConnector, request p
 func TestSubscribePositionQuerySubscribesAndReturnsAllPositions(t *testing.T) {
 	connector := &fakeReplyConnector{}
 	positions := fakePositionStore{records: queryPositions()}
-	if err := SubscribePositionQuery(connector, positions, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, positions, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if connector.subject != protocol.SubjectStrategyExecutionPositionQuery || connector.handler == nil {
@@ -85,7 +85,7 @@ func TestSubscribePositionQuerySubscribesAndReturnsAllPositions(t *testing.T) {
 func TestSubscribePositionQueryFiltersByCondition(t *testing.T) {
 	connector := &fakeReplyConnector{}
 	positions := fakePositionStore{records: queryPositions()}
-	if err := SubscribePositionQuery(connector, positions, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, positions, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	request := protocol.PositionQueryRequest{SchemaVersion: protocol.SchemaVersionV1, ConditionID: "condition-a"}
@@ -100,7 +100,7 @@ func TestSubscribePositionQueryFiltersByCondition(t *testing.T) {
 func TestSubscribePositionQueryFiltersByUniqueTag(t *testing.T) {
 	connector := &fakeReplyConnector{}
 	positions := fakePositionStore{records: queryPositions()}
-	if err := SubscribePositionQuery(connector, positions, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, positions, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	request := protocol.PositionQueryRequest{SchemaVersion: protocol.SchemaVersionV1, ConditionID: "condition-a", UniqueTag: "lane-b"}
@@ -115,7 +115,7 @@ func TestSubscribePositionQueryFiltersByUniqueTag(t *testing.T) {
 func TestSubscribePositionQueryFiltersByMarket(t *testing.T) {
 	connector := &fakeReplyConnector{}
 	positions := fakePositionStore{records: queryPositions()}
-	if err := SubscribePositionQuery(connector, positions, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, positions, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	request := protocol.PositionQueryRequest{SchemaVersion: protocol.SchemaVersionV1, MarketID: "market-b"}
@@ -130,7 +130,7 @@ func TestSubscribePositionQueryFiltersByMarket(t *testing.T) {
 func TestSubscribePositionQueryRejectsInvalidRequest(t *testing.T) {
 	connector := &fakeReplyConnector{}
 	positions := fakePositionStore{records: queryPositions()}
-	if err := SubscribePositionQuery(connector, positions, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, positions, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if err := deliverPositionQuery(t, connector, protocol.PositionQueryRequest{}); err == nil {
@@ -148,7 +148,7 @@ func TestSubscribePositionQueryRejectsInvalidRequest(t *testing.T) {
 // visible in this daemon's log alone.
 func TestPositionQueryRepliesWithAnErrorInsteadOfStayingSilent(t *testing.T) {
 	connector := &fakeReplyConnector{}
-	if err := SubscribePositionQuery(connector, fakePositionStore{records: queryPositions()}, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, fakePositionStore{records: queryPositions()}, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if err := deliverPositionQuery(t, connector, protocol.PositionQueryRequest{}); err == nil {
@@ -161,7 +161,7 @@ func TestPositionQueryRepliesWithAnErrorInsteadOfStayingSilent(t *testing.T) {
 
 func TestPositionQueryRepliesWithAnErrorOnUndecodablePayload(t *testing.T) {
 	connector := &fakeReplyConnector{}
-	if err := SubscribePositionQuery(connector, fakePositionStore{}, time.Now); err != nil {
+	if err := SubscribePositionQuery(connector, fakePositionStore{}, testIdentity, time.Now); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if err := connector.handler(context.Background(), "reply.subject", []byte("not json")); err == nil {

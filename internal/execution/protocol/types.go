@@ -185,6 +185,9 @@ const (
 type ExecutionOpenResult struct {
 	SchemaVersion string       `json:"schema_version"`
 	UniqueTag     string       `json:"unique_tag"`
+	Strategy      string       `json:"strategy,omitempty"`
+	WalletAddress string       `json:"wallet_address,omitempty"`
+	SignerAddress string       `json:"signer_address,omitempty"`
 	ConditionID   string       `json:"condition_id"`
 	TokenID       string       `json:"token_id"`
 	Outcome       string       `json:"outcome"`
@@ -200,6 +203,9 @@ type ExecutionOpenResult struct {
 type ExecutionCloseResult struct {
 	SchemaVersion string       `json:"schema_version"`
 	UniqueTag     string       `json:"unique_tag"`
+	Strategy      string       `json:"strategy,omitempty"`
+	WalletAddress string       `json:"wallet_address,omitempty"`
+	SignerAddress string       `json:"signer_address,omitempty"`
 	ConditionID   string       `json:"condition_id"`
 	AssetID       string       `json:"asset_id"`
 	Outcome       string       `json:"outcome"`
@@ -234,6 +240,9 @@ type ExecutionOrderEvent struct {
 	SchemaVersion   string    `json:"schema_version"`
 	IntentID        string    `json:"intent_id"`
 	UniqueTag       string    `json:"unique_tag,omitempty"`
+	Strategy        string    `json:"strategy,omitempty"`
+	WalletAddress   string    `json:"wallet_address,omitempty"`
+	SignerAddress   string    `json:"signer_address,omitempty"`
 	ExchangeOrderID string    `json:"exchange_order_id,omitempty"`
 	State           string    `json:"state"`
 	Reason          string    `json:"reason,omitempty"`
@@ -242,10 +251,10 @@ type ExecutionOrderEvent struct {
 }
 
 // PublishExecutionOrderEvent emits one order-lifecycle event. uniqueTag is the
-// lane the order belongs to, so a strategy can filter the shared subject to
-// its own orders; it may be empty for an event whose intent could not be
-// resolved.
-func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID string, orderState string, intentID, uniqueTag, matchedShares, reason string, occurredAt time.Time) error {
+// lane the order belongs to and strategy the one that asked for it, so a
+// strategy can filter the shared subject to its own orders; both may be empty
+// for an event whose intent could not be resolved.
+func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID string, orderState string, intentID, uniqueTag, strategy, matchedShares, reason string, occurredAt time.Time) error {
 	if publisher == nil {
 		return nil
 	}
@@ -257,6 +266,7 @@ func PublishExecutionOrderEvent(publisher ExecutionEventPublisher, orderID strin
 		SchemaVersion:   SchemaVersionV1,
 		IntentID:        intentID,
 		UniqueTag:       uniqueTag,
+		Strategy:        strategy,
 		ExchangeOrderID: orderID,
 		State:           orderState,
 		Reason:          reason,
@@ -272,16 +282,24 @@ type PositionQueryRequest struct {
 	UniqueTag     string `json:"unique_tag,omitempty"`
 }
 
+// PositionQueryResponse lists the positions of one wallet. Every executiond
+// on the bus answers a query, so the reply names the wallet it speaks for and
+// the strategies that wallet trades.
 type PositionQueryResponse struct {
-	SchemaVersion string            `json:"schema_version"`
-	Positions     []PositionFeature `json:"positions"`
-	Error         string            `json:"error,omitempty"`
+	SchemaVersion     string            `json:"schema_version"`
+	WalletAddress     string            `json:"wallet_address,omitempty"`
+	SignerAddress     string            `json:"signer_address,omitempty"`
+	AllowedStrategies []string          `json:"allowed_strategies"`
+	Positions         []PositionFeature `json:"positions"`
+	Error             string            `json:"error,omitempty"`
 }
 
 type PositionFeature struct {
 	SchemaVersion     string     `json:"schema_version"`
 	Seq               int64      `json:"seq"`
 	UniqueTag         string     `json:"unique_tag,omitempty"`
+	WalletAddress     string     `json:"wallet_address,omitempty"`
+	SignerAddress     string     `json:"signer_address,omitempty"`
 	MarketID          string     `json:"market_id,omitempty"`
 	ConditionID       string     `json:"condition_id"`
 	TokenID           string     `json:"token_id"`
@@ -308,9 +326,13 @@ type BalanceQueryRequest struct {
 // BalanceQueryResponse values the wallet: USDC cash plus recorded positions
 // marked at the best bid. Positions with no fresh quote are valued at their
 // entry price and counted in UnmarkedPositions, unless their market has
-// resolved (SettledPositions).
+// resolved (SettledPositions). Every executiond on the bus answers a query, so
+// the reply names the wallet it values and the strategies that wallet trades.
 type BalanceQueryResponse struct {
 	SchemaVersion     string    `json:"schema_version"`
+	WalletAddress     string    `json:"wallet_address,omitempty"`
+	SignerAddress     string    `json:"signer_address,omitempty"`
+	AllowedStrategies []string  `json:"allowed_strategies"`
 	CashUSD           float64   `json:"cash_usd"`
 	PositionsValueUSD float64   `json:"positions_value_usd"`
 	EquityUSD         float64   `json:"equity_usd"`

@@ -27,7 +27,7 @@ pmm market features -> strategy -> executiond -> Polymarket CLOB
 
 `pmm` produces market features and publishes quote snapshots. The strategy publishes open and close requests. `executiond` signs and submits orders, closes positions, consumes authenticated account events, persists order state, keeps position accounting, and uses the latest quote snapshot to plan the initial child order for the advanced execution styles.
 
-The service keeps durable state in PostgreSQL and exchanges strategy messages over core NATS. Request delivery is deliberately at-most-once: an expired or lost request is never replayed. An open request that decodes but fails validation receives a failure result. A close request gets no ACK or SUCCESS; its terminal result is reported only when the order actually ends. Invalid JSON cannot be answered. Run exactly one `executiond` instance per wallet.
+The service keeps durable state in PostgreSQL and exchanges strategy messages over core NATS. Request delivery is deliberately at-most-once: an expired or lost request is never replayed. An open request that decodes but fails validation receives a failure result. A close request gets no ACK or SUCCESS; its terminal result is reported only when the order actually ends. Invalid JSON cannot be answered. Run exactly one `executiond` instance per wallet. Several instances, each with its own wallet and database, may share one NATS server: each trades only the strategies listed in its required `EXECUTION_ALLOWED_STRATEGIES` and silently ignores requests for any other, and everything it publishes carries `strategy`, `wallet_address`, and `signer_address`.
 
 ### NATS contract
 
@@ -84,7 +84,7 @@ Closes are dispatched per lane, so retries on one lane never delay another.
 
 ### Position queries
 
-`strategy.execution.position.query` is a request/reply query. With no filter it returns every current position; it can also filter by `condition_id`, `market_id`, or `unique_tag`. The reply uses the same shape as `PositionFeature`.
+`strategy.execution.position.query` is a request/reply query. With no filter it returns every current position; it can also filter by `condition_id`, `market_id`, or `unique_tag`. The reply uses the same shape as `PositionFeature`. Every `executiond` on the NATS server answers, each for its own wallet, so with several instances read replies until the one with the wanted `wallet_address` or `allowed_strategies` arrives.
 
 ### Durability and recovery
 

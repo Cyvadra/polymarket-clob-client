@@ -106,6 +106,7 @@ them produces orders the exchange rejects.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `EXECUTION_NATS_URL` | No | Core NATS server URL; defaults to `nats://127.0.0.1:4222`. |
+| `EXECUTION_ALLOWED_STRATEGIES` | Yes | Comma-separated strategies this wallet trades, for example `late-gap,momentum`. `executiond` refuses to start without it. Requests for any other strategy are ignored silently, so several instances can share one NATS server; see [Several wallets on one NATS server](#several-wallets-on-one-nats-server). Names match exactly, including case. |
 | `EXECUTION_POSTGRES_URL` | No | PostgreSQL connection URL; defaults to `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable`. The default is a placeholder and must be replaced outside local development. |
 | `EXECUTION_MAX_EQUITY_FRACTION` | No | Largest `target_equity_fraction` an open request may carry, in (0, 1]; defaults to `0.25`. Larger fractions are rejected with `INVALID_INTENT`. It catches unit mistakes (`3` meant as 3%), and is not a risk limit. |
 | `EXECUTION_SIZE_AFTER_LOSS_ONLY` | No | `true` sizes `target_equity_fraction` opens from the equity recorded after the latest settled loss instead of live equity, so entry size changes only after a loss. Defaults to `false`. See [Loss-anchored sizing](#loss-anchored-sizing). |
@@ -114,6 +115,25 @@ them produces orders the exchange rejects.
 | `EXECUTION_EQUITY_FLOW_THRESHOLD_USD` | No | The smallest unexplained cash change between equity snapshots that counts as a deposit or withdrawal; defaults to `1`. Smaller residuals, such as rounding or rebates, stay in the trading return. |
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | Cap on the total notional of active BUY reservations, checked inside the reservation transaction. Unset means no cap; over-cap buys are rejected with `EXPOSURE_LIMIT`. |
 | `POLYMARKET_PROXY_URL` | No | Absolute `http`, `https`, or `socks5` URL for outbound CLOB traffic. Unset means a direct connection. |
+
+### Several wallets on one NATS server
+
+Run one `executiond` per wallet, each in its own environment with its own
+signing key and its own PostgreSQL database, and point them all at the same
+NATS server. Every instance receives every request and acts only on the
+strategies in its `EXECUTION_ALLOWED_STRATEGIES`.
+
+- Give each strategy to one wallet. Two instances that allow the same strategy
+  both place its orders. Nothing checks this across instances.
+- Never share a database between instances: reconciliation and settlement
+  treat every row as belonging to their own wallet.
+- A request for a strategy no instance allows gets no result, only a timeout
+  on the strategy side. The startup log line `trading strategies: ...` shows
+  what an instance accepts.
+- Results, order events, position features, and query replies carry
+  `wallet_address` and `signer_address`. Balance and position queries are
+  answered by every instance; see
+  [the protocol](protocol/nats-v1.md#queries-on-a-shared-server).
 
 ### Running on a separate host
 

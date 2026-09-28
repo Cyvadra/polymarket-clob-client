@@ -18,8 +18,9 @@ type EquitySource interface {
 
 // SubscribeBalanceQuery wires a request/reply handler for
 // strategy.execution.balance.query, answering with the wallet's cash and
-// equity.
-func SubscribeBalanceQuery(bus ReplyConnector, wallet EquitySource) error {
+// equity. Every executiond on the bus answers, so each reply carries the
+// identity of the wallet it values.
+func SubscribeBalanceQuery(bus ReplyConnector, wallet EquitySource, identity protocol.Identity) error {
 	if bus == nil || wallet == nil {
 		return fmt.Errorf("NATS connector and equity source are required")
 	}
@@ -32,7 +33,7 @@ func SubscribeBalanceQuery(bus ReplyConnector, wallet EquitySource) error {
 			// Always answer, as the position query does.
 			response = protocol.BalanceQueryResponse{SchemaVersion: protocol.SchemaVersionV1, Error: err.Error()}
 		}
-		if publishErr := bus.PublishJSON(reply, response); publishErr != nil {
+		if publishErr := bus.PublishJSON(reply, identity.Stamp(response)); publishErr != nil {
 			return publishErr
 		}
 		return err

@@ -173,7 +173,7 @@ func supersededBy(mode protocol.ExecutionCloseMode, candidate closeableOrder) bo
 
 func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declared rejection) {
 	if err := protocol.PublishExecutionCloseResult(e.publish, protocol.ExecutionCloseResult{
-		UniqueTag: intent.UniqueTag, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
+		UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.SideSell, Status: protocol.ResultFailed, ReasonCode: declared.code, Reason: declared.reason,
 		OccurredAt: e.now(),
 	}); err != nil {

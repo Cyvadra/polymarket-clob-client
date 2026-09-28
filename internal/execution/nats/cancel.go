@@ -24,14 +24,17 @@ type CloseExecutor interface {
 // returns at once; closes on different lanes then run concurrently while
 // closes on one lane still run in order. onError receives an ExecuteClose
 // failure, since the handler has already returned by the time it happens.
-func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, onError func(error)) error {
+//
+// A close for a strategy outside the allowlist belongs to another executiond
+// on the bus and is dropped silently, as an open is.
+func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, allowed *Allowlist, onError func(error)) error {
 	if ctx == nil {
 		return fmt.Errorf("context is required")
 	}
-	if bus == nil || execution == nil {
-		return fmt.Errorf("NATS subscriber and close executor are required")
+	if bus == nil || execution == nil || allowed == nil {
+		return fmt.Errorf("NATS subscriber, close executor, and strategy allowlist are required")
 	}
-	dispatcher := newCloseDispatcher(ctx, execution, onError)
+	dispatcher := newCloseDispatcher(ctx, execution, allowed, onError)
 	return bus.Subscribe(protocol.SubjectStrategyExecutionClose, dispatcher.handle)
 }
 
@@ -43,6 +46,7 @@ func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor
 type closeDispatcher struct {
 	ctx     context.Context
 	exec    CloseExecutor
+	allowed *Allowlist
 	onError func(error)
 
 	mu    sync.Mutex
@@ -55,14 +59,17 @@ type closeLane struct {
 	running bool
 }
 
-func newCloseDispatcher(ctx context.Context, exec CloseExecutor, onError func(error)) *closeDispatcher {
-	return &closeDispatcher{ctx: ctx, exec: exec, onError: onError, lanes: make(map[string]*closeLane)}
+func newCloseDispatcher(ctx context.Context, exec CloseExecutor, allowed *Allowlist, onError func(error)) *closeDispatcher {
+	return &closeDispatcher{ctx: ctx, exec: exec, allowed: allowed, onError: onError, lanes: make(map[string]*closeLane)}
 }
 
 func (d *closeDispatcher) handle(_ context.Context, payload []byte) error {
 	request, err := natsbus.DecodeJSON[protocol.ExecutionCloseRequest](payload)
 	if err != nil {
 		return err
+	}
+	if !d.allowed.Allows(request.Strategy) {
+		return nil
 	}
 	d.enqueue(request)
 	return nil

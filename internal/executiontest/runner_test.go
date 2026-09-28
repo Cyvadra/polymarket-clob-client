@@ -63,3 +63,41 @@ func TestResidualOrdersChecksEveryOrder(t *testing.T) {
 		t.Fatalf("expected no residual order once the limit close is canceled, got %+v", residual)
 	}
 }
+
+func TestResultIdentityRequiresStrategyAndWallet(t *testing.T) {
+	if err := resultIdentity("open result", "executiontest", "", "executiontest", "0xwallet", "0xsigner"); err != nil {
+		t.Fatalf("expected a complete identity to pass, got %v", err)
+	}
+	if err := resultIdentity("close result", "executiontest", "0xwallet", "executiontest", "0xwallet", "0xsigner"); err != nil {
+		t.Fatalf("expected the run's own wallet to pass, got %v", err)
+	}
+	for name, identity := range map[string][3]string{
+		"no strategy":      {"", "0xwallet", "0xsigner"},
+		"no wallet":        {"executiontest", "", "0xsigner"},
+		"no signer":        {"executiontest", "0xwallet", ""},
+		"another strategy": {"other", "0xwallet", "0xsigner"},
+	} {
+		if err := resultIdentity("open result", "executiontest", "", identity[0], identity[1], identity[2]); err == nil {
+			t.Fatalf("%s: expected the result to be refused", name)
+		}
+	}
+	if err := resultIdentity("close result", "executiontest", "0xwallet", "executiontest", "0xother", "0xsigner"); err == nil {
+		t.Fatal("expected a result from another wallet to be refused")
+	}
+}
+
+func TestAnswersForPicksTheExecutiondThatTradesTheStrategy(t *testing.T) {
+	reply := protocol.PositionQueryResponse{WalletAddress: "0xwallet", AllowedStrategies: []string{"late-gap", "executiontest"}}
+	if !answersFor(reply, "executiontest", "") || !answersFor(reply, "executiontest", "0xwallet") {
+		t.Fatal("expected the reply of the wallet trading the strategy to match")
+	}
+	if answersFor(reply, "momentum", "") {
+		t.Fatal("expected a wallet that does not trade the strategy to be skipped")
+	}
+	if answersFor(reply, "executiontest", "0xother") {
+		t.Fatal("expected another wallet to be skipped once the run's wallet is known")
+	}
+	if answersFor(protocol.PositionQueryResponse{}, "executiontest", "") {
+		t.Fatal("expected a reply without an identity to be skipped")
+	}
+}

@@ -271,7 +271,7 @@ func TestAveragePriceFallsBackToLimitOnlyForPostOnlyRestingOrders(t *testing.T) 
 func TestOrderConsumerStampsOrderEventWithLaneTag(t *testing.T) {
 	repository := &fakeOrderStore{
 		order:  store.SignedOrderRecord{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 2},
-		intent: store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentOpen, UniqueTag: "lane-xyz", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy},
+		intent: store.OrderIntentRecord{IntentID: "intent-1", Kind: store.IntentOpen, UniqueTag: "lane-xyz", Strategy: "late-gap", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy},
 	}
 	consumer, err := NewOrderConsumer(repository, time.Now)
 	if err != nil {
@@ -282,8 +282,8 @@ func TestOrderConsumerStampsOrderEventWithLaneTag(t *testing.T) {
 	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-1", Status: "CANCELED", MatchedShares: "1"}); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if len(publisher.orderEvents) != 1 || publisher.orderEvents[0].UniqueTag != "lane-xyz" {
-		t.Fatalf("expected the order event stamped with the lane tag, got %+v", publisher.orderEvents)
+	if len(publisher.orderEvents) != 1 || publisher.orderEvents[0].UniqueTag != "lane-xyz" || publisher.orderEvents[0].Strategy != "late-gap" {
+		t.Fatalf("expected the order event stamped with the lane tag and strategy, got %+v", publisher.orderEvents)
 	}
 }
 
@@ -301,7 +301,7 @@ func TestOrderConsumerPublishesUntaggedEventWhenIntentGone(t *testing.T) {
 	if err := consumer.Consume(context.Background(), AccountOrderEvent{SchemaVersion: protocol.SchemaVersionV1, EventID: "event-1", ExchangeOrderID: "order-2", Status: "CANCELED", MatchedShares: "0"}); err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if len(publisher.orderEvents) != 1 || publisher.orderEvents[0].UniqueTag != "" {
+	if len(publisher.orderEvents) != 1 || publisher.orderEvents[0].UniqueTag != "" || publisher.orderEvents[0].Strategy != "" {
 		t.Fatalf("expected one untagged order event, got %+v", publisher.orderEvents)
 	}
 	if len(publisher.results) != 0 {

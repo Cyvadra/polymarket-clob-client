@@ -1,9 +1,17 @@
 package main
 
 import (
+	"os"
 	"testing"
 	"time"
 )
+
+// Every config needs the strategies the wallet trades; tests of other
+// settings run with one in place.
+func TestMain(m *testing.M) {
+	os.Setenv("EXECUTION_ALLOWED_STRATEGIES", "strategy")
+	os.Exit(m.Run())
+}
 
 func withEnv(t *testing.T, kv map[string]string) {
 	t.Helper()
@@ -92,5 +100,25 @@ func TestConfigFromEnvDrawdownLimit(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		})
+	}
+}
+
+func TestConfigFromEnvRequiresAllowedStrategies(t *testing.T) {
+	for _, value := range []string{"", " ", ","} {
+		withEnv(t, map[string]string{"EXECUTION_ALLOWED_STRATEGIES": value})
+		if _, err := configFromEnv(); err == nil {
+			t.Fatalf("expected %q to be rejected", value)
+		}
+	}
+}
+
+func TestConfigFromEnvReadsAllowedStrategies(t *testing.T) {
+	withEnv(t, map[string]string{"EXECUTION_ALLOWED_STRATEGIES": "late-gap, momentum"})
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if !cfg.AllowedStrategies.Allows("late-gap") || !cfg.AllowedStrategies.Allows("momentum") || cfg.AllowedStrategies.Allows("other") {
+		t.Fatalf("allowed=%v", cfg.AllowedStrategies.Names())
 	}
 }

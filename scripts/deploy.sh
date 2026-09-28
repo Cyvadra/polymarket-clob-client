@@ -95,6 +95,11 @@ require_private_bundle() {
 	fi
 	grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=[^[:space:]]+' "$env_file" || \
 		fail "$env_file must set EXECUTION_POSTGRES_URL"
+	# executiond refuses to start without the strategies its wallet trades.
+	# An optional quote may wrap the value, but "" or '' is still empty.
+	local strategies_pattern="^[[:space:]]*EXECUTION_ALLOWED_STRATEGIES=[[:space:]]*[\"']?[[:space:]]*[^,[:space:]\"']"
+	grep -Eq "$strategies_pattern" "$env_file" || \
+		fail "$env_file must set EXECUTION_ALLOWED_STRATEGIES to the strategies this wallet trades"
 	if grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=postgres://user:password@127\.0\.0\.1:5432/execution' "$env_file"; then
 		fail "$env_file still uses the placeholder EXECUTION_POSTGRES_URL; point it at the real database"
 	fi

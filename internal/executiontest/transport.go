@@ -201,25 +201,60 @@ func payloadTag(payload []byte) string {
 	return envelope.UniqueTag
 }
 
-func (o *Observer) Query(ctx context.Context, request protocol.PositionQueryRequest) (protocol.PositionQueryResponse, error) {
+// Query asks for positions and returns the reply of the executiond that
+// trades strategy. Every executiond on the bus answers a query, so replies are
+// read until one comes from a wallet that allows the strategy; once the run
+// knows which wallet filled its open, wallet narrows the match to it.
+func (o *Observer) Query(ctx context.Context, request protocol.PositionQueryRequest, strategy, wallet string) (protocol.PositionQueryResponse, error) {
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return protocol.PositionQueryResponse{}, err
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, o.queryTimeout)
 	defer cancel()
-	message, err := o.conn.RequestWithContext(requestCtx, protocol.SubjectStrategyExecutionPositionQuery, payload)
+	inbox := o.conn.NewRespInbox()
+	replies, err := o.conn.SubscribeSync(inbox)
 	if err != nil {
 		return protocol.PositionQueryResponse{}, fmt.Errorf("position query: %w", err)
 	}
-	var response protocol.PositionQueryResponse
-	if err := json.Unmarshal(message.Data, &response); err != nil {
-		return response, fmt.Errorf("decode position query response: %w", err)
+	defer func() { _ = replies.Unsubscribe() }()
+	if err := o.conn.PublishRequest(protocol.SubjectStrategyExecutionPositionQuery, inbox, payload); err != nil {
+		return protocol.PositionQueryResponse{}, fmt.Errorf("position query: %w", err)
 	}
-	if response.Error != "" {
-		return response, fmt.Errorf("position query response: %s", response.Error)
+	others := 0
+	for {
+		message, err := replies.NextMsgWithContext(requestCtx)
+		if err != nil {
+			return protocol.PositionQueryResponse{}, fmt.Errorf("position query: no reply from an executiond that trades strategy %q (%d other replies): %w", strategy, others, err)
+		}
+		var response protocol.PositionQueryResponse
+		if err := json.Unmarshal(message.Data, &response); err != nil {
+			return response, fmt.Errorf("decode position query response: %w", err)
+		}
+		if !answersFor(response, strategy, wallet) {
+			others++
+			continue
+		}
+		if response.Error != "" {
+			return response, fmt.Errorf("position query response: %s", response.Error)
+		}
+		return response, nil
 	}
-	return response, nil
+}
+
+// answersFor reports whether a position reply comes from the executiond this
+// run talks to: one that trades strategy and, when wallet is known, that
+// wallet.
+func answersFor(response protocol.PositionQueryResponse, strategy, wallet string) bool {
+	if wallet != "" && response.WalletAddress != wallet {
+		return false
+	}
+	for _, allowed := range response.AllowedStrategies {
+		if allowed == strategy {
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Observer) Messages() []WireMessage {
