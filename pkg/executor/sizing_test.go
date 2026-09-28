@@ -115,11 +115,13 @@ func TestExecuteOpenRejectsWhileTheGateIsShut(t *testing.T) {
 	exec.SetOpenGate(fakeGate{suspended: true})
 	pub := &resultPublisher{}
 	exec.SetEventPublisher(pub)
-	if err := exec.ExecuteOpen(context.Background(), equityOpenRequest()); err == nil {
+	req := equityOpenRequest()
+	req.RequestID = "req-open"
+	if err := exec.ExecuteOpen(context.Background(), req); err == nil {
 		t.Fatal("expected rejection")
 	}
 	result, ok := pub.value.(protocol.ExecutionOpenResult)
-	if !ok || result.ReasonCode != protocol.ReasonDrawdownLimit || result.Reason == "" {
+	if !ok || result.ReasonCode != protocol.ReasonDrawdownLimit || result.Reason == "" || result.RequestID != "req-open" {
 		t.Fatalf("result=%+v", pub.value)
 	}
 	if sizer.fraction != "" || len(storer.insertedIntents) != 0 || client.submissions != 0 {

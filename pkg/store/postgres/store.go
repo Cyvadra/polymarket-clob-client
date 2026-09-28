@@ -145,20 +145,20 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 			token_id, outcome, side, target_usd, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at,
-			target_equity_fraction, sized_equity_usd
+			target_equity_fraction, sized_equity_usd, request_id
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, NULLIF($11, '')::numeric, $12,
 			$13, $14, $15, $16, $17,
 			$18, $19, $20, $21,
-			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric
+			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric, $24
 		)
 		ON CONFLICT (intent_id) DO NOTHING
 	`, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt,
-		record.TargetEquityFraction, record.SizedEquityUSD)
+		record.TargetEquityFraction, record.SizedEquityUSD, record.RequestID)
 	if err != nil {
 		return false, fmt.Errorf("insert intent: %w", err)
 	}
@@ -173,7 +173,7 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 		SELECT intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
-			status, policy, created_at, updated_at
+			status, policy, created_at, updated_at, request_id
 		FROM order_intents
 		WHERE intent_id = $1
 	`, intentID)
@@ -192,7 +192,7 @@ func (s *Store) LatestLimitCloseIntent(ctx context.Context, conditionID, tokenID
 		SELECT intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
-			status, policy, created_at, updated_at
+			status, policy, created_at, updated_at, request_id
 		FROM order_intents
 		WHERE condition_id = $1 AND token_id = $2 AND unique_tag = $3
 			AND kind = 'CLOSE' AND time_in_force <> 'FAK'
@@ -1027,7 +1027,7 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 		&record.IntentID, &record.UniqueTag, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &featureCompletedAt, &expiresAt,
-		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt,
+		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt, &record.RequestID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.OrderIntentRecord{}, store.ErrNotFound

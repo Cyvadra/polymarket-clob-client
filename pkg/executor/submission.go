@@ -48,6 +48,7 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 	intent := protocol.ExecutionIntent{
 		SchemaVersion:      req.SchemaVersion,
 		IntentID:           newExecutionID(),
+		RequestID:          req.RequestID,
 		UniqueTag:          req.UniqueTag,
 		Strategy:           req.Strategy,
 		Kind:               protocol.IntentOpen,
@@ -133,7 +134,7 @@ func (e *Executor) publishOpenResult(intent protocol.ExecutionIntent, status pro
 		average = 0
 	}
 	if err := protocol.PublishExecutionOpenResult(e.publish, protocol.ExecutionOpenResult{
-		UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
+		RequestID: intent.RequestID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
 		Status: status, ReasonCode: code, Reason: reason,
 		FilledShares: filled, AveragePrice: average, OccurredAt: e.now(),
 	}); err != nil && e.onError != nil {

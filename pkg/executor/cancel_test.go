@@ -44,12 +44,20 @@ func TestExecuteCloseLimitRejectedPublishesFailedResult(t *testing.T) {
 	}
 	pub := &recordingPublisher{}
 	exec.SetEventPublisher(pub)
-	if err := exec.ExecuteClose(context.Background(), closeRequest(protocol.ExecutionCloseModeLimit)); err == nil {
+	req := closeRequest(protocol.ExecutionCloseModeLimit)
+	req.RequestID = "req-close"
+	if err := exec.ExecuteClose(context.Background(), req); err == nil {
 		t.Fatal("expected the exchange rejection to be returned")
 	}
 	results := closeResults(pub)
 	if len(results) != 1 || results[0].Status != protocol.ResultFailed || results[0].ReasonCode != protocol.ReasonOrderRejected || results[0].UniqueTag != "lane-a" || results[0].Strategy != "strategy" || results[0].AssetID != "token" {
 		t.Fatalf("expected one FAILED ORDER_REJECTED close result for the lane, got %+v", results)
+	}
+	if results[0].RequestID != "req-close" || results[0].Mode != protocol.ExecutionCloseModeLimit {
+		t.Fatalf("the rejection must echo the request id and mode, got %+v", results[0])
+	}
+	if len(storer.insertedIntents) != 1 || storer.insertedIntents[0].RequestID != "req-close" {
+		t.Fatalf("the close intent must store the request id, got %+v", storer.insertedIntents)
 	}
 	if client.submissions != 1 {
 		t.Fatalf("expected a non-balance rejection not to be retried, got %d submissions", client.submissions)

@@ -82,6 +82,7 @@ type ExecutionPolicy struct {
 type ExecutionIntent struct {
 	SchemaVersion string     `json:"schema_version"`
 	IntentID      string     `json:"intent_id"`
+	RequestID     string     `json:"request_id,omitempty"`
 	UniqueTag     string     `json:"unique_tag"`
 	Strategy      string     `json:"strategy"`
 	Kind          IntentKind `json:"kind"`
@@ -108,15 +109,19 @@ type ExecutionIntent struct {
 
 type ExecutionOpenRequest struct {
 	SchemaVersion string `json:"schema_version"`
-	UniqueTag     string `json:"unique_tag"`
-	Strategy      string `json:"strategy"`
-	MarketID      string `json:"market_id,omitempty"`
-	EventSlug     string `json:"event_slug,omitempty"`
-	ConditionID   string `json:"condition_id"`
-	TokenID       string `json:"token_id"`
-	Outcome       string `json:"outcome"`
-	Side          Side   `json:"side"`
-	TargetUSD     string `json:"target_usd,omitempty"`
+	// RequestID is the requester's name for this request, echoed on every
+	// result it produces so a requester talking to several instances can
+	// match each answer to its question. Opaque here; may be empty.
+	RequestID   string `json:"request_id,omitempty"`
+	UniqueTag   string `json:"unique_tag"`
+	Strategy    string `json:"strategy"`
+	MarketID    string `json:"market_id,omitempty"`
+	EventSlug   string `json:"event_slug,omitempty"`
+	ConditionID string `json:"condition_id"`
+	TokenID     string `json:"token_id"`
+	Outcome     string `json:"outcome"`
+	Side        Side   `json:"side"`
+	TargetUSD   string `json:"target_usd,omitempty"`
 	// TargetEquityFraction sizes the open as a fraction of wallet equity
 	// (0.03 = 3%) instead of TargetUSD. Exactly one of the two must be set.
 	TargetEquityFraction string          `json:"target_equity_fraction,omitempty"`
@@ -147,6 +152,7 @@ const (
 
 type ExecutionCloseRequest struct {
 	SchemaVersion string             `json:"schema_version"`
+	RequestID     string             `json:"request_id,omitempty"` // echoed on its results, as for an open
 	UniqueTag     string             `json:"unique_tag"`
 	Strategy      string             `json:"strategy"`
 	ConditionID   string             `json:"condition_id"`
@@ -184,6 +190,7 @@ const (
 
 type ExecutionOpenResult struct {
 	SchemaVersion string       `json:"schema_version"`
+	RequestID     string       `json:"request_id,omitempty"`
 	UniqueTag     string       `json:"unique_tag"`
 	Strategy      string       `json:"strategy,omitempty"`
 	WalletAddress string       `json:"wallet_address,omitempty"`
@@ -201,21 +208,26 @@ type ExecutionOpenResult struct {
 }
 
 type ExecutionCloseResult struct {
-	SchemaVersion string       `json:"schema_version"`
-	UniqueTag     string       `json:"unique_tag"`
-	Strategy      string       `json:"strategy,omitempty"`
-	WalletAddress string       `json:"wallet_address,omitempty"`
-	SignerAddress string       `json:"signer_address,omitempty"`
-	ConditionID   string       `json:"condition_id"`
-	AssetID       string       `json:"asset_id"`
-	Outcome       string       `json:"outcome"`
-	Side          Side         `json:"side"`
-	Status        ResultStatus `json:"status"`
-	ReasonCode    string       `json:"reason_code,omitempty"`
-	Reason        string       `json:"reason,omitempty"`
-	FilledShares  float64      `json:"filled_shares,omitempty"`
-	AveragePrice  float64      `json:"average_price,omitempty"`
-	OccurredAt    time.Time    `json:"occurred_at"`
+	SchemaVersion string `json:"schema_version"`
+	RequestID     string `json:"request_id,omitempty"`
+	// Mode is the close mode the result answers. Only a LIMIT_CLOSE produces
+	// one today (a FORCE_CLOSE is confirmed from the position, a CANCEL_OPEN
+	// by its open's own result), but a reader should not have to know that.
+	Mode          ExecutionCloseMode `json:"mode,omitempty"`
+	UniqueTag     string             `json:"unique_tag"`
+	Strategy      string             `json:"strategy,omitempty"`
+	WalletAddress string             `json:"wallet_address,omitempty"`
+	SignerAddress string             `json:"signer_address,omitempty"`
+	ConditionID   string             `json:"condition_id"`
+	AssetID       string             `json:"asset_id"`
+	Outcome       string             `json:"outcome"`
+	Side          Side               `json:"side"`
+	Status        ResultStatus       `json:"status"`
+	ReasonCode    string             `json:"reason_code,omitempty"`
+	Reason        string             `json:"reason,omitempty"`
+	FilledShares  float64            `json:"filled_shares,omitempty"`
+	AveragePrice  float64            `json:"average_price,omitempty"`
+	OccurredAt    time.Time          `json:"occurred_at"`
 }
 
 func PublishExecutionOpenResult(publisher ExecutionEventPublisher, result ExecutionOpenResult) error {

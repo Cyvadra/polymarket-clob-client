@@ -57,6 +57,7 @@ const StrategyChildSequence = 1
 
 type OrderIntentRecord struct {
 	IntentID    string
+	RequestID   string // the requester's id, echoed on results; empty if none was sent
 	UniqueTag   string
 	Strategy    string
 	Kind        IntentKind

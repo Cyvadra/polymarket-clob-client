@@ -36,7 +36,7 @@ func laneWithRestingClose(revision int64) *fakeStore {
 			State: statemachine.StateLive, Revision: 1, RequestedShares: "6", MatchedShares: "0",
 		},
 		intent: store.OrderIntentRecord{
-			IntentID: "close-1", UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition",
+			IntentID: "close-1", RequestID: "req-close", UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition",
 			TokenID: "token", Outcome: "Up", Kind: store.IntentClose, Side: "SELL",
 			LimitPrice: "0.55", TimeInForce: "GTC", Status: statemachine.StateLive,
 		},
@@ -92,6 +92,11 @@ func TestMaintainClosesReplacesRestingCloseAtTheGrownSize(t *testing.T) {
 	// available_size 4 plus the 6 the resting order holds in reserve.
 	if client.created.Shares != 10 {
 		t.Fatalf("expected the replacement to cover the whole position, got %v", client.created.Shares)
+	}
+	// The replacement answers the request that placed the original close.
+	last := storer.insertedIntents[len(storer.insertedIntents)-1]
+	if last.RequestID != "req-close" {
+		t.Fatalf("expected the replacement to keep the request id, got %q", last.RequestID)
 	}
 }
 

@@ -173,7 +173,7 @@ func TestTerminalResultPartiallyFilledIsNotTerminal(t *testing.T) {
 
 func TestTerminalCloseResultMapsStates(t *testing.T) {
 	at := time.Unix(100, 0).UTC()
-	closeIntent := store.OrderIntentRecord{IntentID: "intent", Strategy: "late-gap", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
+	closeIntent := store.OrderIntentRecord{IntentID: "intent", RequestID: "req", TimeInForce: store.TimeInForce(protocol.TimeInForceGTC), Strategy: "late-gap", Kind: store.IntentClose, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideSell}
 	cases := []struct {
 		state  statemachine.State
 		status protocol.ResultStatus
@@ -196,6 +196,9 @@ func TestTerminalCloseResultMapsStates(t *testing.T) {
 		}
 		if result.Status != tc.status {
 			t.Fatalf("state %s status=%s want %s", tc.state, result.Status, tc.status)
+		}
+		if result.RequestID != "req" || result.Mode != protocol.ExecutionCloseModeLimit {
+			t.Fatalf("state %s: request id and mode not echoed: %+v", tc.state, result)
 		}
 		if result.AssetID != "token" || result.Side != protocol.SideSell || result.Strategy != "late-gap" {
 			t.Fatalf("unexpected close identity: %+v", result)

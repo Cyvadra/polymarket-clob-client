@@ -159,6 +159,37 @@ func TestIntentStatusMirrorsOrderLifecycle(t *testing.T) {
 	}
 }
 
+// The requester's id must survive the round trip: every result an intent
+// produces echoes it, including one from a close re-placed from the stored
+// intent. An intent stored without one reads back empty.
+func TestIntentRequestIDRoundTrips(t *testing.T) {
+	s := testStore(t)
+	lane := newTestLane(t, s)
+	ctx := context.Background()
+	closeID := lane.id("close")
+	_, err := s.InsertIntent(ctx, store.OrderIntentRecord{
+		IntentID: closeID, RequestID: "req-1", UniqueTag: lane.tag, Strategy: "test", Kind: store.IntentClose,
+		ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up", Side: store.SideSell,
+		LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
+	})
+	if err != nil {
+		t.Fatalf("insert close intent: %v", err)
+	}
+	intent, err := s.Intent(ctx, closeID)
+	if err != nil || intent.RequestID != "req-1" {
+		t.Fatalf("Intent: request_id=%q err=%v", intent.RequestID, err)
+	}
+	latest, err := s.LatestLimitCloseIntent(ctx, lane.conditionID, lane.tokenID, lane.tag)
+	if err != nil || latest.RequestID != "req-1" {
+		t.Fatalf("LatestLimitCloseIntent: request_id=%q err=%v", latest.RequestID, err)
+	}
+	openID := lane.id("open")
+	seedIntent(t, s, lane, openID)
+	if intent, err := s.Intent(ctx, openID); err != nil || intent.RequestID != "" {
+		t.Fatalf("intent without a request id: request_id=%q err=%v", intent.RequestID, err)
+	}
+}
+
 func TestApplyFillThenFailedReversesPosition(t *testing.T) {
 	s := testStore(t)
 	lane := newTestLane(t, s)

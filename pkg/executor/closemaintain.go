@@ -331,15 +331,17 @@ func closeRequestFrom(intent store.OrderIntentRecord) protocol.ExecutionCloseReq
 	wire := mapping.ExecutionIntent(intent)
 	return protocol.ExecutionCloseRequest{
 		SchemaVersion: protocol.SchemaVersionV1,
-		UniqueTag:     intent.UniqueTag,
-		Strategy:      intent.Strategy,
-		ConditionID:   intent.ConditionID,
-		AssetID:       intent.TokenID,
-		Outcome:       intent.Outcome,
-		Mode:          protocol.ExecutionCloseModeLimit,
-		LimitPrice:    intent.LimitPrice,
-		TimeInForce:   protocol.TimeInForce(intent.TimeInForce),
-		Policy:        wire.Policy,
+		// A resized close answers the request that placed the original.
+		RequestID:   intent.RequestID,
+		UniqueTag:   intent.UniqueTag,
+		Strategy:    intent.Strategy,
+		ConditionID: intent.ConditionID,
+		AssetID:     intent.TokenID,
+		Outcome:     intent.Outcome,
+		Mode:        protocol.ExecutionCloseModeLimit,
+		LimitPrice:  intent.LimitPrice,
+		TimeInForce: protocol.TimeInForce(intent.TimeInForce),
+		Policy:      wire.Policy,
 	}
 }
 

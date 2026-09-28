@@ -173,7 +173,7 @@ func supersededBy(mode protocol.ExecutionCloseMode, candidate closeableOrder) bo
 
 func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declared rejection) {
 	if err := protocol.PublishExecutionCloseResult(e.publish, protocol.ExecutionCloseResult{
-		UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
+		RequestID: intent.RequestID, Mode: protocol.ExecutionCloseModeLimit, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, AssetID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.SideSell, Status: protocol.ResultFailed, ReasonCode: declared.code, Reason: declared.reason,
 		OccurredAt: e.now(),
 	}); err != nil {
@@ -243,6 +243,7 @@ func (e *Executor) closeIntent(req protocol.ExecutionCloseRequest) protocol.Exec
 	intent := protocol.ExecutionIntent{
 		SchemaVersion: req.SchemaVersion,
 		IntentID:      newExecutionID(),
+		RequestID:     req.RequestID,
 		UniqueTag:     req.UniqueTag,
 		Strategy:      req.Strategy,
 		Kind:          protocol.IntentClose,

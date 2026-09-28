@@ -208,7 +208,7 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 		"intent-1", "lane-a", "probe", "OPEN", "market", "slug", "condition",
 		"token", "Up", "BUY", "1.20", "0.49",
 		"GTC", false, int64(0), nil, nil,
-		"INTENT_RECEIVED", []byte(`{}`), now, now,
+		"INTENT_RECEIVED", []byte(`{}`), now, now, "req-1",
 	}}
 	record, err := scanIntent(row)
 	if err != nil {
@@ -217,7 +217,7 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 	if !record.FeatureCompletedAt.IsZero() || !record.ExpiresAt.IsZero() {
 		t.Fatalf("NULL timestamps must read back as zero times: %+v", record)
 	}
-	if record.IntentID != "intent-1" || record.TargetUSD != "1.20" || record.UpdatedAt != now {
+	if record.IntentID != "intent-1" || record.RequestID != "req-1" || record.TargetUSD != "1.20" || record.UpdatedAt != now {
 		t.Fatalf("unexpected record: %+v", record)
 	}
 
