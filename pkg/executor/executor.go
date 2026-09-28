@@ -35,6 +35,11 @@ type repository interface {
 	store.ExecutionStore
 	store.PositionStore
 	store.PositionReconciler
+	// LanePosition reads one lane's position row; found is false when the
+	// wallet has none. Every close checks its lane, and a close for another
+	// wallet's strategy checks it to learn the lane is not held here, so it
+	// must not cost a read of every position.
+	LanePosition(ctx context.Context, conditionID, tokenID, uniqueTag string) (position store.PositionRecord, found bool, err error)
 }
 
 type Executor struct {

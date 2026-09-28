@@ -958,6 +958,18 @@ func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, unique
 	return true, nil
 }
 
+// LanePosition reads the position row of one lane, by its primary key.
+func (s *Store) LanePosition(ctx context.Context, conditionID, tokenID, uniqueTag string) (store.PositionRecord, bool, error) {
+	position, err := scanPosition(s.pool.QueryRow(ctx, positionSelectSQL()+" WHERE p.condition_id = $1 AND p.token_id = $2 AND p.unique_tag = $3", conditionID, tokenID, uniqueTag))
+	if errors.Is(err, store.ErrNotFound) {
+		return store.PositionRecord{}, false, nil
+	}
+	if err != nil {
+		return store.PositionRecord{}, false, fmt.Errorf("query lane position: %w", err)
+	}
+	return position, true, nil
+}
+
 func (s *Store) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
 	rows, err := s.pool.Query(ctx, positionSelectSQL()+" ORDER BY condition_id, token_id, unique_tag")
 	if err != nil {

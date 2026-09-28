@@ -449,6 +449,35 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 // ReconcilePositionSize adopts the exchange's own view of a lane when it is
 // smaller than the local fill ledger, and never inflates one: an unseen fill
 // must arrive as a fill, not as a clamp.
+// LanePosition finds one lane by its key and reports a lane the wallet never
+// held as not found, so a close for another wallet's strategy is answered
+// without reading every position.
+func TestLanePositionReadsOneLane(t *testing.T) {
+	s := testStore(t)
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
+	ctx := context.Background()
+	if _, found, err := s.LanePosition(ctx, lane.conditionID, lane.tokenID, lane.tag); err != nil || found {
+		t.Fatalf("before any fill: found=%v err=%v", found, err)
+	}
+	if _, err := s.ApplyFill(ctx, store.FillRecord{
+		FillID: lane.id("fill-lane"), ExchangeOrderID: intentID + "-exchange", IntentID: intentID, UniqueTag: lane.tag,
+		MarketID: "market", ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up",
+		Side: store.SideBuy, Shares: "4", Price: "0.5", TradeStatus: "CONFIRMED",
+	}); err != nil {
+		t.Fatalf("seed position: %v", err)
+	}
+	position, found, err := s.LanePosition(ctx, lane.conditionID, lane.tokenID, lane.tag)
+	if err != nil || !found || position.UniqueTag != lane.tag || position.OpenLots != 1 {
+		t.Fatalf("lane position: %+v found=%v err=%v", position, found, err)
+	}
+	if _, found, err := s.LanePosition(ctx, lane.conditionID, lane.tokenID, lane.tag+"-other"); err != nil || found {
+		t.Fatalf("another lane's key: found=%v err=%v", found, err)
+	}
+}
+
 func TestReconcilePositionSizeClampsDownOnly(t *testing.T) {
 	s := testStore(t)
 	lane := newTestLane(t, s)

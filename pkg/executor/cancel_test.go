@@ -431,6 +431,11 @@ func (s *lockedStore) PositionFeatures(ctx context.Context) ([]store.PositionRec
 	defer s.mu.Unlock()
 	return s.fakeStore.PositionFeatures(ctx)
 }
+func (s *lockedStore) LanePosition(ctx context.Context, conditionID, tokenID, uniqueTag string) (store.PositionRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.LanePosition(ctx, conditionID, tokenID, uniqueTag)
+}
 func (s *lockedStore) TransitionOrder(ctx context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, reason string) (store.SignedOrderRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -483,16 +483,11 @@ func (e *Executor) forceClosePosition(ctx context.Context, intent store.OrderInt
 }
 
 func (e *Executor) positionFor(ctx context.Context, conditionID, tokenID, uniqueTag string) (store.PositionRecord, bool, error) {
-	positions, err := e.store.PositionFeatures(ctx)
+	position, found, err := e.store.LanePosition(ctx, conditionID, tokenID, uniqueTag)
 	if err != nil {
-		return store.PositionRecord{}, false, fmt.Errorf("load positions: %w", err)
+		return store.PositionRecord{}, false, fmt.Errorf("load position: %w", err)
 	}
-	for _, candidate := range positions {
-		if candidate.ConditionID == conditionID && candidate.TokenID == tokenID && candidate.UniqueTag == uniqueTag {
-			return candidate, true, nil
-		}
-	}
-	return store.PositionRecord{}, false, nil
+	return position, found, nil
 }
 
 // HoldsLane reports whether this wallet holds a position on the close's lane.

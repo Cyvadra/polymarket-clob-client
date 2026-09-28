@@ -22,10 +22,13 @@ func NewIdentity(signer, maker string, allowedStrategies []string) Identity {
 	return Identity{WalletAddress: wallet, SignerAddress: signer, AllowedStrategies: append([]string{}, allowedStrategies...)}
 }
 
-// Strategies returns a copy of the allowed strategies, never nil, so a reply
-// always carries a JSON array.
+// Strategies returns the allowed strategies, never nil, so a reply always
+// carries a JSON array. NewIdentity owns the copy; callers must not modify it.
 func (i Identity) Strategies() []string {
-	return append([]string{}, i.AllowedStrategies...)
+	if i.AllowedStrategies == nil {
+		return []string{}
+	}
+	return i.AllowedStrategies
 }
 
 type identityPublisher struct {

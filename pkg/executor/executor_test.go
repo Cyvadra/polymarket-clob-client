@@ -165,6 +165,15 @@ func (s *fakeStore) PositionFeatures(context.Context) ([]store.PositionRecord, e
 	return s.positions, nil
 }
 
+func (s *fakeStore) LanePosition(_ context.Context, conditionID, tokenID, uniqueTag string) (store.PositionRecord, bool, error) {
+	for _, p := range s.positions {
+		if p.ConditionID == conditionID && p.TokenID == tokenID && p.UniqueTag == uniqueTag {
+			return p, true, nil
+		}
+	}
+	return store.PositionRecord{}, false, nil
+}
+
 func (s *fakeStore) ReconcilePositionSize(_ context.Context, conditionID, tokenID, uniqueTag, shares string) error {
 	s.reconciled = append(s.reconciled, reconciledPosition{conditionID: conditionID, tokenID: tokenID, uniqueTag: uniqueTag, shares: shares})
 	for i, position := range s.positions {
