@@ -490,10 +490,15 @@ func (e *Executor) positionFor(ctx context.Context, conditionID, tokenID, unique
 	return position, found, nil
 }
 
-// HoldsLane reports whether this wallet holds a position on the close's lane.
+// HoldsLane reports whether this wallet holds shares on the close's lane.
 // A close for a strategy no longer in the allowlist is still honored for a
 // lane the wallet opened under it, or the position could never be closed.
+// Position rows outlive their shares, so a row alone does not make the lane
+// held: an emptied lane belongs to whichever wallet trades it now.
 func (e *Executor) HoldsLane(ctx context.Context, req protocol.ExecutionCloseRequest) (bool, error) {
-	_, ok, err := e.positionFor(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
-	return ok, err
+	position, found, err := e.positionFor(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
+	if err != nil || !found {
+		return false, err
+	}
+	return decimal.Positive(position.ActualShares), nil
 }
