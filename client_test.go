@@ -388,3 +388,23 @@ func TestMinOrderSizeDoesNotCacheTransientFailures(t *testing.T) {
 		t.Fatalf("size = %v, want 5", size)
 	}
 }
+
+func TestPoly1271OrderNamesTheDepositWalletAsSigner(t *testing.T) {
+	wallet := "0x00000000000000000000000000000000000000Aa"
+	for sigType, wantWallet := range map[SignatureType]bool{SignatureTypePoly1271: true, SignatureTypeGnosisSafe: false} {
+		client, err := New(Config{PrivateKey: testKey, MakerAddress: wallet, SignatureType: sigType, ChainID: 137})
+		if err != nil {
+			t.Fatal(err)
+		}
+		signed, err := client.signOrder(UserOrder{TokenID: "1", Side: SideBuy, Price: 0.5, Shares: 10}, 0.01, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.EqualFold(signed.Signer, wallet); got != wantWallet {
+			t.Errorf("signature type %d: signer %s, maker %s", sigType, signed.Signer, signed.Maker)
+		}
+		if !strings.EqualFold(signed.Maker, wallet) {
+			t.Errorf("signature type %d: maker %s, want the wallet", sigType, signed.Maker)
+		}
+	}
+}

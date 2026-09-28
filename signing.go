@@ -84,6 +84,13 @@ func (c *Client) signOrder(order UserOrder, tickSize float64, negRisk bool) (Sig
 	}
 	maker := common.HexToAddress(c.cfg.MakerAddress)
 	signer := common.HexToAddress(c.signer)
+	// A deposit wallet (Poly 1271) signs through ERC-1271, so the order names
+	// the wallet as its own signer; the exchange refuses the key's address
+	// there ("the order signer address has to be the address of the API KEY").
+	// Matches Polymarket's rs-clob-client order_builder.
+	if c.cfg.SignatureType == SignatureTypePoly1271 {
+		signer = maker
+	}
 	if maker == (common.Address{}) || signer == (common.Address{}) {
 		return SignedOrderV2{}, fmt.Errorf("maker and signer addresses are required")
 	}
