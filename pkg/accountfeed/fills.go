@@ -38,8 +38,12 @@ type FillConsumer struct {
 	// replays recent trade history on every start.
 	started time.Time
 
-	mu              sync.Mutex
-	unknownOrders   map[string]struct{}
+	mu            sync.Mutex
+	unknownOrders map[string]struct{}
+	// staleOrders are out-of-band orders seen only through fills from before
+	// the start. They are kept apart from unknownOrders so that a later fill
+	// of the same order is still reported.
+	staleOrders     map[string]struct{}
 	unknownReported int
 	staleReported   bool
 }
@@ -51,7 +55,7 @@ func NewFillConsumer(repository store.AccountFillStore, now func() time.Time) (*
 	if now == nil {
 		now = time.Now
 	}
-	return &FillConsumer{store: repository, now: now, started: now(), unknownOrders: map[string]struct{}{}}, nil
+	return &FillConsumer{store: repository, now: now, started: now(), unknownOrders: map[string]struct{}{}, staleOrders: map[string]struct{}{}}, nil
 }
 
 // SetErrorHandler receives non-fatal observations the consumer cannot recover
@@ -156,8 +160,19 @@ func (c *FillConsumer) report(err error) {
 func (c *FillConsumer) UnknownOrderCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return len(c.unknownOrders)
+	count := len(c.unknownOrders)
+	for order := range c.staleOrders {
+		if _, seen := c.unknownOrders[order]; !seen {
+			count++
+		}
+	}
+	return count
 }
+
+// staleFillMargin is how far before the start a fill must have matched to be
+// taken as history. The trade history reports match times in whole seconds,
+// so a fresh fill can read as slightly older than the start.
+const staleFillMargin = 2 * time.Second
 
 // reportUnknownFill surfaces an out-of-band order once. The same order fills
 // many times and the reconciler replays the account trade history on every
@@ -170,12 +185,11 @@ func (c *FillConsumer) reportUnknownFill(fill AccountFill) {
 		return
 	}
 	c.mu.Lock()
-	if _, seen := c.unknownOrders[fill.ExchangeOrderID]; seen {
-		c.mu.Unlock()
-		return
-	}
-	c.unknownOrders[fill.ExchangeOrderID] = struct{}{}
-	if !fill.ExchangeTime.IsZero() && fill.ExchangeTime.Before(c.started) {
+	// History is checked first and never marks the order as reported: an
+	// order that filled before the start and keeps filling after it still
+	// gets its report for the later fills.
+	if !fill.ExchangeTime.IsZero() && fill.ExchangeTime.Before(c.started.Add(-staleFillMargin)) {
+		c.staleOrders[fill.ExchangeOrderID] = struct{}{}
 		first := !c.staleReported
 		c.staleReported = true
 		c.mu.Unlock()
@@ -185,6 +199,11 @@ func (c *FillConsumer) reportUnknownFill(fill AccountFill) {
 		}
 		return
 	}
+	if _, seen := c.unknownOrders[fill.ExchangeOrderID]; seen {
+		c.mu.Unlock()
+		return
+	}
+	c.unknownOrders[fill.ExchangeOrderID] = struct{}{}
 	total := len(c.unknownOrders)
 	c.unknownReported++
 	reported := c.unknownReported

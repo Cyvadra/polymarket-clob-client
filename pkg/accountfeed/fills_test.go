@@ -214,3 +214,36 @@ func TestUnknownFillsFromBeforeStartAreReportedOnce(t *testing.T) {
 		t.Fatalf("unknown order count = %d, want 21", consumer.UnknownOrderCount())
 	}
 }
+
+// An order that filled before the start and keeps filling after it must still
+// be reported for the later fills, and a fresh fill whose second-precision
+// match time reads just before the start is not taken as history.
+func TestUnknownOrderFillingAcrossTheStartIsStillReported(t *testing.T) {
+	start := time.Date(2026, 9, 28, 9, 0, 0, 500_000_000, time.UTC)
+	consumer, err := NewFillConsumer(&fakeFillStore{}, func() time.Time { return start })
+	if err != nil {
+		t.Fatalf("new fill consumer: %v", err)
+	}
+	var reports []string
+	consumer.SetErrorHandler(func(err error) { reports = append(reports, err.Error()) })
+	consume := func(fillID, order string, at time.Time) {
+		t.Helper()
+		fill := testFill()
+		fill.FillID, fill.ExchangeOrderID, fill.ExchangeTime = fillID, order, at
+		if _, err := consumer.Consume(context.Background(), fill); err != nil {
+			t.Fatalf("consume: %v", err)
+		}
+	}
+	consume("gtc-old", "gtc", start.Add(-time.Hour))
+	consume("gtc-new", "gtc", start.Add(time.Minute))
+	if len(reports) != 2 || !strings.Contains(reports[0], "before it started") || !strings.Contains(reports[1], "exchange order gtc is not known") {
+		t.Fatalf("reports: %v", reports)
+	}
+	consume("fresh", "rounded", start.Truncate(time.Second))
+	if len(reports) != 3 || !strings.Contains(reports[2], "exchange order rounded is not known") {
+		t.Fatalf("expected a rounded fresh fill reported on its own, got %v", reports)
+	}
+	if consumer.UnknownOrderCount() != 2 {
+		t.Fatalf("unknown order count = %d, want 2", consumer.UnknownOrderCount())
+	}
+}
