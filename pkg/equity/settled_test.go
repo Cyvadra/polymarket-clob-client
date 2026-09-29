@@ -28,6 +28,10 @@ func (w *walletBalances) TokenBalance(ctx context.Context, tokenID string) (stri
 	return balance.Balance, nil
 }
 
+func (w *walletBalances) ConditionPayouts(context.Context, string) ([]bool, error) {
+	return nil, nil
+}
+
 func (w *walletBalances) BalanceAllowance(_ context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

@@ -44,9 +44,11 @@ type Sweeper struct {
 // their lane changed too recently for the wallet balance to be trusted;
 // Reserved those left to a working close, ReservedWinners the winners among
 // them. A winner left alone may already have been redeemed with no payout
-// recorded for it yet.
+// recorded for it yet. Failed marks a pass that hit an error, whose counts
+// may leave out lanes it could not read.
 type Sweep struct {
 	Checked, Lost, Redeemed, Shrunk, Reserved, ReservedWinners, Settling int
+	Failed                                                               bool
 }
 
 // WinnersHeld counts the winning lanes this pass left alone.
@@ -89,6 +91,7 @@ func (s *Sweeper) Run(ctx context.Context) error {
 
 func (s *Sweeper) pass(ctx context.Context) {
 	sweep, err := s.Sweep(ctx)
+	sweep.Failed = err != nil
 	if err != nil && s.onError != nil {
 		s.onError(err)
 	}

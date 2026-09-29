@@ -18,6 +18,13 @@ const ConditionalTokensAddress = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 // balanceOfSelector is ERC-1155 balanceOf(address,uint256).
 var balanceOfSelector = common.Hex2Bytes("00fdd58e")
 
+// payoutDenominatorSelector is ConditionalTokens payoutDenominator(bytes32),
+// payoutNumeratorsSelector payoutNumerators(bytes32,uint256).
+var (
+	payoutDenominatorSelector = common.Hex2Bytes("dd34de67")
+	payoutNumeratorsSelector  = common.Hex2Bytes("0504c814")
+)
+
 type rpcConn struct {
 	mu     sync.Mutex
 	client *ethclient.Client
@@ -53,6 +60,54 @@ func (c *Client) TokenBalance(ctx context.Context, tokenID string) (string, erro
 		return "", fmt.Errorf("balanceOf %s returned %d bytes", tokenID, len(out))
 	}
 	return new(big.Int).SetBytes(out).String(), nil
+}
+
+// ConditionPayouts reports which outcomes of a condition pay out, by outcome
+// index, as the ConditionalTokens contract records them. It is nil while the
+// condition is unresolved. The chain resolves minutes before the CLOB marks
+// the market closed, and Polymarket redeems winners in between.
+func (c *Client) ConditionPayouts(ctx context.Context, conditionID string) ([]bool, error) {
+	if c.cfg.ChainID != ChainPolygonMainnet {
+		return nil, fmt.Errorf("on-chain condition payouts are only configured for Polygon mainnet")
+	}
+	id := common.FromHex(conditionID)
+	if len(id) != 32 {
+		return nil, fmt.Errorf("invalid condition id %q", conditionID)
+	}
+	rpc, err := c.rpcClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	contract := common.HexToAddress(ConditionalTokensAddress)
+	call := func(data []byte) (*big.Int, error) {
+		out, err := rpc.CallContract(ctx, ethereum.CallMsg{To: &contract, Data: data}, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(out) != 32 {
+			return nil, fmt.Errorf("returned %d bytes", len(out))
+		}
+		return new(big.Int).SetBytes(out), nil
+	}
+	denominator, err := call(append(append([]byte{}, payoutDenominatorSelector...), id...))
+	if err != nil {
+		return nil, fmt.Errorf("payoutDenominator %s: %w", conditionID, err)
+	}
+	if denominator.Sign() == 0 {
+		return nil, nil
+	}
+	// Polymarket markets are binary.
+	pays := make([]bool, 2)
+	for i := range pays {
+		data := append(append([]byte{}, payoutNumeratorsSelector...), id...)
+		data = append(data, common.LeftPadBytes(big.NewInt(int64(i)).Bytes(), 32)...)
+		numerator, err := call(data)
+		if err != nil {
+			return nil, fmt.Errorf("payoutNumerators %s/%d: %w", conditionID, i, err)
+		}
+		pays[i] = numerator.Sign() > 0
+	}
+	return pays, nil
 }
 
 // rpcClient dials the RPC endpoint once and reuses the connection.

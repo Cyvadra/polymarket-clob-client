@@ -244,6 +244,17 @@ func run() error {
 		if s.Lost+s.Redeemed+s.Shrunk > 0 {
 			equityDue = true
 		}
+		// With nothing held, no settlement will come to record a deposit or
+		// withdrawal, so one is looked for directly. A failed pass may have
+		// missed held lanes, and a redeemed winner's payout would read as a
+		// deposit.
+		if !equityDue && !s.Failed && s.Checked == 0 {
+			moved, err := recorder.CashMoved(ctx)
+			if err != nil {
+				log.Printf("check for deposits and withdrawals: %v", err)
+			}
+			equityDue = moved
+		}
 		baseDue := anchor != nil && !anchor.Ready()
 		if !equityDue && !baseDue {
 			return

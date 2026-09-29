@@ -99,6 +99,29 @@ func (r *Recorder) Record(ctx context.Context, reason string) (store.EquitySnaps
 	return r.store.RecordEquitySnapshot(ctx, record, pending)
 }
 
+// CashMoved reports whether the wallet's cash has moved by a deposit or
+// withdrawal since the latest snapshot. Snapshots otherwise follow settlements
+// only, and a wallet that is not trading would never record the transfer.
+func (r *Recorder) CashMoved(ctx context.Context) (bool, error) {
+	prev, ok, err := r.store.LatestEquitySnapshot(ctx)
+	if err != nil || !ok {
+		return false, err
+	}
+	pending, err := r.store.PendingTradeCash(ctx)
+	if err != nil {
+		return false, err
+	}
+	snapshot, err := r.wallet.Snapshot(ctx)
+	if err != nil {
+		return false, err
+	}
+	step, err := r.step(prev, snapshot, pending.USD)
+	if err != nil {
+		return false, err
+	}
+	return step.flow != 0, nil
+}
+
 type step struct{ tradeCash, flow, index float64 }
 
 // step works out what happened since prev, given the trade cash no snapshot

@@ -189,6 +189,34 @@ func TestRecordKeepsSmallUnexplainedCashInTheIndex(t *testing.T) {
 	}
 }
 
+// A transfer in or out with nothing settling still has to reach the sizing
+// base, so the wallet notices cash trading does not explain.
+func TestCashMovedByTransfersOnly(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	ctx := context.Background()
+	if moved, err := r.CashMoved(ctx); err != nil || moved {
+		t.Fatalf("no snapshot yet: moved=%v err=%v", moved, err)
+	}
+	recordAt(t, r, s, wallet, 0, 100, 0, "")
+	for _, c := range []struct {
+		cash      float64
+		tradeCash string
+		want      bool
+	}{
+		{101.1, "", true},   // a $1.10 transfer in
+		{98.9, "", true},    // a $1.10 transfer out
+		{100.5, "", false},  // a $0.50 rebate stays trading
+		{110, "10", false},  // a payout the store recorded
+		{111.1, "10", true}, // a payout and a transfer
+	} {
+		wallet.snapshot = Snapshot{CashUSD: c.cash, EquityUSD: c.cash}
+		s.tradeCash = c.tradeCash
+		if moved, err := r.CashMoved(ctx); err != nil || moved != c.want {
+			t.Fatalf("cash %v trade cash %q: moved=%v err=%v, want %v", c.cash, c.tradeCash, moved, err, c.want)
+		}
+	}
+}
+
 func TestRecordReadsTradeCashBeforeTheBalanceAndCountsIt(t *testing.T) {
 	r, s, wallet := newTestRecorder()
 	recordAt(t, r, s, wallet, 0, 100, 0, "")

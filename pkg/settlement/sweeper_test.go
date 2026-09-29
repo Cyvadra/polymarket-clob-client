@@ -27,11 +27,17 @@ func (f *fakeMarkets) Market(_ context.Context, conditionID string) (*clobclient
 type fakeBalances struct {
 	tokens map[string]string
 	reads  map[string]int
+	// payouts are the conditions resolved on chain, by outcome index.
+	payouts map[string][]bool
 }
 
 func (f *fakeBalances) TokenBalance(_ context.Context, tokenID string) (string, error) {
 	f.reads[tokenID]++
 	return f.tokens[tokenID], nil
+}
+
+func (f *fakeBalances) ConditionPayouts(_ context.Context, conditionID string) ([]bool, error) {
+	return f.payouts[conditionID], nil
 }
 
 type fakeStore struct {
@@ -184,6 +190,33 @@ func TestResolverAsksAgainOnlyUntilResolved(t *testing.T) {
 		now = now.Add(openMarketTTL)
 	}
 	if markets.reads["done"] != 1 || markets.reads["pending"] != 2 {
+		t.Fatalf("market reads=%v", markets.reads)
+	}
+}
+
+// The chain resolves a market minutes before the CLOB closes it, and the
+// wallet's winner is redeemed in between; the resolver takes the chain's word
+// so the lane is swept when its payout lands, not minutes later.
+func TestResolverTakesAResolutionTheCLOBHasNotCaughtUpWith(t *testing.T) {
+	markets := &fakeMarkets{reads: map[string]int{}, markets: map[string]clobclient.Market{
+		"m":    {Tokens: []clobclient.Token{{TokenID: "up"}, {TokenID: "down"}}},
+		"open": {Tokens: []clobclient.Token{{TokenID: "o1"}, {TokenID: "o2"}}},
+	}}
+	balances := &fakeBalances{reads: map[string]int{}, tokens: map[string]string{"down": "0"},
+		payouts: map[string][]bool{"m": {false, true}}}
+	resolver, _ := NewResolver(markets, balances, func() time.Time { return sweepNow })
+	ctx := context.Background()
+	if outcome, err := resolver.Outcome(ctx, "m", "down"); err != nil || outcome != (Outcome{Resolved: true, Winner: true}) {
+		t.Fatalf("winner: %+v, %v", outcome, err)
+	}
+	if outcome, err := resolver.Outcome(ctx, "m", "up"); err != nil || outcome != (Outcome{Resolved: true}) {
+		t.Fatalf("loser: %+v, %v", outcome, err)
+	}
+	if outcome, err := resolver.Outcome(ctx, "open", "o1"); err != nil || outcome.Resolved {
+		t.Fatalf("open: %+v, %v", outcome, err)
+	}
+	// A resolution is final: the chain's is not asked again.
+	if markets.reads["m"] != 1 {
 		t.Fatalf("market reads=%v", markets.reads)
 	}
 }

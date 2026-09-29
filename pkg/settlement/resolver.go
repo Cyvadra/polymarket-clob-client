@@ -28,8 +28,15 @@ type MarketReader interface {
 // refuse a token once its market's order book is removed ("No orderbook
 // exists"), which is exactly when a settled lane needs valuing, and its
 // cached view can lag the chain, where a stale zero reads as a redeemed winner.
+//
+// ConditionPayouts reads which outcome indices of a condition pay, nil while
+// it is unresolved. The CLOB marks a market resolved minutes after the chain,
+// and Polymarket redeems winners in between: a resolution read only from the
+// CLOB leaves a redeemed lane valued as a position while its payout is
+// already cash.
 type BalanceReader interface {
 	TokenBalance(ctx context.Context, tokenID string) (string, error)
+	ConditionPayouts(ctx context.Context, conditionID string) ([]bool, error)
 }
 
 const (
@@ -178,11 +185,30 @@ func (r *Resolver) resolution(ctx context.Context, conditionID string) (resoluti
 		}
 		// A closed market with no winner yet is still being resolved.
 		res.resolved = market.Closed && len(res.winners) > 0
+		if !res.resolved {
+			r.chainResolution(ctx, conditionID, market, &res)
+		}
 	}
 	r.mu.Lock()
 	r.resolved[conditionID] = res
 	r.mu.Unlock()
 	return res, res.err
+}
+
+// chainResolution fills res from the chain's payouts, if the condition has
+// resolved there. The CLOB lists a market's tokens in outcome-index order. A
+// failed read leaves the market to the CLOB, which catches up minutes later.
+func (r *Resolver) chainResolution(ctx context.Context, conditionID string, market *clobclient.Market, res *resolution) {
+	pays, err := r.balances.ConditionPayouts(ctx, conditionID)
+	if err != nil || len(pays) == 0 || len(pays) != len(market.Tokens) {
+		return
+	}
+	for i, token := range market.Tokens {
+		if pays[i] {
+			res.winners[token.TokenID] = true
+		}
+	}
+	res.resolved = len(res.winners) > 0
 }
 
 func (r *Resolver) walletShares(ctx context.Context, tokenID string) (float64, error) {
