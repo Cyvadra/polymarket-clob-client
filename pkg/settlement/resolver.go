@@ -135,6 +135,19 @@ func Settled(record store.PositionRecord, now time.Time) bool {
 // market does not list is an error, not a loser: the lane's condition and
 // token ids do not describe the same market, and nothing can be said about
 // what it holds.
+// Resolved reports whether tokenID's market has resolved, without reading
+// the wallet balance.
+func (r *Resolver) Resolved(ctx context.Context, conditionID, tokenID string) (bool, error) {
+	res, err := r.resolution(ctx, conditionID)
+	if err != nil || !res.resolved {
+		return false, err
+	}
+	if !res.tokens[tokenID] {
+		return false, fmt.Errorf("token %s is not in market %s", tokenID, conditionID)
+	}
+	return true, nil
+}
+
 func (r *Resolver) Outcome(ctx context.Context, conditionID, tokenID string) (Outcome, error) {
 	res, err := r.resolution(ctx, conditionID)
 	if err != nil || !res.resolved {

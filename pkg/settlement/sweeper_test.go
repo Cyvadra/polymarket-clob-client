@@ -303,3 +303,45 @@ func TestResolverRereadsAHeldWinnerButReusesAZero(t *testing.T) {
 	now = now.Add(winnerBalanceTTL / 2)
 	check(0, 2)
 }
+
+// A dust lane is written off as a loser once its market resolves, without a
+// balance read, since Polymarket never redeems it; one on an open market, one
+// reserved and one too fresh are left alone.
+func TestSweepWritesOffDust(t *testing.T) {
+	markets := &fakeMarkets{reads: map[string]int{}, markets: map[string]clobclient.Market{
+		"won":  resolved("w1", "w1x"),
+		"lost": resolved("l2", "l1"),
+		"live": {Tokens: []clobclient.Token{{TokenID: "o1"}, {TokenID: "o2"}}},
+	}}
+	balances := &fakeBalances{reads: map[string]int{}, tokens: map[string]string{"w1": "8687"}}
+	st := &fakeStore{settled: map[string]string{}, positions: []store.PositionRecord{
+		{ConditionID: "won", TokenID: "w1", UniqueTag: "a", PositionSize: "0.008687", UpdatedAt: settledAt},
+		{ConditionID: "lost", TokenID: "l1", UniqueTag: "b", PositionSize: "0.0003", UpdatedAt: settledAt},
+		{ConditionID: "live", TokenID: "o1", UniqueTag: "c", PositionSize: "0.001", UpdatedAt: settledAt},
+		{ConditionID: "lost", TokenID: "l1", UniqueTag: "d", PositionSize: "0.001", ReservedSize: "0.001", UpdatedAt: settledAt},
+	}}
+	resolver, err := NewResolver(markets, balances, func() time.Time { return sweepNow })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sweeper, err := NewSweeper(st, resolver, func() time.Time { return sweepNow }, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sweep, err := sweeper.Sweep(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.settled) != 2 || st.settled["won/w1/a"] != "0.000000" || st.settled["lost/l1/b"] != "0.000000" {
+		t.Fatalf("settled=%v", st.settled)
+	}
+	if st.winners["won/w1/a"] || st.winners["lost/l1/b"] {
+		t.Fatalf("dust recorded as a payout: winners=%v", st.winners)
+	}
+	if sweep.Dust != 2 || sweep.Redeemed != 0 || sweep.Reserved != 1 {
+		t.Fatalf("sweep=%+v", sweep)
+	}
+	if balances.reads["w1"] != 0 {
+		t.Fatalf("read a balance for dust: %v", balances.reads)
+	}
+}

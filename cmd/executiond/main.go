@@ -237,11 +237,11 @@ func run() error {
 				anchorStale = false
 			}
 		}
-		if s.Lost+s.Redeemed+s.Shrunk+s.Reserved+s.Settling > 0 {
-			log.Printf("settlement sweep: %d lanes checked, emptied %d lost and %d redeemed, shrank %d to the wallet, left %d to a working close and %d still settling",
-				s.Checked, s.Lost, s.Redeemed, s.Shrunk, s.Reserved, s.Settling)
+		if s.Lost+s.Redeemed+s.Shrunk+s.Dust+s.Reserved+s.Settling > 0 {
+			log.Printf("settlement sweep: %d lanes checked, emptied %d lost, %d redeemed and %d dust, shrank %d to the wallet, left %d to a working close and %d still settling",
+				s.Checked, s.Lost, s.Redeemed, s.Dust, s.Shrunk, s.Reserved, s.Settling)
 		}
-		if s.Lost+s.Redeemed+s.Shrunk > 0 {
+		if s.Lost+s.Redeemed+s.Shrunk+s.Dust > 0 {
 			equityDue = true
 		}
 		// With nothing held, no settlement will come to record a deposit or

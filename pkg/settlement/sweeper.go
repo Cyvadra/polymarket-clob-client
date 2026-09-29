@@ -27,6 +27,11 @@ type Store interface {
 // sweep cannot raise one; the revision it bumps republishes the lane, and the
 // strategy sees it flat.
 //
+// A lane of less than DustShares is written off once its market resolves,
+// winner or not: Polymarket does not redeem that little, so the wallet would
+// hold it forever and the lane would cost a balance read every pass. It is
+// settled as a loser, so no payout is recorded for shares nobody paid out.
+//
 // A lane with shares reserved is left alone: a close is working on it, and
 // the close path owns it until the reservation ends. A lane that changed
 // within SettleGrace is left alone too, since its tokens may not have landed
@@ -47,9 +52,13 @@ type Sweeper struct {
 // recorded for it yet. Failed marks a pass that hit an error, whose counts
 // may leave out lanes it could not read.
 type Sweep struct {
-	Checked, Lost, Redeemed, Shrunk, Reserved, ReservedWinners, Settling int
-	Failed                                                               bool
+	Checked, Lost, Redeemed, Shrunk, Dust, Reserved, ReservedWinners, Settling int
+	Failed                                                                     bool
 }
+
+// DustShares is the lane size below which a resolved lane is written off
+// rather than waited on; it is worth less than a cent.
+const DustShares = 0.01
 
 // WinnersHeld counts the winning lanes this pass left alone.
 func (s Sweep) WinnersHeld() int { return s.ReservedWinners + s.Settling }
@@ -122,6 +131,28 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 		}
 		sweep.Checked++
 		lane := p.ConditionID + "/" + p.TokenID + "/" + p.UniqueTag
+		if size, err := decimal.PositiveFloat(p.PositionSize); err == nil && size < DustShares &&
+			!decimal.Positive(p.ReservedSize) && Settled(p, now) {
+			resolved, err := s.resolver.Resolved(ctx, p.ConditionID, p.TokenID)
+			if err != nil {
+				errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
+				continue
+			}
+			if !resolved {
+				continue
+			}
+			changed, err := s.store.SettlePosition(ctx, p.ConditionID, p.TokenID, p.UniqueTag, "0.000000", false)
+			if err != nil {
+				errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
+				continue
+			}
+			if changed {
+				sweep.Dust++
+			} else {
+				sweep.Reserved++
+			}
+			continue
+		}
 		outcome, err := s.resolver.Outcome(ctx, p.ConditionID, p.TokenID)
 		if err != nil {
 			errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
