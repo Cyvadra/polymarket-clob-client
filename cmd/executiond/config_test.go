@@ -4,6 +4,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 )
 
 // Every config needs the strategies the wallet trades; tests of other
@@ -72,12 +74,12 @@ func TestConfigFromEnvRejectsNegativeMaxTradeAge(t *testing.T) {
 }
 
 func TestConfigFromEnvDrawdownLimit(t *testing.T) {
-	withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "0.2", "EXECUTION_DRAWDOWN_START": "2026-09-28"})
+	withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "20%", "EXECUTION_DRAWDOWN_START": "2026-09-28"})
 	cfg, err := configFromEnv()
 	if err != nil {
 		t.Fatalf("configFromEnv: %v", err)
 	}
-	if cfg.MaxDrawdown != 0.2 || !cfg.DrawdownStart.Equal(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)) || cfg.EquityFlowThresholdUSD != 1 {
+	if cfg.MaxDrawdown != equity.FractionLimit(0.2) || !cfg.DrawdownStart.Equal(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)) || cfg.EquityFlowThresholdUSD != 1 {
 		t.Fatalf("cfg=%+v", cfg)
 	}
 
@@ -86,15 +88,33 @@ func TestConfigFromEnvDrawdownLimit(t *testing.T) {
 		t.Fatalf("RFC 3339 start: %v %v", cfg.DrawdownStart, err)
 	}
 
+	// Older configs hold a bare fraction; it still reads as one.
+	withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "0.2"})
+	if cfg, err = configFromEnv(); err != nil || cfg.MaxDrawdown != equity.FractionLimit(0.2) {
+		t.Fatalf("bare fraction: %+v %v", cfg.MaxDrawdown, err)
+	}
+
+	withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": " $ 123.5 "})
+	if cfg, err = configFromEnv(); err != nil || cfg.MaxDrawdown != equity.DollarLimit(123.5) {
+		t.Fatalf("dollar limit: %+v %v", cfg.MaxDrawdown, err)
+	}
+
 	for name, kv := range map[string]map[string]string{
 		"no start":       {"EXECUTION_DRAWDOWN_START": ""},
 		"bad start":      {"EXECUTION_DRAWDOWN_START": "yesterday"},
-		"limit of 1":     {"EXECUTION_MAX_DRAWDOWN": "1"},
-		"percent":        {"EXECUTION_MAX_DRAWDOWN": "20"},
+		"bare 1":         {"EXECUTION_MAX_DRAWDOWN": "1"},
+		"bare number":    {"EXECUTION_MAX_DRAWDOWN": "20"},
+		"100 percent":    {"EXECUTION_MAX_DRAWDOWN": "100%"},
+		"zero percent":   {"EXECUTION_MAX_DRAWDOWN": "0%"},
+		"zero dollars":   {"EXECUTION_MAX_DRAWDOWN": "$0"},
+		"bad dollars":    {"EXECUTION_MAX_DRAWDOWN": "$x"},
+		"nan dollars":    {"EXECUTION_MAX_DRAWDOWN": "$NaN"},
+		"nan percent":    {"EXECUTION_MAX_DRAWDOWN": "NaN%"},
+		"inf dollars":    {"EXECUTION_MAX_DRAWDOWN": "$Inf"},
 		"negative flows": {"EXECUTION_EQUITY_FLOW_THRESHOLD_USD": "-1"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "0.2", "EXECUTION_DRAWDOWN_START": "2026-09-28"})
+			withEnv(t, map[string]string{"EXECUTION_MAX_DRAWDOWN": "20%", "EXECUTION_DRAWDOWN_START": "2026-09-28"})
 			withEnv(t, kv)
 			if _, err := configFromEnv(); err == nil {
 				t.Fatal("expected an error")
@@ -126,25 +146,25 @@ func TestConfigFromEnvReadsAllowedStrategies(t *testing.T) {
 func TestConfigFromEnvStrategyDrawdownLimits(t *testing.T) {
 	withEnv(t, map[string]string{
 		"EXECUTION_ALLOWED_STRATEGIES":    "late-gap,momentum,ns:v2",
-		"EXECUTION_STRATEGY_MAX_DRAWDOWN": " late-gap:0.1 , ns:v2:0.15 ",
+		"EXECUTION_STRATEGY_MAX_DRAWDOWN": " late-gap:10% , ns:v2:$150 ",
 		"EXECUTION_DRAWDOWN_START":        "2026-09-28",
 	})
 	cfg, err := configFromEnv()
 	if err != nil {
 		t.Fatalf("configFromEnv: %v", err)
 	}
-	if cfg.MaxDrawdown != 0 || len(cfg.StrategyMaxDrawdown) != 2 || cfg.StrategyMaxDrawdown["late-gap"] != 0.1 || cfg.StrategyMaxDrawdown["ns:v2"] != 0.15 {
-		t.Fatalf("limits %+v, global %g", cfg.StrategyMaxDrawdown, cfg.MaxDrawdown)
+	if !cfg.MaxDrawdown.IsZero() || len(cfg.StrategyMaxDrawdown) != 2 || cfg.StrategyMaxDrawdown["late-gap"] != equity.FractionLimit(0.1) || cfg.StrategyMaxDrawdown["ns:v2"] != equity.DollarLimit(150) {
+		t.Fatalf("limits %+v, global %+v", cfg.StrategyMaxDrawdown, cfg.MaxDrawdown)
 	}
 
 	for name, kv := range map[string]map[string]string{
 		"no start":    {"EXECUTION_DRAWDOWN_START": ""},
-		"not allowed": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "Late-Gap:0.1"},
-		"duplicate":   {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:0.1,late-gap:0.2"},
-		"no fraction": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap"},
-		"no name":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": ":0.1"},
-		"limit of 1":  {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:1"},
-		"percent":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10"},
+		"not allowed": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "Late-Gap:10%"},
+		"duplicate":   {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10%,late-gap:$20"},
+		"no limit":    {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap"},
+		"no name":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": ":10%"},
+		"bare":        {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10"},
+		"100 percent": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:100%"},
 		"only commas": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": ","},
 	} {
 		t.Run(name, func(t *testing.T) {

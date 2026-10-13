@@ -263,38 +263,84 @@ func Drawdown(peak, value float64) float64 {
 	return (peak - value) / peak
 }
 
-// DrawdownGuard suspends new positions while the trade index sits more than
-// a set fraction below its peak since a start the operator chose. The peak
-// includes the index trading stood at when the start came, so a loss across
+// DrawdownLimit is how far trading may fall from its peak: a fraction of the
+// peak index, or a dollar amount. Make one with FractionLimit or DollarLimit;
+// the zero value is no limit.
+//
+// A dollar drawdown is the fall of cumulative trading profit and loss, in
+// dollars, from its highest value since the start. Each interval's dollars
+// are its equity change less the flow (a strategy's: its trade cash plus the
+// change in what it holds), so deposits and withdrawals do not move it.
+type DrawdownLimit struct {
+	dollars bool
+	value   float64
+}
+
+// FractionLimit is a limit of fraction of the peak trade index, in (0, 1).
+func FractionLimit(fraction float64) DrawdownLimit { return DrawdownLimit{value: fraction} }
+
+// DollarLimit is a limit of usd dollars below the peak trading profit.
+func DollarLimit(usd float64) DrawdownLimit { return DrawdownLimit{dollars: true, value: usd} }
+
+// Valid reports whether the limit is set to a finite value in range: a
+// fraction in (0, 1) or a positive number of dollars.
+func (l DrawdownLimit) Valid() bool {
+	if l.dollars {
+		return l.value > 0 && !math.IsInf(l.value, 0)
+	}
+	return l.value > 0 && l.value < 1
+}
+
+// Dollars reports whether the limit is a dollar amount.
+func (l DrawdownLimit) Dollars() bool { return l.dollars }
+
+// IsZero reports whether no limit is set.
+func (l DrawdownLimit) IsZero() bool { return l == DrawdownLimit{} }
+
+// String formats the limit as it is configured: "$123" or "20%".
+func (l DrawdownLimit) String() string {
+	if l.dollars {
+		return "$" + strconv.FormatFloat(l.value, 'f', -1, 64)
+	}
+	// Rounding to twelve digits keeps 0.07*100 from printing as
+	// 7.000000000000001; 'f' keeps a small one out of exponent form.
+	percent, _ := strconv.ParseFloat(strconv.FormatFloat(l.value*100, 'g', 12, 64), 64)
+	return strconv.FormatFloat(percent, 'f', -1, 64) + "%"
+}
+
+// DrawdownGuard suspends new positions while trading sits more than a set
+// limit below its peak since a start the operator chose: the trade index for
+// a fraction limit, cumulative trading dollars for a dollar limit. The peak
+// includes the level trading stood at when the start came, so a loss across
 // the start is measured. It reads
 // the recorded snapshots, so it moves only when one is recorded; Refresh
-// after each. Recovery needs the index to climb back, or a later start.
+// after each. Recovery needs trading to climb back, or a later start.
 //
-// A guard made by NewStrategyDrawdownGuard measures one strategy's index
+// A guard made by NewStrategyDrawdownGuard measures one strategy's trading
 // instead, and holds back only that strategy.
 type DrawdownGuard struct {
 	store    store.EquityStore
 	start    time.Time
-	limit    float64
+	limit    DrawdownLimit
 	strategy string
 
 	mu       sync.RWMutex
-	drawdown float64
+	drawdown float64 // a fraction of the peak, or dollars, as the limit is
 }
 
-func NewDrawdownGuard(s store.EquityStore, start time.Time, limit float64) (*DrawdownGuard, error) {
+func NewDrawdownGuard(s store.EquityStore, start time.Time, limit DrawdownLimit) (*DrawdownGuard, error) {
 	if s == nil {
 		return nil, fmt.Errorf("equity store is required")
 	}
-	if limit <= 0 || limit >= 1 {
-		return nil, fmt.Errorf("drawdown limit must be in (0, 1)")
+	if !limit.Valid() {
+		return nil, fmt.Errorf("drawdown limit must be a fraction in (0, 1) or a positive dollar amount")
 	}
 	return &DrawdownGuard{store: s, start: start, limit: limit}, nil
 }
 
-// NewStrategyDrawdownGuard measures strategy's trade index; see
+// NewStrategyDrawdownGuard measures strategy's trading; see
 // store.StrategyEquityRecord.
-func NewStrategyDrawdownGuard(s store.EquityStore, strategy string, start time.Time, limit float64) (*DrawdownGuard, error) {
+func NewStrategyDrawdownGuard(s store.EquityStore, strategy string, start time.Time, limit DrawdownLimit) (*DrawdownGuard, error) {
 	if strategy == "" {
 		return nil, fmt.Errorf("strategy is required")
 	}
@@ -317,8 +363,9 @@ func (g *DrawdownGuard) Label() string {
 	return fmt.Sprintf("strategy %q drawdown", g.strategy)
 }
 
-// Refresh reads the drawdown from the latest snapshot. With no snapshot since
-// the start there is nothing to measure, and nothing is suspended.
+// Refresh reads the drawdown from the latest snapshot, in the limit's unit: a
+// fraction of the peak, or dollars. With no snapshot since the start there is
+// nothing to measure, and nothing is suspended.
 func (g *DrawdownGuard) Refresh(ctx context.Context) (float64, error) {
 	latest, ok, err := g.store.LatestEquitySnapshot(ctx)
 	if err != nil {
@@ -330,9 +377,16 @@ func (g *DrawdownGuard) Refresh(ctx context.Context) (float64, error) {
 // refresh is Refresh given the latest snapshot, and for a strategy guard its
 // split when the caller has it already.
 func (g *DrawdownGuard) refresh(ctx context.Context, latest store.EquitySnapshotRecord, ok bool, parts []store.StrategyEquityRecord) (float64, error) {
-	drawdown, err := g.read(ctx, latest, ok, parts)
-	if err != nil {
-		return 0, err
+	read := g.readFraction
+	if g.limit.Dollars() {
+		read = g.readDollars
+	}
+	drawdown := 0.0
+	if ok && !latest.TakenAt.Before(g.start) {
+		var err error
+		if drawdown, err = read(ctx, latest, parts); err != nil {
+			return 0, err
+		}
 	}
 	g.mu.Lock()
 	g.drawdown = drawdown
@@ -340,11 +394,9 @@ func (g *DrawdownGuard) refresh(ctx context.Context, latest store.EquitySnapshot
 	return drawdown, nil
 }
 
-func (g *DrawdownGuard) read(ctx context.Context, latest store.EquitySnapshotRecord, ok bool, parts []store.StrategyEquityRecord) (float64, error) {
-	if !ok || latest.TakenAt.Before(g.start) {
-		return 0, nil
-	}
+func (g *DrawdownGuard) readFraction(ctx context.Context, latest store.EquitySnapshotRecord, parts []store.StrategyEquityRecord) (float64, error) {
 	var err error
+	ok := true
 	indexText, peakText := latest.TradeIndex, ""
 	if g.strategy == "" {
 		peakText, ok, err = g.store.PeakTradeIndexSince(ctx, g.start)
@@ -374,6 +426,48 @@ func (g *DrawdownGuard) read(ctx context.Context, latest store.EquitySnapshotRec
 	return Drawdown(peak, index), nil
 }
 
+func (g *DrawdownGuard) readDollars(ctx context.Context, latest store.EquitySnapshotRecord, _ []store.StrategyEquityRecord) (float64, error) {
+	intervals, ok, err := g.store.TradingPnLSince(ctx, g.strategy, g.start, latest.ID)
+	if err != nil || !ok {
+		return 0, err
+	}
+	return DollarDrawdown(intervals)
+}
+
+// DollarDrawdown is how far the running total of intervals' dollars ends
+// below its highest value, counting the level before the first as zero.
+//
+// A fill whose cash left the wallet before a snapshot but was stored after it
+// reads as a withdrawal and a matching gain in that interval, reversed in the
+// next. So the total after an interval with an external flow counts toward
+// the peak only as far as the next interval keeps it, and a transient spike
+// never becomes a lasting peak. A real gain made alongside a transfer and
+// lost in the very next interval goes uncounted as a drawdown; the earlier
+// peak still counts.
+func DollarDrawdown(intervals []store.TradingPnL) (float64, error) {
+	var total, peak float64
+	pending, held := 0.0, false
+	for _, interval := range intervals {
+		pnl, err := strconv.ParseFloat(interval.PnLUSD, 64)
+		if err != nil || math.IsNaN(pnl) || math.IsInf(pnl, 0) {
+			return 0, fmt.Errorf("trading pnl %q at snapshot %d is not a number", interval.PnLUSD, interval.SnapshotID)
+		}
+		flow, err := strconv.ParseFloat(interval.ExternalFlowUSD, 64)
+		if err != nil {
+			return 0, fmt.Errorf("external flow %q at snapshot %d is not a number", interval.ExternalFlowUSD, interval.SnapshotID)
+		}
+		total += pnl
+		if held {
+			peak = max(peak, min(pending, total))
+		}
+		pending, held = total, flow != 0
+		if !held {
+			peak = max(peak, total)
+		}
+	}
+	return max(peak-total, 0), nil
+}
+
 // indexIn is the strategy's index in parts. It reports false when the
 // strategy is not there, having never traded.
 func indexIn(parts []store.StrategyEquityRecord, strategy string) (string, bool) {
@@ -389,11 +483,27 @@ func indexIn(parts []store.StrategyEquityRecord, strategy string) (string, bool)
 func (g *DrawdownGuard) Suspended() (bool, string) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	if g.drawdown <= g.limit {
+	if g.drawdown <= g.limit.value {
 		return false, ""
 	}
-	return true, fmt.Sprintf("%s %.2f%% since %s exceeds the %.2f%% limit",
-		g.Label(), g.drawdown*100, g.start.Format(time.RFC3339), g.limit*100)
+	return true, fmt.Sprintf("%s %s since %s exceeds the %s limit",
+		g.Label(), g.measured(), g.start.Format(time.RFC3339), g.limit)
+}
+
+// Status is the drawdown as last read, against the limit it is compared to:
+// "$30.00 of the $500 limit" or "3.20% of the 20% limit".
+func (g *DrawdownGuard) Status() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return fmt.Sprintf("%s of the %s limit", g.measured(), g.limit)
+}
+
+// measured formats the drawdown as last read; g.mu must be held.
+func (g *DrawdownGuard) measured() string {
+	if g.limit.Dollars() {
+		return fmt.Sprintf("$%.2f", g.drawdown)
+	}
+	return fmt.Sprintf("%.2f%%", g.drawdown*100)
 }
 
 // DrawdownLimits holds back opens while the wallet's drawdown is over its
@@ -423,21 +533,20 @@ func NewDrawdownLimits(wallet *DrawdownGuard, strategies ...*DrawdownGuard) *Dra
 func (l *DrawdownLimits) Guards() []*DrawdownGuard { return l.guards }
 
 // Refresh refreshes every guard from one read of the latest snapshot and its
-// split, so one that fails does not leave the others stale. It returns each
-// guard's drawdown by strategy ("" for the wallet's) and the errors joined.
-func (l *DrawdownLimits) Refresh(ctx context.Context) (map[string]float64, error) {
+// split, so one that fails does not leave the others stale. It returns the
+// guards that refreshed, in Guards order, and the errors joined.
+func (l *DrawdownLimits) Refresh(ctx context.Context) ([]*DrawdownGuard, error) {
 	guards := l.Guards()
 	if len(guards) == 0 {
 		return nil, nil
 	}
 	s := guards[0].store
-	drawdowns := make(map[string]float64, len(guards))
 	latest, ok, err := s.LatestEquitySnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var parts []store.StrategyEquityRecord
-	if ok && len(l.strategies) > 0 {
+	if ok && l.fractionStrategies() {
 		if parts, err = s.StrategyEquity(ctx, latest.ID); err != nil {
 			return nil, err
 		}
@@ -445,16 +554,27 @@ func (l *DrawdownLimits) Refresh(ctx context.Context) (map[string]float64, error
 			parts = []store.StrategyEquityRecord{}
 		}
 	}
+	var refreshed []*DrawdownGuard
 	var errs []error
 	for _, guard := range guards {
-		drawdown, err := guard.refresh(ctx, latest, ok, parts)
-		if err != nil {
+		if _, err := guard.refresh(ctx, latest, ok, parts); err != nil {
 			errs = append(errs, err)
 			continue
 		}
-		drawdowns[guard.strategy] = drawdown
+		refreshed = append(refreshed, guard)
 	}
-	return drawdowns, errors.Join(errs...)
+	return refreshed, errors.Join(errs...)
+}
+
+// fractionStrategies reports whether a strategy guard reads the split's
+// index, which only fraction limits do.
+func (l *DrawdownLimits) fractionStrategies() bool {
+	for _, guard := range l.strategies {
+		if !guard.limit.Dollars() {
+			return true
+		}
+	}
+	return false
 }
 
 // Suspended reports whether opens for strategy are held back, and why.

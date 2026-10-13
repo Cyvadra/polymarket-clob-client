@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -779,5 +780,55 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 	}
 	if _, ok, err := s.PeakStrategyIndexSince(ctx, "other-"+lane.tag, start); err != nil || ok {
 		t.Fatalf("untraded strategy peak: ok=%v err=%v", ok, err)
+	}
+
+	// The dollar loss runs each interval's profit from the start. The
+	// strategy made $1 (-1 cash, +2 held) then lost it (-1 cash, +0 held).
+	lossAt := func(strategy string, id int64) float64 {
+		t.Helper()
+		intervals, ok, err := s.TradingPnLSince(ctx, strategy, start, id)
+		if err != nil || !ok {
+			t.Fatalf("trading pnl %q at %d: %v %v", strategy, id, ok, err)
+		}
+		loss, err := equity.DollarDrawdown(intervals)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loss
+	}
+	if got := lossAt(strategy, latest.ID); got != 1 {
+		t.Fatalf("strategy loss %v, want 1", got)
+	}
+	// A snapshot with no split while the wallet held $5 hides what the
+	// strategy held then, so the next interval counts nothing for it rather
+	// than booking all it holds as profit.
+	for i, record := range []store.EquitySnapshotRecord{
+		{CashUSD: "1", PositionsUSD: "5", EquityUSD: "6"},
+		{CashUSD: "-1", PositionsUSD: "3", EquityUSD: "2",
+			Strategies: []store.StrategyEquityRecord{{Strategy: strategy, TradeCashUSD: "0", PositionsUSD: "3", TradeIndex: "1"}}},
+	} {
+		record.TakenAt, record.Reason = start.Add(time.Duration(4+i)*time.Minute), reason
+		record.TradeCashUSD, record.ExternalFlowUSD, record.TradeIndex = "0", "0", "1"
+		if _, err := s.RecordEquitySnapshot(ctx, record, empty); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last, _, err := s.LatestEquitySnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lossAt(strategy, last.ID); got != 1 {
+		t.Fatalf("strategy loss after an unsplit snapshot %v, want 1", got)
+	}
+	// The wallet went 1 -> 6 -> 2: $4 below its peak, and $0 as of the
+	// strategy's earlier snapshot.
+	if got := lossAt("", last.ID); got != 4 {
+		t.Fatalf("wallet loss %v, want 4", got)
+	}
+	if got := lossAt("", latest.ID); got != 0 {
+		t.Fatalf("wallet loss at an earlier snapshot %v, want 0", got)
+	}
+	if _, ok, err := s.TradingPnLSince(ctx, "other-"+lane.tag, start, last.ID); err != nil || ok {
+		t.Fatalf("untraded strategy loss: ok=%v err=%v", ok, err)
 	}
 }

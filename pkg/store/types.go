@@ -289,6 +289,23 @@ type EquityStore interface {
 	StrategyEquity(ctx context.Context, snapshotID int64) ([]StrategyEquityRecord, error)
 	// PeakStrategyIndexSince is PeakTradeIndexSince for one strategy's index.
 	PeakStrategyIndexSince(ctx context.Context, strategy string, since time.Time) (string, bool, error)
+	// TradingPnLSince lists each interval's trading profit and loss, in
+	// dollars, for the snapshots from the first at or after since through
+	// snapshotID, in order. An interval's dollars are the equity change less
+	// the external flow; a strategy's (strategy "" is the wallet) are its
+	// trade cash plus the change in what it holds, and zero for an interval
+	// whose previous snapshot held positions it has no split for. It reports
+	// false when snapshotID is before since or, for a strategy, records no
+	// row for it.
+	TradingPnLSince(ctx context.Context, strategy string, since time.Time, snapshotID int64) ([]TradingPnL, bool, error)
+}
+
+// TradingPnL is one interval of TradingPnLSince. ExternalFlowUSD is the
+// wallet's flow in the interval, even for a strategy's.
+type TradingPnL struct {
+	SnapshotID      int64
+	PnLUSD          string
+	ExternalFlowUSD string
 }
 
 // PositionReconciler adopts the exchange's own view of a lane's size. It is

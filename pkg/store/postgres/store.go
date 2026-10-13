@@ -1503,6 +1503,73 @@ func (s *Store) PeakStrategyIndexSince(ctx context.Context, strategy string, sin
 	return *peak, true, nil
 }
 
+// pnlWindow bounds the snapshots a trading profit query reads: from the last
+// one before since, which LAG needs as the level ahead of the first counted
+// interval, through snapshot $2 in (taken_at, id) order, so a later snapshot
+// sharing its time is left out.
+const pnlWindow = `
+	WHERE taken_at >= COALESCE((SELECT max(taken_at) FROM equity_snapshots WHERE taken_at < $1), $1)
+		AND (taken_at, id) <= (SELECT taken_at, id FROM equity_snapshots WHERE id = $2)`
+
+// pnlTail lists the intervals in s from the first snapshot at or after since,
+// or none when $2 is not among them.
+const pnlTail = `
+	SELECT id, pnl::text, flow::text FROM s
+	WHERE taken_at >= $1 AND EXISTS (SELECT 1 FROM s WHERE id = $2 AND taken_at >= $1)
+	ORDER BY taken_at, id`
+
+const walletPnLSQL = `
+	WITH s AS (
+		SELECT id, taken_at, external_flow_usd AS flow,
+			equity_usd - COALESCE(LAG(equity_usd) OVER w, equity_usd) - external_flow_usd AS pnl
+		FROM equity_snapshots` + pnlWindow + `
+		WINDOW w AS (ORDER BY taken_at, id)
+	)` + pnlTail
+
+// strategyPnLSQL counts nothing for an interval, as the recorder does, when
+// there is no earlier snapshot, or when the one before it recorded no split
+// while the wallet held positions: what the strategy held then is unknown. A
+// strategy missing from a split held nothing.
+const strategyPnLSQL = `
+	WITH e AS (
+		SELECT id, taken_at, external_flow_usd, LAG(id) OVER w AS prev_id, LAG(positions_usd) OVER w AS prev_held
+		FROM equity_snapshots` + pnlWindow + `
+		WINDOW w AS (ORDER BY taken_at, id)
+	), s AS (
+		SELECT e.id, e.taken_at, e.external_flow_usd AS flow,
+			CASE WHEN e.prev_id IS NULL THEN 0
+				WHEN p.snapshot_id IS NULL AND e.prev_held > 0
+					AND NOT EXISTS (SELECT 1 FROM equity_snapshot_strategies x WHERE x.snapshot_id = e.prev_id) THEN 0
+				ELSE ss.trade_cash_usd + ss.positions_usd - COALESCE(p.positions_usd, 0) END AS pnl
+		FROM e
+		JOIN equity_snapshot_strategies ss ON ss.snapshot_id = e.id AND ss.strategy = $3
+		LEFT JOIN equity_snapshot_strategies p ON p.snapshot_id = e.prev_id AND p.strategy = $3
+	)` + pnlTail
+
+func (s *Store) TradingPnLSince(ctx context.Context, strategy string, since time.Time, snapshotID int64) ([]store.TradingPnL, bool, error) {
+	query, args := walletPnLSQL, []any{since, snapshotID}
+	if strategy != "" {
+		query, args = strategyPnLSQL, append(args, strategy)
+	}
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("load trading pnl: %w", err)
+	}
+	defer rows.Close()
+	var intervals []store.TradingPnL
+	for rows.Next() {
+		var interval store.TradingPnL
+		if err := rows.Scan(&interval.SnapshotID, &interval.PnLUSD, &interval.ExternalFlowUSD); err != nil {
+			return nil, false, fmt.Errorf("scan trading pnl: %w", err)
+		}
+		intervals = append(intervals, interval)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("load trading pnl: %w", err)
+	}
+	return intervals, len(intervals) > 0, nil
+}
+
 const equitySnapshotColumns = `id, taken_at, reason, cash_usd::text, positions_usd::text, equity_usd::text,
 	trade_cash_usd::text, external_flow_usd::text, trade_index::text, unmarked_positions`
 

@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,6 +135,47 @@ func (f *fakeEquityStore) PeakStrategyIndexSince(_ context.Context, strategy str
 		peak = max(peak, 1)
 	}
 	return strconv.FormatFloat(peak, 'f', -1, 64), ok, nil
+}
+
+// TradingPnLSince lists the saved intervals' dollars; the Postgres store's
+// test covers the rules for gaps in a strategy's split.
+func (f *fakeEquityStore) TradingPnLSince(_ context.Context, strategy string, since time.Time, snapshotID int64) ([]store.TradingPnL, bool, error) {
+	num := func(text string) float64 { v, _ := strconv.ParseFloat(text, 64); return v }
+	var intervals []store.TradingPnL
+	for i, r := range f.saved {
+		var pnl float64
+		part, found := strategyPart(r.Strategies, strategy)
+		switch {
+		case strategy != "" && !found:
+			if r.ID == snapshotID {
+				return nil, false, nil
+			}
+			continue
+		case i == 0:
+		case strategy == "":
+			pnl = num(r.EquityUSD) - num(f.saved[i-1].EquityUSD) - num(r.ExternalFlowUSD)
+		default:
+			prior, _ := strategyPart(f.saved[i-1].Strategies, strategy)
+			pnl = num(part.TradeCashUSD) + num(part.PositionsUSD) - num(prior.PositionsUSD)
+		}
+		if !r.TakenAt.Before(since) {
+			intervals = append(intervals, store.TradingPnL{SnapshotID: r.ID,
+				PnLUSD: strconv.FormatFloat(pnl, 'f', -1, 64), ExternalFlowUSD: r.ExternalFlowUSD})
+		}
+		if r.ID == snapshotID {
+			return intervals, !r.TakenAt.Before(since), nil
+		}
+	}
+	return nil, false, nil
+}
+
+func strategyPart(parts []store.StrategyEquityRecord, strategy string) (store.StrategyEquityRecord, bool) {
+	for _, part := range parts {
+		if part.Strategy == strategy {
+			return part, true
+		}
+	}
+	return store.StrategyEquityRecord{PositionsUSD: "0"}, false
 }
 
 var recordStart = time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
@@ -304,7 +346,7 @@ func TestDrawdownGuardMeasuresFromTheStart(t *testing.T) {
 	recordAt(t, r, s, wallet, -3, 100, 0, "")
 	recordAt(t, r, s, wallet, -2, 200, 0, "100")  // index 2
 	recordAt(t, r, s, wallet, -1, 100, 0, "-100") // index 1
-	guard, err := NewDrawdownGuard(s, recordStart, 0.1)
+	guard, err := NewDrawdownGuard(s, recordStart, FractionLimit(0.1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,13 +381,51 @@ func TestDrawdownGuardMeasuresFromTheStart(t *testing.T) {
 	}
 }
 
+func TestDrawdownGuardDollarLimit(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	recordAt(t, r, s, wallet, -1, 100, 0, "")
+	guard, err := NewDrawdownGuard(s, recordStart, DollarLimit(25))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	recordAt(t, r, s, wallet, 0, 80, 0, "-20") // $20 down
+	if _, err := guard.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if suspended, reason := guard.Suspended(); suspended {
+		t.Fatalf("suspended $20 down on a $25 limit: %s", reason)
+	}
+	recordAt(t, r, s, wallet, 1, 70, 0, "-10") // $30 down
+	if _, err := guard.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if suspended, reason := guard.Suspended(); !suspended || !strings.Contains(reason, "$30.00") || !strings.Contains(reason, "$25 limit") {
+		t.Fatalf("expected a $30 suspension, got %v %q", suspended, reason)
+	}
+	// A deposit raises equity but is no trading profit, so it neither adds to
+	// the dollars lost nor hides them.
+	recordAt(t, r, s, wallet, 2, 1070, 0, "0")
+	if _, err := guard.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if suspended, reason := guard.Suspended(); !suspended || !strings.Contains(reason, "$30.00") {
+		t.Fatalf("a deposit changed the dollar drawdown: %v %q", suspended, reason)
+	}
+	for _, bad := range []DrawdownLimit{{}, FractionLimit(1), DollarLimit(-1), DollarLimit(0), DollarLimit(math.Inf(1)), DollarLimit(math.NaN()), FractionLimit(math.NaN())} {
+		if _, err := NewDrawdownGuard(s, recordStart, bad); err == nil {
+			t.Errorf("limit %+v accepted", bad)
+		}
+	}
+}
+
 func TestDrawdownGuardMeasuresALossAcrossTheStart(t *testing.T) {
 	r, s, wallet := newTestRecorder()
 	recordAt(t, r, s, wallet, -1, 100, 0, "")
 	// The first snapshot after the start is already 30% below the level
 	// trading stood at when the start came.
 	recordAt(t, r, s, wallet, 0, 70, 0, "-30")
-	guard, err := NewDrawdownGuard(s, recordStart, 0.1)
+	guard, err := NewDrawdownGuard(s, recordStart, FractionLimit(0.1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +501,7 @@ func TestStrategyDrawdownCountsTheFirstIntervalsLoss(t *testing.T) {
 	recordSplit(t, r, s, wallet, -1, 100, nil, nil)
 	// a opens and is down 15% of the wallet in its first interval.
 	recordSplit(t, r, s, wallet, 0, 80, map[string]float64{"a": 5}, map[string]float64{"a": -20})
-	guard, err := NewStrategyDrawdownGuard(s, "a", recordStart, 0.1)
+	guard, err := NewStrategyDrawdownGuard(s, "a", recordStart, FractionLimit(0.1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,15 +517,15 @@ func TestDrawdownLimitsHoldBackOnlyTheStrategyOverItsLimit(t *testing.T) {
 	r, s, wallet := newTestRecorder()
 	recordSplit(t, r, s, wallet, 0, 50, map[string]float64{"a": 20, "b": 30}, map[string]float64{"a": -20, "b": -30})
 	recordSplit(t, r, s, wallet, 1, 90, map[string]float64{"a": 5}, map[string]float64{"b": 40})
-	walletGuard, err := NewDrawdownGuard(s, recordStart, 0.2)
+	walletGuard, err := NewDrawdownGuard(s, recordStart, FractionLimit(0.2))
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := NewStrategyDrawdownGuard(s, "a", recordStart, 0.1)
+	a, err := NewStrategyDrawdownGuard(s, "a", recordStart, FractionLimit(0.1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewStrategyDrawdownGuard(s, "b", recordStart, 0.1)
+	b, err := NewStrategyDrawdownGuard(s, "b", recordStart, FractionLimit(0.1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,5 +578,65 @@ func TestRecordFailsOnUnreadablePreviousPositions(t *testing.T) {
 	wallet.snapshot = Snapshot{CashUSD: 50, PositionsUSD: 40, EquityUSD: 90, PositionsByStrategy: map[string]float64{"a": 40}, AsOf: recordStart.Add(time.Minute)}
 	if _, err := r.Record(context.Background(), "settlement"); err == nil {
 		t.Fatal("expected an error for unreadable previous positions")
+	}
+}
+
+func TestDrawdownLimitStringIsAsConfigured(t *testing.T) {
+	for limit, want := range map[DrawdownLimit]string{FractionLimit(7.0 / 100): "7%", FractionLimit(0.125): "12.5%", DollarLimit(500): "$500", DollarLimit(12.5): "$12.5", FractionLimit(1e-7): "0.00001%"} {
+		if got := limit.String(); got != want {
+			t.Errorf("%+v formats as %q, want %q", limit, got, want)
+		}
+	}
+}
+
+func TestStrategyDollarDrawdownIgnoresOtherStrategiesGains(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	recordSplit(t, r, s, wallet, -1, 100, nil, nil)
+	recordSplit(t, r, s, wallet, 0, 85, nil, map[string]float64{"a": -15})
+	// b more than doubles the wallet; a's loss is still $15.
+	recordSplit(t, r, s, wallet, 1, 985, nil, map[string]float64{"b": 900})
+	ctx := context.Background()
+	for limit, want := range map[float64]bool{20: false, 10: true} {
+		guard, err := NewStrategyDrawdownGuard(s, "a", recordStart, DollarLimit(limit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := guard.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if suspended, reason := guard.Suspended(); suspended != want || (want && !strings.Contains(reason, "$15.00")) {
+			t.Fatalf("$%g limit: suspended %v %q, want %v at $15.00", limit, suspended, reason, want)
+		}
+	}
+}
+
+func TestDollarDrawdownForgetsASpikeAFlowReverses(t *testing.T) {
+	pnl := func(rows ...[2]string) []store.TradingPnL {
+		var intervals []store.TradingPnL
+		for i, row := range rows {
+			intervals = append(intervals, store.TradingPnL{SnapshotID: int64(i + 1), PnLUSD: row[0], ExternalFlowUSD: row[1]})
+		}
+		return intervals
+	}
+	for name, tc := range map[string]struct {
+		intervals []store.TradingPnL
+		want      float64
+	}{
+		// A $500 buy stored after the snapshot its cash left before: a
+		// withdrawal and a $500 gain, reversed next interval.
+		"late fill":            {pnl([2]string{"0", "0"}, [2]string{"500", "-500"}, [2]string{"-500", "500"}), 0},
+		"late fill, then loss": {pnl([2]string{"500", "-500"}, [2]string{"-500", "500"}, [2]string{"-30", "0"}), 30},
+		"gain kept":            {pnl([2]string{"100", "-500"}, [2]string{"0", "0"}, [2]string{"-40", "0"}), 40},
+		"latest flow":          {pnl([2]string{"100", "0"}, [2]string{"400", "-500"}), 0},
+		"loss after a peak":    {pnl([2]string{"100", "0"}, [2]string{"-60", "0"}, [2]string{"20", "0"}), 40},
+		"loss from the start":  {pnl([2]string{"-25", "0"}), 25},
+	} {
+		got, err := DollarDrawdown(tc.intervals)
+		if err != nil || got != tc.want {
+			t.Errorf("%s: %v %v, want %v", name, got, err, tc.want)
+		}
+	}
+	if _, err := DollarDrawdown(pnl([2]string{"NaN", "0"})); err == nil {
+		t.Error("NaN pnl accepted")
 	}
 }

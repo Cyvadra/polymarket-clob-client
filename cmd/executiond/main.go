@@ -44,8 +44,8 @@ type config struct {
 	BalanceCacheTTL        time.Duration
 	EquityMaxQuoteAge      time.Duration
 	MaxEquityFraction      float64
-	MaxDrawdown            float64
-	StrategyMaxDrawdown    map[string]float64
+	MaxDrawdown            equity.DrawdownLimit
+	StrategyMaxDrawdown    map[string]equity.DrawdownLimit
 	DrawdownStart          time.Time
 	EquityFlowThresholdUSD float64
 	SizeAfterLossOnly      bool
@@ -413,6 +413,7 @@ func closeModules(ctx context.Context, modules []namedModule) error {
 }
 
 func configFromEnv() (config, error) {
+	var deprecated []string // bare-fraction limits, warned of once the config loads
 	cfg := config{
 		NATSURL:                env("EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
 		PostgresURL:            env("EXECUTION_POSTGRES_URL", "postgres://user:password@127.0.0.1:5432/execution?sslmode=disable"),
@@ -447,18 +448,22 @@ func configFromEnv() (config, error) {
 		cfg.MaxEquityFraction = fraction
 	}
 	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_DRAWDOWN")); value != "" {
-		limit, err := strconv.ParseFloat(value, 64)
-		if err != nil || limit <= 0 || limit >= 1 {
-			return config{}, fmt.Errorf("EXECUTION_MAX_DRAWDOWN must be in (0, 1)")
+		limit, bare, err := parseDrawdownLimit(value)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_MAX_DRAWDOWN: %w", err)
+		}
+		if bare {
+			deprecated = append(deprecated, value)
 		}
 		cfg.MaxDrawdown = limit
 	}
 	if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_MAX_DRAWDOWN")); value != "" {
-		limits, err := parseStrategyLimits(value, allowed)
+		limits, bare, err := parseStrategyLimits(value, allowed)
 		if err != nil {
 			return config{}, fmt.Errorf("EXECUTION_STRATEGY_MAX_DRAWDOWN: %w", err)
 		}
 		cfg.StrategyMaxDrawdown = limits
+		deprecated = append(deprecated, bare...)
 	}
 	if cfg.drawdownLimited() {
 		start, err := parseStart(os.Getenv("EXECUTION_DRAWDOWN_START"))
@@ -484,15 +489,49 @@ func configFromEnv() (config, error) {
 	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.KeepWarmInterval < 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
+	for _, value := range deprecated {
+		limit, _, _ := parseDrawdownLimit(value)
+		log.Printf("drawdown limit %q is a bare fraction, read as %s; write it as %s, since bare numbers are deprecated", value, limit, limit)
+	}
 	return cfg, nil
 }
 
-// parseStrategyLimits reads comma-separated name:fraction pairs. A name is
-// split from its fraction at the last colon, so it may hold one itself, and
+// parseDrawdownLimit reads "$123" as a dollar limit or "20%" as a fraction of
+// the peak. A bare number in (0, 1) is the fraction form older configs hold;
+// it is still read as a fraction, reported by bare so the caller can warn.
+// Any other bare number is refused, since 20 could mean 20% or $20.
+func parseDrawdownLimit(value string) (limit equity.DrawdownLimit, bare bool, err error) {
+	value = strings.TrimSpace(value)
+	var amount float64
+	switch {
+	case strings.HasPrefix(value, "$"):
+		amount, err = strconv.ParseFloat(strings.TrimSpace(value[1:]), 64)
+		limit = equity.DollarLimit(amount)
+	case strings.HasSuffix(value, "%"):
+		amount, err = strconv.ParseFloat(strings.TrimSpace(value[:len(value)-1]), 64)
+		limit = equity.FractionLimit(amount / 100)
+	default:
+		amount, err = strconv.ParseFloat(value, 64)
+		limit = equity.FractionLimit(amount)
+		if err != nil || !limit.Valid() {
+			return equity.DrawdownLimit{}, false, fmt.Errorf("%q must be a dollar amount like $123 or a percentage like 20%%", value)
+		}
+		bare = true
+	}
+	if err != nil || !limit.Valid() {
+		return equity.DrawdownLimit{}, false, fmt.Errorf("%q must be a positive dollar amount or a percentage in (0%%, 100%%)", value)
+	}
+	return limit, bare, nil
+}
+
+// parseStrategyLimits reads comma-separated name:limit pairs, each limit as
+// parseDrawdownLimit reads it. A name is split from its limit at the last
+// colon, so it may hold one itself, and
 // must be one of allowed: a misspelt name would otherwise leave its strategy
-// without a limit.
-func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]float64, error) {
-	limits := map[string]float64{}
+// without a limit. It also returns the limits written as bare fractions.
+func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]equity.DrawdownLimit, []string, error) {
+	limits := map[string]equity.DrawdownLimit{}
+	var bares []string
 	for _, entry := range strings.Split(value, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -500,27 +539,33 @@ func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]floa
 		}
 		cut := strings.LastIndex(entry, ":")
 		if cut < 0 {
-			return nil, fmt.Errorf("%q is not strategy:fraction", entry)
+			if strings.Trim(entry, "0123456789.") == "" {
+				return nil, nil, fmt.Errorf("%q is not strategy:limit; write dollar limits without thousands separators", entry)
+			}
+			return nil, nil, fmt.Errorf("%q is not strategy:limit", entry)
 		}
 		name := strings.TrimSpace(entry[:cut])
-		limit, err := strconv.ParseFloat(strings.TrimSpace(entry[cut+1:]), 64)
+		limit, bare, err := parseDrawdownLimit(entry[cut+1:])
 		switch {
 		case name == "":
-			return nil, fmt.Errorf("%q names no strategy", entry)
-		case err != nil || limit <= 0 || limit >= 1:
-			return nil, fmt.Errorf("strategy %q limit must be in (0, 1)", name)
+			return nil, nil, fmt.Errorf("%q names no strategy", entry)
+		case err != nil:
+			return nil, nil, fmt.Errorf("strategy %q: %w", name, err)
 		case !allowed.Allows(name):
-			return nil, fmt.Errorf("strategy %q is not in EXECUTION_ALLOWED_STRATEGIES", name)
+			return nil, nil, fmt.Errorf("strategy %q is not in EXECUTION_ALLOWED_STRATEGIES", name)
 		}
 		if _, dup := limits[name]; dup {
-			return nil, fmt.Errorf("strategy %q is listed twice", name)
+			return nil, nil, fmt.Errorf("strategy %q is listed twice", name)
 		}
 		limits[name] = limit
+		if bare {
+			bares = append(bares, strings.TrimSpace(entry[cut+1:]))
+		}
 	}
 	if len(limits) == 0 {
-		return nil, fmt.Errorf("no strategy:fraction pairs in %q", value)
+		return nil, nil, fmt.Errorf("no strategy:limit pairs in %q", value)
 	}
-	return limits, nil
+	return limits, bares, nil
 }
 
 // parseStart reads the drawdown start: an RFC 3339 time, or a UTC date.
@@ -598,7 +643,7 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
 // drawdownLimits builds the wallet's limit, if set, and each strategy's.
 func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits, error) {
 	var wallet *equity.DrawdownGuard
-	if cfg.MaxDrawdown > 0 {
+	if !cfg.MaxDrawdown.IsZero() {
 		guard, err := equity.NewDrawdownGuard(s, cfg.DrawdownStart, cfg.MaxDrawdown)
 		if err != nil {
 			return nil, err
@@ -619,22 +664,18 @@ func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits,
 // refreshDrawdown refreshes every guard, so one that fails does not leave
 // the others stale, and returns the errors joined.
 func refreshDrawdown(ctx context.Context, limits *equity.DrawdownLimits) error {
-	drawdowns, err := limits.Refresh(ctx)
-	for _, guard := range limits.Guards() {
-		drawdown, ok := drawdowns[guard.Strategy()]
-		if !ok {
-			continue
-		}
+	refreshed, err := limits.Refresh(ctx)
+	for _, guard := range refreshed {
 		if suspended, reason := guard.Suspended(); suspended {
 			log.Printf("opens suspended: %s", reason)
 			continue
 		}
-		log.Printf("%s %.2f%%, opens allowed", guard.Label(), drawdown*100)
+		log.Printf("%s %s, opens allowed", guard.Label(), guard.Status())
 	}
 	return err
 }
 
 // drawdownLimited reports whether any drawdown limit, wallet or strategy, is set.
 func (c config) drawdownLimited() bool {
-	return c.MaxDrawdown > 0 || len(c.StrategyMaxDrawdown) > 0
+	return !c.MaxDrawdown.IsZero() || len(c.StrategyMaxDrawdown) > 0
 }
