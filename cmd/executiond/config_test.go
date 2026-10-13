@@ -122,3 +122,36 @@ func TestConfigFromEnvReadsAllowedStrategies(t *testing.T) {
 		t.Fatalf("allowed=%v", cfg.AllowedStrategies.Names())
 	}
 }
+
+func TestConfigFromEnvStrategyDrawdownLimits(t *testing.T) {
+	withEnv(t, map[string]string{
+		"EXECUTION_ALLOWED_STRATEGIES":    "late-gap,momentum,ns:v2",
+		"EXECUTION_STRATEGY_MAX_DRAWDOWN": " late-gap:0.1 , ns:v2:0.15 ",
+		"EXECUTION_DRAWDOWN_START":        "2026-09-28",
+	})
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if cfg.MaxDrawdown != 0 || len(cfg.StrategyMaxDrawdown) != 2 || cfg.StrategyMaxDrawdown["late-gap"] != 0.1 || cfg.StrategyMaxDrawdown["ns:v2"] != 0.15 {
+		t.Fatalf("limits %+v, global %g", cfg.StrategyMaxDrawdown, cfg.MaxDrawdown)
+	}
+
+	for name, kv := range map[string]map[string]string{
+		"no start":    {"EXECUTION_DRAWDOWN_START": ""},
+		"not allowed": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "Late-Gap:0.1"},
+		"duplicate":   {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:0.1,late-gap:0.2"},
+		"no fraction": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap"},
+		"no name":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": ":0.1"},
+		"limit of 1":  {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:1"},
+		"percent":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10"},
+		"only commas": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": ","},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withEnv(t, kv)
+			if _, err := configFromEnv(); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}

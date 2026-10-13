@@ -147,6 +147,8 @@ Order events use the same numeric representation for `matched_shares` when the f
 
 `INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `DRAWDOWN_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`.
 
+`DRAWDOWN_LIMIT` means opens are suspended by the wallet's drawdown limit, which applies to every strategy, or by the request's own strategy limit, which leaves other strategies trading. Closes are never rejected with it.
+
 `BELOW_MIN_ORDER_SIZE` means the position is smaller than the market's minimum order size, so no order can be placed for it. It is not a permanent failure: executiond keeps the shares and retries as the lane grows, and takes the residual with a FAK if the bid reaches the close's limit price before settlement.
 
 ## Examples

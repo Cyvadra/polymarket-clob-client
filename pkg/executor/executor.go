@@ -84,9 +84,10 @@ func (e *Executor) SetEntrySizer(sizer EntrySizer) {
 	e.sizer = sizer
 }
 
-// OpenGate can hold back new positions; closes are never gated.
+// OpenGate can hold back new positions, for every strategy or for one;
+// closes are never gated.
 type OpenGate interface {
-	Suspended() (bool, string)
+	Suspended(strategy string) (bool, string)
 }
 
 // SetOpenGate rejects opens while gate reports trading suspended.

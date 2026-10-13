@@ -70,7 +70,7 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		Policy:             req.Policy,
 	}
 	if e.gate != nil {
-		if suspended, reason := e.gate.Suspended(); suspended {
+		if suspended, reason := e.gate.Suspended(req.Strategy); suspended {
 			err := reject(protocol.ReasonDrawdownLimit, "%s", reason)
 			e.publishOpenRejection(intent, err)
 			return err

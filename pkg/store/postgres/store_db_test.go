@@ -647,6 +647,7 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 		for _, statement := range []string{
 			`UPDATE fills SET equity_snapshot_id = NULL WHERE equity_snapshot_id IN (SELECT id FROM equity_snapshots WHERE reason = $1)`,
 			`UPDATE settlement_payouts SET equity_snapshot_id = NULL WHERE equity_snapshot_id IN (SELECT id FROM equity_snapshots WHERE reason = $1)`,
+			`DELETE FROM equity_snapshot_strategies WHERE snapshot_id IN (SELECT id FROM equity_snapshots WHERE reason = $1)`,
 			`DELETE FROM equity_snapshots WHERE reason = $1`,
 		} {
 			if _, err := s.pool.Exec(context.Background(), statement, reason); err != nil {
@@ -695,6 +696,9 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 	}
 	if got, _ := strconv.ParseFloat(pending.USD, 64); math.Abs(got-3.9) > 1e-9 || len(pending.FillIDs) != 2 || len(pending.PayoutIDs) != 1 {
 		t.Fatalf("pending trade cash %+v, want 3.9 from 2 fills and 1 payout", pending)
+	}
+	if got, _ := strconv.ParseFloat(pending.ByStrategy["test"], 64); math.Abs(got-3.9) > 1e-9 {
+		t.Fatalf("pending trade cash by strategy %v, want 3.9 for the lane's strategy", pending.ByStrategy)
 	}
 	counted := pending
 	// A fill stored after the read, matched long before, is left pending
@@ -746,5 +750,34 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 	}
 	if flow, err := s.ExternalFlowAfter(ctx, latest.ID); err != nil || flow != "0" {
 		t.Fatalf("flow after the latest snapshot %q, %v", flow, err)
+	}
+
+	// The split by strategy is saved with its snapshot, and its peak is read
+	// the same way.
+	strategy := "strategy-" + lane.tag
+	for i, index := range []string{"1.3", "0.9"} {
+		record := store.EquitySnapshotRecord{
+			TakenAt: start.Add(time.Duration(2+i) * time.Minute), Reason: reason, CashUSD: "1", PositionsUSD: "0", EquityUSD: "1",
+			TradeCashUSD: "0", ExternalFlowUSD: "0", TradeIndex: "1",
+			Strategies: []store.StrategyEquityRecord{{Strategy: strategy, TradeCashUSD: "-1", PositionsUSD: "2", TradeIndex: index}},
+		}
+		if _, err := s.RecordEquitySnapshot(ctx, record, empty); err != nil {
+			t.Fatal(err)
+		}
+	}
+	latest, _, err = s.LatestEquitySnapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := s.StrategyEquity(ctx, latest.ID)
+	if err != nil || len(parts) != 1 || parts[0].Strategy != strategy || parts[0].TradeIndex != "0.900000000000000000" {
+		t.Fatalf("strategy equity %+v, %v", parts, err)
+	}
+	peak, ok, err = s.PeakStrategyIndexSince(ctx, strategy, start)
+	if got, _ := strconv.ParseFloat(peak, 64); err != nil || !ok || got != 1.3 {
+		t.Fatalf("strategy peak %s, %v, %v; want 1.3", peak, ok, err)
+	}
+	if _, ok, err := s.PeakStrategyIndexSince(ctx, "other-"+lane.tag, start); err != nil || ok {
+		t.Fatalf("untraded strategy peak: ok=%v err=%v", ok, err)
 	}
 }

@@ -99,7 +99,7 @@ func TestExecuteOpenRejectsEquitySizingProblems(t *testing.T) {
 
 type fakeGate struct{ suspended bool }
 
-func (f fakeGate) Suspended() (bool, string) {
+func (f fakeGate) Suspended(string) (bool, string) {
 	if f.suspended {
 		return true, "trading drawdown 12.00% exceeds the 10.00% limit"
 	}

@@ -21,6 +21,10 @@ type fakeValuer struct {
 
 func (f *fakeValuer) Invalidate() { f.invalidated = true }
 
+func (f *fakeValuer) SnapshotWithStrategies(ctx context.Context) (Snapshot, error) {
+	return f.Snapshot(ctx)
+}
+
 func (f *fakeValuer) Snapshot(context.Context) (Snapshot, error) {
 	f.fresh = f.invalidated
 	if f.onSnapshot != nil {
@@ -33,6 +37,8 @@ type fakeEquityStore struct {
 	saved     []store.EquitySnapshotRecord
 	tradeCash string
 	lost      bool
+	// byStrategy is the split of tradeCash the next PendingTradeCash reports.
+	byStrategy map[string]string
 	// pendingReads counts PendingTradeCash calls; counted is what each saved
 	// snapshot was told it counted.
 	pendingReads int
@@ -42,9 +48,9 @@ type fakeEquityStore struct {
 func (f *fakeEquityStore) PendingTradeCash(context.Context) (store.PendingTradeCash, error) {
 	f.pendingReads++
 	if f.tradeCash == "" {
-		return store.PendingTradeCash{USD: "0", Lost: f.lost}, nil
+		return store.PendingTradeCash{USD: "0", Lost: f.lost, ByStrategy: f.byStrategy}, nil
 	}
-	return store.PendingTradeCash{USD: f.tradeCash, FillIDs: []string{"fill"}, Lost: f.lost}, nil
+	return store.PendingTradeCash{USD: f.tradeCash, FillIDs: []string{"fill"}, Lost: f.lost, ByStrategy: f.byStrategy}, nil
 }
 
 func (f *fakeEquityStore) RecordEquitySnapshot(_ context.Context, r store.EquitySnapshotRecord, counted store.PendingTradeCash) (store.EquitySnapshotRecord, error) {
@@ -92,6 +98,40 @@ func (f *fakeEquityStore) PeakTradeIndexSince(_ context.Context, since time.Time
 		if !ok || v > peak {
 			peak, ok = v, true
 		}
+	}
+	return strconv.FormatFloat(peak, 'f', -1, 64), ok, nil
+}
+
+func (f *fakeEquityStore) StrategyEquity(_ context.Context, id int64) ([]store.StrategyEquityRecord, error) {
+	return f.saved[id-1].Strategies, nil
+}
+
+func (f *fakeEquityStore) PeakStrategyIndexSince(_ context.Context, strategy string, since time.Time) (string, bool, error) {
+	peak, ok := 0.0, false
+	var before *store.StrategyEquityRecord
+	for _, r := range f.saved {
+		for _, part := range r.Strategies {
+			if part.Strategy != strategy {
+				continue
+			}
+			if r.TakenAt.Before(since) {
+				before = &part
+				continue
+			}
+			v, _ := strconv.ParseFloat(part.TradeIndex, 64)
+			if !ok || v > peak {
+				peak, ok = v, true
+			}
+		}
+	}
+	if before != nil {
+		v, _ := strconv.ParseFloat(before.TradeIndex, 64)
+		if !ok || v > peak {
+			peak, ok = v, true
+		}
+	} else if ok {
+		// First seen after since: it stood at 1 before its first interval.
+		peak = max(peak, 1)
 	}
 	return strconv.FormatFloat(peak, 'f', -1, 64), ok, nil
 }
@@ -315,5 +355,148 @@ func TestDrawdownGuardMeasuresALossAcrossTheStart(t *testing.T) {
 	}
 	if suspended, _ := guard.Suspended(); !suspended || math.Abs(drawdown-0.3) > 1e-9 {
 		t.Fatalf("loss across the start not measured: drawdown %g, suspended %v", drawdown, suspended)
+	}
+}
+
+// recordSplit is recordAt with the positions and trade cash split by strategy.
+func recordSplit(t *testing.T, r *Recorder, s *fakeEquityStore, wallet *fakeValuer, minute int, cash float64, positions map[string]float64, tradeCash map[string]float64) store.EquitySnapshotRecord {
+	t.Helper()
+	at := recordStart.Add(time.Duration(minute) * time.Minute)
+	var held, moved float64
+	for _, usd := range positions {
+		held += usd
+	}
+	s.byStrategy = map[string]string{}
+	for name, usd := range tradeCash {
+		moved += usd
+		s.byStrategy[name] = strconv.FormatFloat(usd, 'f', -1, 64)
+	}
+	wallet.snapshot = Snapshot{CashUSD: cash, PositionsUSD: held, EquityUSD: cash + held, PositionsByStrategy: positions, CashAsOf: at, AsOf: at}
+	s.tradeCash = strconv.FormatFloat(moved, 'f', -1, 64)
+	saved, err := r.Record(context.Background(), "settlement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return saved
+}
+
+func strategyIndex(t *testing.T, r store.EquitySnapshotRecord, strategy string) float64 {
+	t.Helper()
+	for _, part := range r.Strategies {
+		if part.Strategy == strategy {
+			v, err := strconv.ParseFloat(part.TradeIndex, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("no %q in %+v", strategy, r.Strategies)
+	return 0
+}
+
+func TestRecordSplitsTheTradeIndexByStrategy(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	// $100 cash; a buys $20, b buys $30.
+	recordSplit(t, r, s, wallet, 0, 50, map[string]float64{"a": 20, "b": 30}, map[string]float64{"a": -20, "b": -30})
+	// a's lane falls to $10; b sells for $40. Equity 100 -> 100.
+	got := recordSplit(t, r, s, wallet, 1, 90, map[string]float64{"a": 10}, map[string]float64{"b": 40})
+	if a, b := strategyIndex(t, got, "a"), strategyIndex(t, got, "b"); math.Abs(a-0.9) > 1e-9 || math.Abs(b-1.1) > 1e-9 {
+		t.Fatalf("a %g, b %g", a, b)
+	}
+	if index(t, got) != 1 {
+		t.Fatalf("wallet index %g", index(t, got))
+	}
+	// A $100 deposit changes neither; a's lane then loses its last $10, now
+	// over $200 of equity.
+	recordSplit(t, r, s, wallet, 2, 190, map[string]float64{"a": 10}, nil)
+	got = recordSplit(t, r, s, wallet, 3, 190, map[string]float64{"a": 0}, nil)
+	if a, b := strategyIndex(t, got, "a"), strategyIndex(t, got, "b"); math.Abs(a-0.9*0.95) > 1e-9 || math.Abs(b-1.1) > 1e-9 {
+		t.Fatalf("after deposit: a %g, b %g", a, b)
+	}
+}
+
+func TestStrategyDrawdownCountsTheFirstIntervalsLoss(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	recordSplit(t, r, s, wallet, -1, 100, nil, nil)
+	// a opens and is down 15% of the wallet in its first interval.
+	recordSplit(t, r, s, wallet, 0, 80, map[string]float64{"a": 5}, map[string]float64{"a": -20})
+	guard, err := NewStrategyDrawdownGuard(s, "a", recordStart, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drawdown, err := guard.Refresh(context.Background()); err != nil || math.Abs(drawdown-0.15) > 1e-9 {
+		t.Fatalf("drawdown %g, %v; want 0.15", drawdown, err)
+	}
+	if suspended, _ := guard.Suspended(); !suspended {
+		t.Fatal("a first-interval loss over the limit did not suspend")
+	}
+}
+
+func TestDrawdownLimitsHoldBackOnlyTheStrategyOverItsLimit(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	recordSplit(t, r, s, wallet, 0, 50, map[string]float64{"a": 20, "b": 30}, map[string]float64{"a": -20, "b": -30})
+	recordSplit(t, r, s, wallet, 1, 90, map[string]float64{"a": 5}, map[string]float64{"b": 40})
+	walletGuard, err := NewDrawdownGuard(s, recordStart, 0.2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := NewStrategyDrawdownGuard(s, "a", recordStart, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewStrategyDrawdownGuard(s, "b", recordStart, 0.1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := NewDrawdownLimits(walletGuard, a, b)
+	for _, guard := range limits.Guards() {
+		if _, err := guard.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if suspended, reason := limits.Suspended("a"); !suspended || reason == "" {
+		t.Fatal("a is 15% down and not held back")
+	}
+	if suspended, _ := limits.Suspended("b"); suspended {
+		t.Fatal("b is held back by a's loss")
+	}
+	if suspended, _ := limits.Suspended("c"); suspended {
+		t.Fatal("a strategy with no limit is held back")
+	}
+}
+
+func TestRecordKeepsUnattributedLanesUnderTheEmptyName(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	// Held lanes with no recorded strategy still leave a row, so the next
+	// interval is not mistaken for one that predates the split.
+	first := recordSplit(t, r, s, wallet, 0, 50, map[string]float64{"": 50}, map[string]float64{"": -50})
+	if len(first.Strategies) != 1 || first.Strategies[0].Strategy != "" {
+		t.Fatalf("unattributed lane not recorded: %+v", first.Strategies)
+	}
+	// The lane loses $10 while a strategy opens its first lane at a loss.
+	got := recordSplit(t, r, s, wallet, 1, 50, map[string]float64{"": 40, "a": 0}, map[string]float64{"a": 0})
+	if u := strategyIndex(t, got, ""); math.Abs(u-0.9) > 1e-9 {
+		t.Fatalf("unattributed index %g", u)
+	}
+}
+
+func TestRecordSkipsTheIntervalAfterASnapshotWithoutASplit(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	// A snapshot recorded before the split existed holds positions and no rows.
+	recordAt(t, r, s, wallet, 0, 50, 50, "")
+	got := recordSplit(t, r, s, wallet, 1, 50, map[string]float64{"a": 40}, nil)
+	if a := strategyIndex(t, got, "a"); a != 1 {
+		t.Fatalf("interval over an unknown split counted: %g", a)
+	}
+}
+
+func TestRecordFailsOnUnreadablePreviousPositions(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	recordAt(t, r, s, wallet, 0, 50, 50, "")
+	s.saved[len(s.saved)-1].PositionsUSD = "oops"
+	wallet.snapshot = Snapshot{CashUSD: 50, PositionsUSD: 40, EquityUSD: 90, PositionsByStrategy: map[string]float64{"a": 40}, AsOf: recordStart.Add(time.Minute)}
+	if _, err := r.Record(context.Background(), "settlement"); err == nil {
+		t.Fatal("expected an error for unreadable previous positions")
 	}
 }

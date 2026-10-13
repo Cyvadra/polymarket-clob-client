@@ -202,6 +202,16 @@ type FillStore interface {
 	ApplyFill(context.Context, FillRecord) (inserted bool, err error)
 }
 
+// LaneKey identifies a lane.
+type LaneKey struct{ ConditionID, TokenID, UniqueTag string }
+
+// LaneStrategyReader maps the lanes holding shares to the strategy of their
+// first opening intent; a lane nothing opened is absent. It is kept apart from
+// PositionStore because only equity snapshots need it.
+type LaneStrategyReader interface {
+	LaneStrategies(context.Context) (map[LaneKey]string, error)
+}
+
 type PositionStore interface {
 	PositionFeatures(context.Context) ([]PositionRecord, error)
 }
@@ -222,6 +232,19 @@ type EquitySnapshotRecord struct {
 	ExternalFlowUSD   string
 	TradeIndex        string
 	UnmarkedPositions int
+	// Strategies splits the trading by strategy; see StrategyEquityRecord.
+	Strategies []StrategyEquityRecord
+}
+
+// StrategyEquityRecord is one strategy's part of an equity snapshot: the
+// trade cash its lanes moved since the previous snapshot, what its lanes held
+// were worth, and TradeIndex, its share of the wallet's trading return
+// chained from 1. A strategy's drawdown limit is measured on that index.
+type StrategyEquityRecord struct {
+	Strategy     string
+	TradeCashUSD string
+	PositionsUSD string
+	TradeIndex   string
 }
 
 // PendingTradeCash is the cash moved by fills and settlement payouts that no
@@ -231,6 +254,9 @@ type PendingTradeCash struct {
 	USD       string
 	FillIDs   []string
 	PayoutIDs []int64
+	// ByStrategy splits USD by the strategy of each row's lane, rows of a
+	// lane with no recorded strategy under "".
+	ByStrategy map[string]string
 	// Lost reports whether any of the payouts is a lane settled as a loser.
 	Lost bool
 }
@@ -259,6 +285,10 @@ type EquityStore interface {
 	// after since and the last one before it, the level trading at since
 	// started from; it reports false when there is none.
 	PeakTradeIndexSince(ctx context.Context, since time.Time) (string, bool, error)
+	// StrategyEquity is the per-strategy split of the snapshot with id.
+	StrategyEquity(ctx context.Context, snapshotID int64) ([]StrategyEquityRecord, error)
+	// PeakStrategyIndexSince is PeakTradeIndexSince for one strategy's index.
+	PeakStrategyIndexSince(ctx context.Context, strategy string, since time.Time) (string, bool, error)
 }
 
 // PositionReconciler adopts the exchange's own view of a lane's size. It is

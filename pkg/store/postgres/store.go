@@ -1310,6 +1310,15 @@ func (s *Store) RecordEquitySnapshot(ctx context.Context, record store.EquitySna
 	if fills.RowsAffected() != int64(len(counted.FillIDs)) || payouts.RowsAffected() != int64(len(counted.PayoutIDs)) {
 		return store.EquitySnapshotRecord{}, store.ErrTradeCashCounted
 	}
+	for _, part := range record.Strategies {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO equity_snapshot_strategies (snapshot_id, strategy, trade_cash_usd, positions_usd, trade_index)
+			VALUES ($1, $2, $3::numeric, $4::numeric, $5::numeric)
+		`, saved.ID, part.Strategy, part.TradeCashUSD, part.PositionsUSD, part.TradeIndex); err != nil {
+			return store.EquitySnapshotRecord{}, fmt.Errorf("record strategy %q equity: %w", part.Strategy, err)
+		}
+	}
+	saved.Strategies = append([]store.StrategyEquityRecord(nil), record.Strategies...)
 	if err := tx.Commit(ctx); err != nil {
 		return store.EquitySnapshotRecord{}, fmt.Errorf("commit equity snapshot: %w", err)
 	}
@@ -1353,22 +1362,36 @@ func (s *Store) ExternalFlowAfter(ctx context.Context, id int64) (string, error)
 // so they agree.
 func (s *Store) PendingTradeCash(ctx context.Context) (store.PendingTradeCash, error) {
 	var pending store.PendingTradeCash
+	var strategies, amounts []string
 	err := s.pool.QueryRow(ctx, `
 		WITH f AS (
-			SELECT fill_id, CASE WHEN side = 'SELL' THEN shares * price ELSE -shares * price END - fee AS cash
+			SELECT fill_id, condition_id, token_id, unique_tag, CASE WHEN side = 'SELL' THEN shares * price ELSE -shares * price END - fee AS cash
 			FROM fills
 			WHERE equity_snapshot_id IS NULL AND trade_status <> 'FAILED'
 		), p AS (
-			SELECT id, payout_usd, lost FROM settlement_payouts WHERE equity_snapshot_id IS NULL
+			SELECT id, condition_id, token_id, unique_tag, payout_usd, lost FROM settlement_payouts WHERE equity_snapshot_id IS NULL
+		), lanes AS (
+			SELECT condition_id, token_id, unique_tag, SUM(cash) AS cash
+			FROM (SELECT condition_id, token_id, unique_tag, cash FROM f UNION ALL SELECT condition_id, token_id, unique_tag, payout_usd FROM p) pending
+			GROUP BY condition_id, token_id, unique_tag
+		), by_strategy AS (
+			SELECT COALESCE(`+laneStrategySQL("lanes.condition_id", "lanes.token_id", "lanes.unique_tag")+`, '') AS strategy, SUM(lanes.cash) AS cash
+			FROM lanes GROUP BY 1
 		)
 		SELECT
 			((SELECT COALESCE(SUM(cash), 0) FROM f) + (SELECT COALESCE(SUM(payout_usd), 0) FROM p))::text,
 			COALESCE((SELECT array_agg(fill_id) FROM f), '{}'::text[]),
 			COALESCE((SELECT array_agg(id) FROM p), '{}'::bigint[]),
-			EXISTS (SELECT 1 FROM p WHERE lost)
-	`).Scan(&pending.USD, &pending.FillIDs, &pending.PayoutIDs, &pending.Lost)
+			EXISTS (SELECT 1 FROM p WHERE lost),
+			COALESCE((SELECT array_agg(strategy ORDER BY strategy) FROM by_strategy), '{}'::text[]),
+			COALESCE((SELECT array_agg(cash::text ORDER BY strategy) FROM by_strategy), '{}'::text[])
+	`).Scan(&pending.USD, &pending.FillIDs, &pending.PayoutIDs, &pending.Lost, &strategies, &amounts)
 	if err != nil {
 		return store.PendingTradeCash{}, fmt.Errorf("sum pending trade cash: %w", err)
+	}
+	pending.ByStrategy = make(map[string]string, len(strategies))
+	for i, strategy := range strategies {
+		pending.ByStrategy[strategy] = amounts[i]
 	}
 	return pending, nil
 }
@@ -1384,6 +1407,95 @@ func (s *Store) PeakTradeIndexSince(ctx context.Context, since time.Time) (strin
 	`, since).Scan(&peak)
 	if err != nil {
 		return "", false, fmt.Errorf("load peak trade index: %w", err)
+	}
+	if peak == nil {
+		return "", false, nil
+	}
+	return *peak, true, nil
+}
+
+func (s *Store) StrategyEquity(ctx context.Context, snapshotID int64) ([]store.StrategyEquityRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT strategy, trade_cash_usd::text, positions_usd::text, trade_index::text
+		FROM equity_snapshot_strategies WHERE snapshot_id = $1 ORDER BY strategy
+	`, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("query strategy equity: %w", err)
+	}
+	defer rows.Close()
+	var parts []store.StrategyEquityRecord
+	for rows.Next() {
+		var part store.StrategyEquityRecord
+		if err := rows.Scan(&part.Strategy, &part.TradeCashUSD, &part.PositionsUSD, &part.TradeIndex); err != nil {
+			return nil, fmt.Errorf("scan strategy equity: %w", err)
+		}
+		parts = append(parts, part)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan strategy equity: %w", err)
+	}
+	return parts, nil
+}
+
+// laneStrategySQL is the strategy of the first opening intent on a lane,
+// given the columns that hold its condition, token, and tag. It is NULL for a
+// lane nothing opened, such as one adopted from the exchange. A close or
+// reconciler intent is no evidence of who built the position.
+func laneStrategySQL(conditionID, tokenID, tag string) string {
+	return `(SELECT oi.strategy FROM order_intents oi
+		WHERE oi.condition_id = ` + conditionID + ` AND oi.token_id = ` + tokenID + ` AND oi.unique_tag = ` + tag + `
+			AND oi.kind = 'OPEN' AND oi.strategy <> ''
+		ORDER BY oi.created_at, oi.intent_id LIMIT 1)`
+}
+
+// LaneStrategies maps each lane holding shares to its strategy. It is read
+// only to record equity snapshots, so neither the order path nor the sizing
+// reads pay for it.
+func (s *Store) LaneStrategies(ctx context.Context) (map[store.LaneKey]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.condition_id, p.token_id, p.unique_tag, COALESCE(`+laneStrategySQL("p.condition_id", "p.token_id", "p.unique_tag")+`, '')
+		FROM positions p WHERE p.position_size > 0
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query lane strategies: %w", err)
+	}
+	defer rows.Close()
+	lanes := map[store.LaneKey]string{}
+	for rows.Next() {
+		var key store.LaneKey
+		var strategy string
+		if err := rows.Scan(&key.ConditionID, &key.TokenID, &key.UniqueTag, &strategy); err != nil {
+			return nil, fmt.Errorf("scan lane strategies: %w", err)
+		}
+		lanes[key] = strategy
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan lane strategies: %w", err)
+	}
+	return lanes, nil
+}
+
+func (s *Store) PeakStrategyIndexSince(ctx context.Context, strategy string, since time.Time) (string, bool, error) {
+	var peak *string
+	err := s.pool.QueryRow(ctx, `
+		WITH s AS (
+			SELECT ss.trade_index, es.taken_at, es.id FROM equity_snapshot_strategies ss
+			JOIN equity_snapshots es ON es.id = ss.snapshot_id
+			WHERE ss.strategy = $1
+		)
+		SELECT MAX(trade_index)::text FROM (
+			SELECT trade_index FROM s WHERE taken_at >= $2
+			UNION ALL
+			(SELECT trade_index FROM s WHERE taken_at < $2 ORDER BY taken_at DESC, id DESC LIMIT 1)
+			UNION ALL
+			-- A strategy first seen after since stood at 1 before its first
+			-- interval, so a loss in that interval is still a drawdown.
+			SELECT 1::numeric WHERE EXISTS (SELECT 1 FROM s WHERE taken_at >= $2)
+			AND NOT EXISTS (SELECT 1 FROM s WHERE taken_at < $2)
+		) candidates
+	`, strategy, since).Scan(&peak)
+	if err != nil {
+		return "", false, fmt.Errorf("load peak strategy index: %w", err)
 	}
 	if peak == nil {
 		return "", false, nil

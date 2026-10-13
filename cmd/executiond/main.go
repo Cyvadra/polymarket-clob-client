@@ -26,6 +26,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/positionfeatures"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/reconciler"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
+	storepkg "github.com/Cyvadra/polymarket-clob-client/pkg/store"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store/postgres"
 )
 
@@ -44,6 +45,7 @@ type config struct {
 	EquityMaxQuoteAge      time.Duration
 	MaxEquityFraction      float64
 	MaxDrawdown            float64
+	StrategyMaxDrawdown    map[string]float64
 	DrawdownStart          time.Time
 	EquityFlowThresholdUSD float64
 	SizeAfterLossOnly      bool
@@ -198,16 +200,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var guard *equity.DrawdownGuard
-	if cfg.MaxDrawdown > 0 {
-		guard, err = equity.NewDrawdownGuard(store, cfg.DrawdownStart, cfg.MaxDrawdown)
+	var limits *equity.DrawdownLimits
+	if cfg.drawdownLimited() {
+		limits, err = drawdownLimits(store, cfg)
 		if err != nil {
 			return err
 		}
-		if err := refreshDrawdown(ctx, guard); err != nil {
+		if err := refreshDrawdown(ctx, limits); err != nil {
 			return err
 		}
-		execution.SetOpenGate(guard)
+		execution.SetOpenGate(limits)
 	}
 	// Loss-anchored sizing takes its base from the snapshot after the latest
 	// settled loss. With none recorded yet, the first sweep records one.
@@ -272,7 +274,7 @@ func run() error {
 		if baseDue {
 			reason = equity.ReasonSizingBase
 		}
-		if !recordSettledEquity(ctx, recorder, reason, guard) {
+		if !recordSettledEquity(ctx, recorder, reason, limits) {
 			return
 		}
 		equityDue = false
@@ -450,6 +452,15 @@ func configFromEnv() (config, error) {
 			return config{}, fmt.Errorf("EXECUTION_MAX_DRAWDOWN must be in (0, 1)")
 		}
 		cfg.MaxDrawdown = limit
+	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_MAX_DRAWDOWN")); value != "" {
+		limits, err := parseStrategyLimits(value, allowed)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_STRATEGY_MAX_DRAWDOWN: %w", err)
+		}
+		cfg.StrategyMaxDrawdown = limits
+	}
+	if cfg.drawdownLimited() {
 		start, err := parseStart(os.Getenv("EXECUTION_DRAWDOWN_START"))
 		if err != nil {
 			return config{}, fmt.Errorf("EXECUTION_DRAWDOWN_START: %w", err)
@@ -476,13 +487,49 @@ func configFromEnv() (config, error) {
 	return cfg, nil
 }
 
+// parseStrategyLimits reads comma-separated name:fraction pairs. A name is
+// split from its fraction at the last colon, so it may hold one itself, and
+// must be one of allowed: a misspelt name would otherwise leave its strategy
+// without a limit.
+func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]float64, error) {
+	limits := map[string]float64{}
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		cut := strings.LastIndex(entry, ":")
+		if cut < 0 {
+			return nil, fmt.Errorf("%q is not strategy:fraction", entry)
+		}
+		name := strings.TrimSpace(entry[:cut])
+		limit, err := strconv.ParseFloat(strings.TrimSpace(entry[cut+1:]), 64)
+		switch {
+		case name == "":
+			return nil, fmt.Errorf("%q names no strategy", entry)
+		case err != nil || limit <= 0 || limit >= 1:
+			return nil, fmt.Errorf("strategy %q limit must be in (0, 1)", name)
+		case !allowed.Allows(name):
+			return nil, fmt.Errorf("strategy %q is not in EXECUTION_ALLOWED_STRATEGIES", name)
+		}
+		if _, dup := limits[name]; dup {
+			return nil, fmt.Errorf("strategy %q is listed twice", name)
+		}
+		limits[name] = limit
+	}
+	if len(limits) == 0 {
+		return nil, fmt.Errorf("no strategy:fraction pairs in %q", value)
+	}
+	return limits, nil
+}
+
 // parseStart reads the drawdown start: an RFC 3339 time, or a UTC date.
 // It is required with a drawdown limit, since the peak it is measured from
 // belongs to whatever strategy is running, which only the operator knows.
 func parseStart(value string) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return time.Time{}, fmt.Errorf("required with EXECUTION_MAX_DRAWDOWN")
+		return time.Time{}, fmt.Errorf("required with EXECUTION_MAX_DRAWDOWN or EXECUTION_STRATEGY_MAX_DRAWDOWN")
 	}
 	if start, err := time.Parse(time.RFC3339, value); err == nil {
 		return start, nil
@@ -517,7 +564,7 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 // recordSettledEquity saves the wallet's equity once positions have settled
 // and refreshes the drawdown limit from it. It reports whether a snapshot
 // was recorded; one that was not is retried after the next sweep.
-func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason string, guard *equity.DrawdownGuard) bool {
+func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason string, limits *equity.DrawdownLimits) bool {
 	snapshot, err := recorder.Record(ctx, reason)
 	if err != nil {
 		log.Printf("record equity after settlement: %v", err)
@@ -525,10 +572,10 @@ func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason 
 	}
 	log.Printf("equity after settlement (%s): $%s (trade cash $%s, external flow $%s, trade index %s)",
 		reason, snapshot.EquityUSD, snapshot.TradeCashUSD, snapshot.ExternalFlowUSD, snapshot.TradeIndex)
-	if guard == nil {
+	if limits == nil {
 		return true
 	}
-	if err := refreshDrawdown(ctx, guard); err != nil {
+	if err := refreshDrawdown(ctx, limits); err != nil {
 		log.Printf("refresh drawdown limit: %v", err)
 	}
 	return true
@@ -548,15 +595,46 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
 	return nil
 }
 
-func refreshDrawdown(ctx context.Context, guard *equity.DrawdownGuard) error {
-	drawdown, err := guard.Refresh(ctx)
-	if err != nil {
-		return err
+// drawdownLimits builds the wallet's limit, if set, and each strategy's.
+func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits, error) {
+	var wallet *equity.DrawdownGuard
+	if cfg.MaxDrawdown > 0 {
+		guard, err := equity.NewDrawdownGuard(s, cfg.DrawdownStart, cfg.MaxDrawdown)
+		if err != nil {
+			return nil, err
+		}
+		wallet = guard
 	}
-	if suspended, reason := guard.Suspended(); suspended {
-		log.Printf("opens suspended: %s", reason)
-		return nil
+	var strategies []*equity.DrawdownGuard
+	for name, limit := range cfg.StrategyMaxDrawdown {
+		guard, err := equity.NewStrategyDrawdownGuard(s, name, cfg.DrawdownStart, limit)
+		if err != nil {
+			return nil, err
+		}
+		strategies = append(strategies, guard)
 	}
-	log.Printf("trading drawdown %.2f%%, opens allowed", drawdown*100)
-	return nil
+	return equity.NewDrawdownLimits(wallet, strategies...), nil
+}
+
+// refreshDrawdown refreshes every guard, so one that fails does not leave
+// the others stale, and returns the errors joined.
+func refreshDrawdown(ctx context.Context, limits *equity.DrawdownLimits) error {
+	drawdowns, err := limits.Refresh(ctx)
+	for _, guard := range limits.Guards() {
+		drawdown, ok := drawdowns[guard.Strategy()]
+		if !ok {
+			continue
+		}
+		if suspended, reason := guard.Suspended(); suspended {
+			log.Printf("opens suspended: %s", reason)
+			continue
+		}
+		log.Printf("%s %.2f%%, opens allowed", guard.Label(), drawdown*100)
+	}
+	return err
+}
+
+// drawdownLimited reports whether any drawdown limit, wallet or strategy, is set.
+func (c config) drawdownLimited() bool {
+	return c.MaxDrawdown > 0 || len(c.StrategyMaxDrawdown) > 0
 }

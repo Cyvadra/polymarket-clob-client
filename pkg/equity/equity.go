@@ -33,6 +33,10 @@ type Snapshot struct {
 	CashUSD      float64
 	PositionsUSD float64
 	EquityUSD    float64
+	// PositionsByStrategy splits PositionsUSD by the strategy of each lane,
+	// lanes with no recorded strategy under "". It is filled only by
+	// SnapshotWithStrategies.
+	PositionsByStrategy map[string]float64
 	// Positions counts the lanes holding shares. SettledPositions counts those
 	// among them in resolved markets, valued at $1 per winning share still in
 	// the wallet and 0 for a loser; UnmarkedPositions those with neither a
@@ -118,7 +122,19 @@ func (t *Tracker) Cash(ctx context.Context) (float64, time.Time, error) {
 
 // Snapshot values the wallet now. It fails rather than guess when the cash
 // balance cannot be read, since every size derived from it would be wrong.
+// It skips the per-strategy split, which the order path does not need.
 func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
+	return t.snapshot(ctx, false)
+}
+
+// SnapshotWithStrategies is Snapshot with PositionsByStrategy filled. It
+// fails when the positions store cannot name lanes' strategies, rather than
+// record a split that leaves positions out.
+func (t *Tracker) SnapshotWithStrategies(ctx context.Context) (Snapshot, error) {
+	return t.snapshot(ctx, true)
+}
+
+func (t *Tracker) snapshot(ctx context.Context, withStrategies bool) (Snapshot, error) {
 	cash, cashAt, err := t.Cash(ctx)
 	if err != nil {
 		return Snapshot{}, err
@@ -127,8 +143,21 @@ func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("load positions for equity: %w", err)
 	}
+	var strategies map[store.LaneKey]string
+	if withStrategies {
+		reader, ok := t.positions.(store.LaneStrategyReader)
+		if !ok {
+			return Snapshot{}, fmt.Errorf("positions store cannot name lane strategies")
+		}
+		if strategies, err = reader.LaneStrategies(ctx); err != nil {
+			return Snapshot{}, fmt.Errorf("load lane strategies for equity: %w", err)
+		}
+	}
 	now := t.now()
 	snapshot := Snapshot{CashUSD: cash, CashAsOf: cashAt.UTC(), AsOf: now.UTC()}
+	if withStrategies {
+		snapshot.PositionsByStrategy = map[string]float64{}
+	}
 	var unquoted []held
 	for _, record := range records {
 		if !decimal.Positive(record.PositionSize) {
@@ -140,7 +169,7 @@ func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 		}
 		snapshot.Positions++
 		if price, marked := t.bid(record.ConditionID, record.TokenID, now); marked {
-			snapshot.PositionsUSD += shares * price
+			snapshot.add(strategies, record, shares*price)
 			continue
 		}
 		unquoted = append(unquoted, held{record: record, shares: shares})
@@ -149,7 +178,7 @@ func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 		position := unquoted[i]
 		if value.ok {
 			snapshot.SettledPositions++
-			snapshot.PositionsUSD += value.usd
+			snapshot.add(strategies, position.record, value.usd)
 			continue
 		}
 		snapshot.UnmarkedPositions++
@@ -161,10 +190,17 @@ func (t *Tracker) Snapshot(ctx context.Context) (Snapshot, error) {
 			r := position.record
 			return Snapshot{}, fmt.Errorf("position %s/%s/%s has no quote and no usable entry price: %w", r.ConditionID, r.TokenID, r.UniqueTag, err)
 		}
-		snapshot.PositionsUSD += position.shares * price
+		snapshot.add(strategies, position.record, position.shares*price)
 	}
 	snapshot.EquityUSD = snapshot.CashUSD + snapshot.PositionsUSD
 	return snapshot, nil
+}
+
+func (s *Snapshot) add(strategies map[store.LaneKey]string, position store.PositionRecord, usd float64) {
+	s.PositionsUSD += usd
+	if strategies != nil {
+		s.PositionsByStrategy[strategies[store.LaneKey{ConditionID: position.ConditionID, TokenID: position.TokenID, UniqueTag: position.UniqueTag}]] += usd
+	}
 }
 
 // settleLookups bounds concurrent CLOB reads for unquoted positions, which
