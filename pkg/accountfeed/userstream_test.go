@@ -20,6 +20,10 @@ type userStreamStore struct {
 	fills []store.FillRecord
 }
 
+func (s *userStreamStore) PersistSubmittingOrder(_ context.Context, record store.SignedOrderRecord, _ string) (store.SignedOrderRecord, error) {
+	record.State, record.Revision = statemachine.StateSubmitting, record.Revision+1
+	return record, nil
+}
 func (s *userStreamStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error {
 	return nil
 }

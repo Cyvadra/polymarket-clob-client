@@ -16,8 +16,12 @@ type Client struct {
 	key       *ecdsa.PrivateKey
 	signer    string
 	transport *transport.Client
-	metadata  *metadataCache
-	rpc       *rpcConn
+	// orders carries order placement and cancellation on a connection pool
+	// of its own, so background reads never hold the connection an order
+	// needs. KeepWarm keeps it open between signals.
+	orders   *transport.Client
+	metadata *metadataCache
+	rpc      *rpcConn
 }
 
 type metadataCache struct {
@@ -55,17 +59,30 @@ func New(cfg Config) (*Client, error) {
 	if cfg.MakerAddress == "" {
 		cfg.MakerAddress = signer
 	}
+	reads, orders := cfg.HTTPClient, cfg.HTTPClient
+	if cfg.HTTPClient == nil {
+		reads = transport.NewHTTPClient(cfg.ProxyURL, cfg.Timeout)
+		orders = transport.NewHTTPClient(cfg.ProxyURL, cfg.Timeout)
+	}
 	return &Client{
 		cfg: cfg, key: key, signer: signer,
-		transport: transport.New(cfg.Host, cfg.HTTPClient, cfg.Timeout, cfg.Retry.MaxAttempts, cfg.Retry.BaseDelay, cfg.QPS),
-		metadata:  &metadataCache{tickSize: map[string]float64{}, minSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}, bookGone: map[string]struct{}{}, feeSchedule: map[string]FeeSchedule{}},
-		rpc:       &rpcConn{},
+		transport: transport.New(cfg.Host, reads, cfg.Timeout, cfg.Retry.MaxAttempts, cfg.Retry.BaseDelay, cfg.QPS),
+		// The order pool keeps its own limiter, so cancels and warm pings
+		// stay paced; only order placement skips it (Request.SkipRateLimit),
+		// since an order waiting behind a token is the latency this pool avoids.
+		orders:   transport.New(cfg.Host, orders, cfg.Timeout, cfg.Retry.MaxAttempts, cfg.Retry.BaseDelay, cfg.QPS),
+		metadata: &metadataCache{tickSize: map[string]float64{}, minSize: map[string]float64{}, negRisk: map[string]bool{}, feeRate: map[string]int{}, bookGone: map[string]struct{}{}, feeSchedule: map[string]FeeSchedule{}},
+		rpc:      &rpcConn{},
 	}, nil
 }
 
 func (c *Client) Address() string      { return c.signer }
 func (c *Client) MakerAddress() string { return c.cfg.MakerAddress }
 func (c *Client) ChainID() int64       { return c.cfg.ChainID }
+
+// SetRequestTraceHook receives network timings for order submissions. Set it
+// before the client is shared between goroutines.
+func (c *Client) SetRequestTraceHook(hook func(transport.Timing)) { c.orders.SetTraceHook(hook) }
 
 // ProxyURL reports the configured outbound proxy, or nil when the client
 // connects directly. Callers that open their own connections to the exchange

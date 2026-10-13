@@ -190,6 +190,7 @@ deviate from the default.
 | `EXECUTION_BALANCE_CACHE_TTL` | `5s` | How long a USDC balance read from the CLOB is reused by the equity valuation. `0` reads on every query. |
 | `EXECUTION_EQUITY_MAX_QUOTE_AGE` | `30s` | A position whose latest PMM quote is older than this is valued at its entry price instead of the best bid, and counted in `unmarked_positions`. `0` accepts any age. |
 | `EXECUTION_CONNECT_TIMEOUT` | `10s` | NATS and PostgreSQL connection timeout. |
+| `EXECUTION_KEEPWARM_INTERVAL` | `15s` | How often to ping the CLOB (`GET /time`) through the order and read connection pools so a signal never pays for a TCP, proxy and TLS handshake. `0` keeps only the startup warm-up. |
 | `EXECUTION_SHUTDOWN_GRACE_PERIOD` | `10s` | Graceful shutdown deadline. |
 
 Durations accept Go duration strings such as `500ms` and `30s`; positive

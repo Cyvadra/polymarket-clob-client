@@ -45,6 +45,7 @@ func (e *Executor) ExecuteClose(ctx context.Context, req protocol.ExecutionClose
 	if err := validateCloseRequest(req); err != nil {
 		return err
 	}
+	ctx = withReceivedAt(ctx)
 	return e.store.WithIntentLock(ctx, closeLaneLockKey(req), func(ctx context.Context) error {
 		if req.Mode == protocol.ExecutionCloseModeCancelOpen {
 			return e.cancelLaneOpenOrders(ctx, req)

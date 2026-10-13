@@ -33,6 +33,10 @@ type update struct {
 	event           statemachine.Event
 }
 
+func (s *fakeStore) PersistSubmittingOrder(_ context.Context, record store.SignedOrderRecord, _ string) (store.SignedOrderRecord, error) {
+	record.State, record.Revision = statemachine.StateSubmitting, record.Revision+1
+	return record, nil
+}
 func (s *fakeStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error { return nil }
 func (s *fakeStore) OrderByExchangeID(_ context.Context, orderID string) (store.SignedOrderRecord, error) {
 	for _, order := range s.orders {

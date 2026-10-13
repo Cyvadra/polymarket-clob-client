@@ -2,13 +2,10 @@ package clobclient
 
 import (
 	"fmt"
-	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/keyfile"
 )
@@ -61,8 +58,9 @@ func ConfigFromEnv() (Config, error) {
 		if proxyURL.Scheme == "" || proxyURL.Host == "" {
 			return Config{}, fmt.Errorf("POLYMARKET_PROXY_URL must be an absolute URL")
 		}
+		// New builds the proxied HTTP clients from this, one pool for
+		// orders and one for reads.
 		cfg.ProxyURL = proxyURL
-		cfg.HTTPClient = &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL), DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext}, Timeout: 20 * time.Second}
 	}
 	return cfg, nil
 }

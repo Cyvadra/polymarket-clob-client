@@ -45,6 +45,7 @@ func newExecutionID() string {
 }
 
 func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRequest) error {
+	ctx = withReceivedAt(ctx)
 	intent := protocol.ExecutionIntent{
 		SchemaVersion:      req.SchemaVersion,
 		IntentID:           newExecutionID(),
@@ -103,6 +104,7 @@ func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent)
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
 		return err
 	}
+	ctx = withReceivedAt(ctx)
 	return e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
 		return e.persistAndSubmit(ctx, intent)
 	})
@@ -200,16 +202,20 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 	}
 	hash := sha256.Sum256(payload)
 	now := e.now().UTC()
-	if err := e.store.PersistSignedOrder(ctx, store.SignedOrderRecord{
+	// Persisting and marking the order SUBMITTING commit together: the row
+	// still exists before the exchange sees the order, with one fewer
+	// database round trip on the way there.
+	submitting, err := e.store.PersistSubmittingOrder(ctx, store.SignedOrderRecord{
 		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
 		Salt: strconv.FormatInt(signed.Salt, 10), ExchangeOrderID: signed.OrderID, RequestedShares: child.Shares, Price: child.Price,
 		OrderType: store.TimeInForce(child.TimeInForce), PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
-		CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
+		MatchedShares: "0", CreatedAt: now, UpdatedAt: now,
+	}, "submit requested")
+	if err != nil {
 		return fmt.Errorf("persist signed order: %w", err)
 	}
 	releaseOnFailure = false
-	return e.submitOrder(ctx, intent, signed, child, 1)
+	return e.sendOrder(ctx, intent, signed, child, submitting)
 }
 
 // reserveChild locks the child's exposure, tolerating a reservation this same
@@ -324,7 +330,19 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 	if err != nil {
 		return fmt.Errorf("mark submitting: %w", err)
 	}
+	return e.sendOrder(ctx, intent, signed, child, updated)
+}
+
+// sendOrder posts an order already marked SUBMITTING and records what the
+// exchange answered.
+func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, updated store.SignedOrderRecord) error {
 	e.publishTransition(updated, intent, "submit requested")
+	// Measure pre-post latency now but report it after the POST, so the
+	// hook's logging never delays the order.
+	if received, ok := ctx.Value(receivedAtKey{}).(time.Time); ok && e.onSubmit != nil {
+		prePost := time.Since(received)
+		defer e.onSubmit(intent, prePost)
+	}
 	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, child.TimeInForce, child.PostOnly)
 	if submitErr != nil {
 		if isOrderRejected(submitErr) {

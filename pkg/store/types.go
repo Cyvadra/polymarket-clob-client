@@ -189,6 +189,9 @@ type IntentStore interface {
 
 type OrderStore interface {
 	PersistSignedOrder(context.Context, SignedOrderRecord) error
+	// PersistSubmittingOrder is PersistSignedOrder then TransitionOrder with
+	// EventSubmitStarted, committed together; it returns the SUBMITTING row.
+	PersistSubmittingOrder(ctx context.Context, record SignedOrderRecord, reason string) (SignedOrderRecord, error)
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OrderByIntent(context.Context, string, int) (SignedOrderRecord, error)
 	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)

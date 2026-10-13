@@ -51,6 +51,9 @@ type Executor struct {
 	publish protocol.ExecutionEventPublisher
 	sizer   EntrySizer
 	gate    OpenGate
+	// onSubmit sees how long each order spent between its request arriving
+	// and its POST starting: sizing, locking, persistence and signing.
+	onSubmit func(intent protocol.ExecutionIntent, prePost time.Duration)
 
 	// laneRevisions holds each lane's position revision as of the previous
 	// maintenance pass, so the pass can tell a position that is still filling
@@ -184,6 +187,23 @@ func (e *Executor) resumeSigned(ctx context.Context) error {
 	return resumeErr
 }
 func (e *Executor) Close(context.Context) error { return nil }
+
+// SetSubmitLatencyHook reports, per order, the time from the request arriving
+// to the POST starting. Set it before the executor handles requests.
+func (e *Executor) SetSubmitLatencyHook(hook func(intent protocol.ExecutionIntent, prePost time.Duration)) {
+	e.onSubmit = hook
+}
+
+type receivedAtKey struct{}
+
+// withReceivedAt stamps when a request arrived, keeping an earlier stamp so
+// an open that is sized before Execute is timed from its true start.
+func withReceivedAt(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(receivedAtKey{}).(time.Time); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, receivedAtKey{}, time.Now())
+}
 
 func (e *Executor) SetErrorHandler(handler func(error)) {
 	e.onError = handler

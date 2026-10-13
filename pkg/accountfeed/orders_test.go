@@ -44,6 +44,10 @@ func (p *recordedPublisher) PublishJSON(subject string, value any) error {
 	return nil
 }
 
+func (s *fakeOrderStore) PersistSubmittingOrder(_ context.Context, record store.SignedOrderRecord, _ string) (store.SignedOrderRecord, error) {
+	record.State, record.Revision = statemachine.StateSubmitting, record.Revision+1
+	return record, nil
+}
 func (s *fakeOrderStore) PersistSignedOrder(context.Context, store.SignedOrderRecord) error {
 	return nil
 }

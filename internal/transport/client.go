@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -40,12 +41,17 @@ type Client struct {
 	attempts  int
 	baseDelay time.Duration
 	limiter   *rate.Limiter
+	traceHook func(Timing)
 }
+
+// SetTraceHook receives the network timings of every request issued with
+// Request.Trace set. It must be called before the client is shared.
+func (c *Client) SetTraceHook(hook func(Timing)) { c.traceHook = hook }
 
 func New(host string, provided *http.Client, timeout time.Duration, attempts int, baseDelay time.Duration, qps int) *Client {
 	base, _ := url.Parse(strings.TrimRight(host, "/"))
 	if provided == nil {
-		provided = &http.Client{Timeout: timeout}
+		provided = NewHTTPClient(nil, timeout)
 	}
 	if attempts < 1 {
 		attempts = 1
@@ -64,13 +70,18 @@ type Request struct {
 	Body      any
 	Headers   func(method, requestPath string, body []byte) (http.Header, error)
 	Retryable bool
+	// Trace reports this request's network timings to the client's trace
+	// hook. It is meant for the latency-critical calls, not every read.
+	Trace bool
+	// SkipRateLimit sends the request without waiting for a limiter token.
+	SkipRateLimit bool
 }
 
 func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 	if ctx == nil {
 		return fmt.Errorf("context is required")
 	}
-	if c.limiter != nil {
+	if c.limiter != nil && !spec.SkipRateLimit {
 		if err := c.limiter.Wait(ctx); err != nil {
 			return fmt.Errorf("wait for rate limit: %w", err)
 		}
@@ -119,8 +130,16 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
+		var trace *tracer
+		if spec.Trace && c.traceHook != nil {
+			trace = newTracer(spec.Method, spec.Path)
+			req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace.clientTrace()))
+		}
 		resp, err := c.http.Do(req)
 		if err != nil {
+			if trace != nil {
+				c.traceHook(trace.finish(err))
+			}
 			last = err
 			if attempt+1 < attempts {
 				continue
@@ -129,6 +148,13 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		resp.Body.Close()
+		if trace != nil {
+			traced := readErr
+			if traced == nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+				traced = fmt.Errorf("HTTP %d", resp.StatusCode)
+			}
+			c.traceHook(trace.finish(traced))
+		}
 		if readErr != nil {
 			return fmt.Errorf("read response: %w", readErr)
 		}

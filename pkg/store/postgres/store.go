@@ -203,11 +203,53 @@ func (s *Store) LatestLimitCloseIntent(ctx context.Context, conditionID, tokenID
 }
 
 func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrderRecord) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin signed order persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := persistSignedOrderTx(ctx, tx, record); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit signed order persistence: %w", err)
+	}
+	return nil
+}
+
+// PersistSubmittingOrder inserts a signed order and moves it to SUBMITTING in
+// one transaction. It is PersistSignedOrder followed by TransitionOrder with
+// EventSubmitStarted, minus a commit round trip on the path to the exchange.
+// Recovery sees nothing new: a crash after it leaves the same SUBMITTING row a
+// crash between the two separate calls would.
+func (s *Store) PersistSubmittingOrder(ctx context.Context, record store.SignedOrderRecord, reason string) (store.SignedOrderRecord, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("begin signed order persistence: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	signed, err := persistSignedOrderTx(ctx, tx, record)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	submitting, err := transitionOrderTx(ctx, tx, signed, statemachine.EventSubmitStarted, signed.MatchedShares, "", reason)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("commit signed order persistence: %w", err)
+	}
+	return submitting, nil
+}
+
+// persistSignedOrderTx inserts a SIGNED order and its event inside tx, and
+// returns the record as stored (defaults filled in).
+func persistSignedOrderTx(ctx context.Context, tx pgx.Tx, record store.SignedOrderRecord) (store.SignedOrderRecord, error) {
 	if record.IntentID == "" || record.ChildSequence <= 0 || len(record.SignedPayload) == 0 || record.SignedOrderHash == "" || record.Salt == "" {
-		return fmt.Errorf("intent ID, child sequence, signed payload, signed order hash, and salt are required")
+		return store.SignedOrderRecord{}, fmt.Errorf("intent ID, child sequence, signed payload, signed order hash, and salt are required")
 	}
 	if record.RequestedShares == "" || record.Price == "" {
-		return fmt.Errorf("requested shares and price are required")
+		return store.SignedOrderRecord{}, fmt.Errorf("requested shares and price are required")
 	}
 	createdAt := record.CreatedAt
 	if createdAt.IsZero() {
@@ -222,18 +264,13 @@ func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrder
 		state = statemachine.StateSigned
 	}
 	if state != statemachine.StateSigned {
-		return fmt.Errorf("signed order must start in %s", statemachine.StateSigned)
+		return store.SignedOrderRecord{}, fmt.Errorf("signed order must start in %s", statemachine.StateSigned)
 	}
 	revision := record.Revision
 	if revision == 0 {
 		revision = 1
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin signed order persistence: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		INSERT INTO orders (
 			intent_id, child_sequence, signed_payload, signed_order_hash, salt,
 			exchange_order_id, requested_shares, matched_shares, price, order_type,
@@ -248,9 +285,9 @@ func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrder
 		record.PostOnly, state, revision, createdAt, updatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
-			return store.ErrDuplicate
+			return store.SignedOrderRecord{}, store.ErrDuplicate
 		}
-		return fmt.Errorf("persist signed order: %w", err)
+		return store.SignedOrderRecord{}, fmt.Errorf("persist signed order: %w", err)
 	}
 	if err := insertOrderEvent(ctx, tx, store.OrderEventRecord{
 		EventID:       eventID(record.IntentID, record.ChildSequence, revision, statemachine.EventSigned),
@@ -261,17 +298,40 @@ func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrder
 		Event:         statemachine.EventSigned,
 		ReceivedAt:    updatedAt,
 	}); err != nil {
-		return err
+		return store.SignedOrderRecord{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit signed order persistence: %w", err)
+	record.CreatedAt, record.UpdatedAt, record.State, record.Revision = createdAt, updatedAt, state, revision
+	if record.MatchedShares == "" {
+		record.MatchedShares = "0"
 	}
-	return nil
+	return record, nil
 }
 
 func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, reason string) (store.SignedOrderRecord, error) {
+	transition, matchedShares, noop, err := planTransition(order, event, matchedShares, exchangeOrderID)
+	if err != nil || noop {
+		return order, err
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("begin order transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	updated, err := writeTransitionTx(ctx, tx, order, event, transition, matchedShares, exchangeOrderID, reason)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("commit order transition: %w", err)
+	}
+	return updated, nil
+}
+
+// planTransition validates a transition and reports whether it would change
+// nothing, in which case callers skip the write entirely.
+func planTransition(order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID string) (statemachine.Transition, string, bool, error) {
 	if order.IntentID == "" || order.ChildSequence <= 0 || order.Revision <= 0 {
-		return store.SignedOrderRecord{}, fmt.Errorf("intent ID, child sequence, and revision are required")
+		return statemachine.Transition{}, "", false, fmt.Errorf("intent ID, child sequence, and revision are required")
 	}
 	if matchedShares == "" {
 		matchedShares = order.MatchedShares
@@ -281,21 +341,31 @@ func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderReco
 	}
 	transition, changed, err := statemachine.Apply(order.State, event)
 	if err != nil {
-		return store.SignedOrderRecord{}, err
+		return statemachine.Transition{}, "", false, err
 	}
 	if !changed && matchedShares == order.MatchedShares && (exchangeOrderID == "" || exchangeOrderID == order.ExchangeOrderID) {
-		return order, nil
+		return transition, matchedShares, true, nil
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return store.SignedOrderRecord{}, fmt.Errorf("begin order transition: %w", err)
+	return transition, matchedShares, false, nil
+}
+
+// transitionOrderTx applies one state-machine event to an order inside tx,
+// guarded by the order's revision so a stale caller gets ErrConflict.
+func transitionOrderTx(ctx context.Context, tx pgx.Tx, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, reason string) (store.SignedOrderRecord, error) {
+	transition, matchedShares, noop, err := planTransition(order, event, matchedShares, exchangeOrderID)
+	if err != nil || noop {
+		return order, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	return writeTransitionTx(ctx, tx, order, event, transition, matchedShares, exchangeOrderID, reason)
+}
+
+// writeTransitionTx writes a transition already validated by planTransition.
+func writeTransitionTx(ctx context.Context, tx pgx.Tx, order store.SignedOrderRecord, event statemachine.Event, transition statemachine.Transition, matchedShares, exchangeOrderID, reason string) (store.SignedOrderRecord, error) {
 	newRevision := order.Revision + 1
 	var persistedExchangeOrderID *string
 	var persistedMatchedShares string
 	var persistedUpdatedAt time.Time
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		UPDATE orders
 		SET state = $1, revision = $2, matched_shares = GREATEST(matched_shares, $3::numeric),
 			exchange_order_id = COALESCE(NULLIF($4, ''), exchange_order_id), updated_at = now()
@@ -326,9 +396,6 @@ func (s *Store) TransitionOrder(ctx context.Context, order store.SignedOrderReco
 		ToState: transition.To, Event: event, Reason: reason, ReceivedAt: time.Now().UTC(),
 	}); err != nil {
 		return store.SignedOrderRecord{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return store.SignedOrderRecord{}, fmt.Errorf("commit order transition: %w", err)
 	}
 	order.State, order.Revision, order.MatchedShares = transition.To, newRevision, persistedMatchedShares
 	order.ExchangeOrderID = persistedExchangeID

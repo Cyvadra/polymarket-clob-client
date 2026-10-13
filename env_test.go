@@ -21,7 +21,7 @@ func TestConfigFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.PrivateKey != "private" || cfg.MakerAddress != "0x1234" || cfg.ChainID != 137 || cfg.SignatureType != SignatureTypeGnosisSafe || cfg.HTTPClient == nil {
+	if cfg.PrivateKey != "private" || cfg.MakerAddress != "0x1234" || cfg.ChainID != 137 || cfg.SignatureType != SignatureTypeGnosisSafe || cfg.ProxyURL == nil || cfg.ProxyURL.Host != "localhost:7890" {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 }

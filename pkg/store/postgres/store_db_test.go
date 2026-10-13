@@ -137,6 +137,45 @@ func TestTransitionOrderRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestPersistSubmittingOrderCommitsBothSteps(t *testing.T) {
+	s := testStore(t)
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+
+	submitting, err := s.PersistSubmittingOrder(context.Background(), store.SignedOrderRecord{
+		IntentID: intentID, ChildSequence: 1, SignedPayload: []byte(`{"salt":1}`), SignedOrderHash: intentID + "-hash", Salt: "1",
+		ExchangeOrderID: intentID + "-exchange", RequestedShares: "2", Price: "0.5", OrderType: store.TimeInForceGTC,
+		State: statemachine.StateSigned, Revision: 1,
+	}, "submit requested")
+	if err != nil {
+		t.Fatalf("persist submitting order: %v", err)
+	}
+	if submitting.State != statemachine.StateSubmitting || submitting.Revision != 2 || submitting.ExchangeOrderID != intentID+"-exchange" {
+		t.Fatalf("unexpected returned order: %+v", submitting)
+	}
+	stored, err := s.OrderByIntent(context.Background(), intentID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != statemachine.StateSubmitting || stored.Revision != 2 {
+		t.Fatalf("stored order not SUBMITTING at revision 2: %+v", stored)
+	}
+	intent, err := s.Intent(context.Background(), intentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intent.Status != statemachine.StateSubmitting {
+		t.Fatalf("intent status = %s, want SUBMITTING", intent.Status)
+	}
+	if _, err := s.PersistSubmittingOrder(context.Background(), store.SignedOrderRecord{
+		IntentID: intentID, ChildSequence: 1, SignedPayload: []byte(`{"salt":1}`), SignedOrderHash: intentID + "-hash", Salt: "1",
+		RequestedShares: "2", Price: "0.5", OrderType: store.TimeInForceGTC,
+	}, "again"); err != store.ErrDuplicate {
+		t.Fatalf("second persist = %v, want ErrDuplicate", err)
+	}
+}
+
 func TestIntentStatusMirrorsOrderLifecycle(t *testing.T) {
 	s := testStore(t)
 	lane := newTestLane(t, s)

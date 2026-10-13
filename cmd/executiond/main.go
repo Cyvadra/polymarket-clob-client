@@ -48,6 +48,7 @@ type config struct {
 	EquityFlowThresholdUSD float64
 	SizeAfterLossOnly      bool
 	ConnectTimeout         time.Duration
+	KeepWarmInterval       time.Duration
 	ShutdownGracePeriod    time.Duration
 }
 
@@ -118,11 +119,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	clob.SetRequestTraceHook(logOrderTiming)
+	warmExchangeConnections(ctx, clob, cfg.KeepWarmInterval)
 
 	execution, err := executor.New(store, clob, time.Now)
 	if err != nil {
 		return err
 	}
+	execution.SetSubmitLatencyHook(logPrePost)
 	quotes := marketquotes.New()
 	execution.SetQuoteProvider(quotes)
 	quotes.OnNewMarket(metadataWarmer(ctx, clob))
@@ -422,6 +426,7 @@ func configFromEnv() (config, error) {
 		MaxEquityFraction:      equity.DefaultMaxFraction,
 		EquityFlowThresholdUSD: equity.DefaultFlowThresholdUSD,
 		ConnectTimeout:         durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
+		KeepWarmInterval:       durationEnv("EXECUTION_KEEPWARM_INTERVAL", 15*time.Second),
 		ShutdownGracePeriod:    durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
 	allowed, err := nats.ParseAllowlist(os.Getenv("EXECUTION_ALLOWED_STRATEGIES"))
@@ -465,7 +470,7 @@ func configFromEnv() (config, error) {
 		}
 		cfg.SizeAfterLossOnly = enabled
 	}
-	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.ShutdownGracePeriod <= 0 {
+	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.KeepWarmInterval < 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")
 	}
 	return cfg, nil

@@ -71,6 +71,17 @@ func (s *fakeStore) UpdateIntentStatus(_ context.Context, intentID, status strin
 	s.intent.Status = statemachine.State(status)
 	return nil
 }
+func (s *fakeStore) PersistSubmittingOrder(ctx context.Context, record store.SignedOrderRecord, reason string) (store.SignedOrderRecord, error) {
+	if err := s.PersistSignedOrder(ctx, record); err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	// Transition the bare order, as the separate TransitionOrder call did
+	// before the two were merged, so fixtures keep their exchange IDs.
+	return s.TransitionOrder(ctx, store.SignedOrderRecord{
+		IntentID: record.IntentID, ChildSequence: record.ChildSequence, State: record.State,
+		Revision: record.Revision, MatchedShares: "0", RequestedShares: record.RequestedShares,
+	}, statemachine.EventSubmitStarted, "0", "", reason)
+}
 func (s *fakeStore) PersistSignedOrder(_ context.Context, record store.SignedOrderRecord) error {
 	s.order = record
 	return nil

@@ -183,7 +183,7 @@ func (c *Client) SubmitSignedOrder(ctx context.Context, signed SignedOrderV2, or
 		PostOnly  bool          `json:"postOnly"`
 	}{Order: signed, Owner: c.cfg.Credentials.APIKey, OrderType: orderType, PostOnly: postOnly}
 	var out OrderResponse
-	err := c.transport.Do(ctx, transport.Request{Method: http.MethodPost, Path: "/order", Body: payload, Headers: c.l2Headers, Retryable: false}, &out)
+	err := c.orders.Do(ctx, transport.Request{Method: http.MethodPost, Path: "/order", Body: payload, Headers: c.l2Headers, Retryable: false, Trace: true, SkipRateLimit: true}, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -209,18 +209,18 @@ func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
 		return fmt.Errorf("order ID is required")
 	}
 	var out any
-	return c.transport.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/order", Body: map[string]string{"orderID": orderID}, Headers: c.l2Headers}, &out)
+	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/order", Body: map[string]string{"orderID": orderID}, Headers: c.l2Headers}, &out)
 }
 
 func (c *Client) CancelOrders(ctx context.Context, orderIDs []string) error {
 	if len(orderIDs) == 0 {
 		return fmt.Errorf("at least one order ID is required")
 	}
-	return c.transport.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-orders", Body: map[string][]string{"orderIDs": orderIDs}, Headers: c.l2Headers}, nil)
+	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-orders", Body: map[string][]string{"orderIDs": orderIDs}, Headers: c.l2Headers}, nil)
 }
 
 func (c *Client) CancelAll(ctx context.Context) error {
-	return c.transport.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-all", Headers: c.l2Headers}, nil)
+	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-all", Headers: c.l2Headers}, nil)
 }
 
 func (c *Client) CancelMarketOrders(ctx context.Context, market, tokenID string) error {
@@ -234,7 +234,7 @@ func (c *Client) CancelMarketOrders(ctx context.Context, market, tokenID string)
 	if tokenID != "" {
 		body["asset_id"] = tokenID
 	}
-	return c.transport.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-market-orders", Body: body, Headers: c.l2Headers}, nil)
+	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-market-orders", Body: body, Headers: c.l2Headers}, nil)
 }
 
 // Order looks up a single order. The CLOB answers an unknown order ID with a

@@ -17,7 +17,9 @@ type Config struct {
 	Builder       *BuilderCredentials
 	MakerAddress  string
 	SignatureType SignatureType
-	HTTPClient    *http.Client
+	// HTTPClient, when set, serves both reads and orders, so they share one
+	// connection pool; leave it nil to get a separate pool for each.
+	HTTPClient *http.Client
 	// ProxyURL is the outbound proxy the REST transport uses. It is kept
 	// separately so the websocket account stream can reach the exchange
 	// through the same egress instead of falling back to the process
