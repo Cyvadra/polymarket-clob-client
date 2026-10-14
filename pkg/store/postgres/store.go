@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
@@ -26,9 +27,21 @@ type Config struct {
 	MaxOpenBuyNotionalUSD string
 }
 
+// minPoolConns is the pool size used when neither Config nor the URL sets
+// one. Opens and closes run concurrently and each holds a lock connection
+// for its whole exchange round trip, so pgx's default of four on a small
+// host would let only two run at once (see lockSlots).
+const minPoolConns = 16
+
 type Store struct {
 	pool                  *pgxpool.Pool
 	maxOpenBuyNotionalUSD string
+	// lockSlots bounds how many WithIntentLock calls hold a connection at
+	// once to half the pool. Each holds its lock's connection while its
+	// writes take another, so with every connection held by a lock, each
+	// would wait forever for a second one. Leaving half free guarantees the
+	// writes a connection.
+	lockSlots chan struct{}
 }
 
 func New(ctx context.Context, cfg Config) (*Store, error) {
@@ -39,8 +52,12 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres URL: %w", err)
 	}
-	if cfg.MaxConns > 0 {
+	switch {
+	case cfg.MaxConns > 0:
 		poolConfig.MaxConns = cfg.MaxConns
+	case !strings.Contains(cfg.URL, "pool_max_conns") && poolConfig.MaxConns < minPoolConns:
+		// Only pgx's default is raised; a size the URL sets is the operator's.
+		poolConfig.MaxConns = minPoolConns
 	}
 	if cfg.MinConns > 0 {
 		poolConfig.MinConns = cfg.MinConns
@@ -60,7 +77,13 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
-	return &Store{pool: pool, maxOpenBuyNotionalUSD: cfg.MaxOpenBuyNotionalUSD}, nil
+	return &Store{pool: pool, maxOpenBuyNotionalUSD: cfg.MaxOpenBuyNotionalUSD, lockSlots: make(chan struct{}, lockSlotCount(poolConfig.MaxConns))}, nil
+}
+
+// lockSlotCount is how many locks may hold a connection in a pool of size
+// conns: half, but at least one, which a pool of one cannot serve anyway.
+func lockSlotCount(conns int32) int {
+	return max(1, int(conns)/2)
 }
 
 func (s *Store) Close() {
@@ -101,6 +124,12 @@ func (s *Store) WithIntentLock(ctx context.Context, intentID string, fn func(con
 	if intentID == "" || fn == nil {
 		return fmt.Errorf("intent ID and lock function are required")
 	}
+	select {
+	case s.lockSlots <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("wait for intent lock slot: %w", ctx.Err())
+	}
+	defer func() { <-s.lockSlots }()
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin intent lock: %w", err)
@@ -846,6 +875,12 @@ func (s *Store) OpenBuyNotional(ctx context.Context) (string, error) {
 func (s *Store) checkOpenBuyExposure(ctx context.Context, tx pgx.Tx, notional string) error {
 	if s.maxOpenBuyNotionalUSD == "" {
 		return nil
+	}
+	// Under read committed, two buys reserving at once would each sum the
+	// other's reservation out and could pass the cap together. The lock is
+	// held until the reservation commits, so each check sees the one before.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('executiond-open-buy-exposure', 0))`); err != nil {
+		return fmt.Errorf("lock open buy exposure: %w", err)
 	}
 	var withinLimit bool
 	if err := tx.QueryRow(ctx, `

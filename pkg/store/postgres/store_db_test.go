@@ -486,6 +486,72 @@ func TestReserveEnforcesOpenBuyExposureLimit(t *testing.T) {
 	}
 }
 
+// Buys reserving at once must not each sum the others out and pass the cap
+// together.
+func TestReserveHoldsTheExposureLimitUnderConcurrentBuys(t *testing.T) {
+	s := testStore(t)
+	s.maxOpenBuyNotionalUSD = "10"
+	t.Cleanup(func() { s.maxOpenBuyNotionalUSD = "" })
+
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	const buys = 8
+	results := make(chan error, buys)
+	for seq := 1; seq <= buys; seq++ {
+		go func(seq int) {
+			results <- s.Reserve(context.Background(), store.ReservationRecord{
+				ReservationID: fmt.Sprintf("%s:%d", intentID, seq), IntentID: intentID, ChildSequence: seq, UniqueTag: lane.tag, MarketID: "market",
+				ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up", Side: store.SideBuy,
+				Shares: "8", Notional: "4", State: "active",
+			})
+		}(seq)
+	}
+	reserved := 0
+	for i := 0; i < buys; i++ {
+		switch err := <-results; {
+		case err == nil:
+			reserved++
+		case err != store.ErrExposureLimit:
+			t.Fatalf("reserve: %v", err)
+		}
+	}
+	if reserved != 2 {
+		t.Fatalf("%d buys of $4 reserved under a $10 cap, want 2", reserved)
+	}
+}
+
+// Every lock holder also writes on a second connection; with more holders
+// than connections, none may end up waiting on a connection another holds.
+func TestWithIntentLockCannotExhaustThePool(t *testing.T) {
+	url := os.Getenv("EXECUTION_TEST_POSTGRES_URL")
+	if url == "" {
+		t.Skip("EXECUTION_TEST_POSTGRES_URL is not set; skipping database-backed store tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s, err := New(ctx, Config{URL: url, MaxConns: 4})
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(s.Close)
+	const holders = 12
+	results := make(chan error, holders)
+	for i := 0; i < holders; i++ {
+		go func(i int) {
+			results <- s.WithIntentLock(ctx, fmt.Sprintf("pool-test-%d-%d", time.Now().UnixNano(), i), func(ctx context.Context) error {
+				var one int
+				return s.pool.QueryRow(ctx, `SELECT 1`).Scan(&one)
+			})
+		}(i)
+	}
+	for i := 0; i < holders; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("lock holder %d: %v", i, err)
+		}
+	}
+}
+
 // ReconcilePositionSize adopts the exchange's own view of a lane when it is
 // smaller than the local fill ledger, and never inflates one: an unseen fill
 // must arrive as a fill, not as a clamp.

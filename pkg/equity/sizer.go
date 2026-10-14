@@ -47,8 +47,9 @@ func (e Entry) Release() {
 //
 // Equity does not move when a buy is placed (the order is still cash until it
 // fills), so concurrent entries all size from the same base, as Kelly intends.
-// What they can exhaust is free cash, which is why entries are serialized and
-// each holds its amount until the store's reservation takes over.
+// What they can exhaust is free cash, which is why each entry holds its
+// amount until the store's reservation takes over, and why the check of free
+// cash and the hold are made together under one lock.
 type Sizer struct {
 	tracker     *Tracker
 	openBuys    OpenBuySource
@@ -58,7 +59,15 @@ type Sizer struct {
 
 	mu      sync.Mutex
 	pending float64
+	// releases counts entries whose hold has ended. A hold ends once the
+	// entry's reservation is in the store, so a count that moved while
+	// open buys were being read means the read may have missed one.
+	releases uint64
 }
+
+// maxSizeAttempts bounds how often Size re-reads after an entry was released
+// mid-read before it reads with the lock held, as every entry once did.
+const maxSizeAttempts = 3
 
 func NewSizer(tracker *Tracker, openBuys OpenBuySource) (*Sizer, error) {
 	if tracker == nil || openBuys == nil {
@@ -83,24 +92,62 @@ func (s *Sizer) SetLossAnchor(anchor *LossAnchor) {
 
 // Size resolves fraction × equity into a target in USD, checked against free
 // cash: the balance less working buys and entries still being placed.
+//
+// The balance and open buys are read without the lock, so concurrent entries
+// do not wait out each other's round trips. That is safe unless an entry is
+// released in between: its hold is gone from pending, and if the read of open
+// buys came before its reservation, it is counted nowhere. Size then reads
+// again, and after maxSizeAttempts holds the lock across the read.
 func (s *Sizer) Size(ctx context.Context, fraction string) (Entry, error) {
 	f, err := strconv.ParseFloat(fraction, 64)
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err != nil || math.IsNaN(f) || f <= 0 || f > s.maxFraction {
-		return Entry{}, fmt.Errorf("%w %q: must be in (0, %g]", ErrInvalidFraction, fraction, s.maxFraction)
+	maxFraction, anchor := s.maxFraction, s.anchor
+	s.mu.Unlock()
+	if err != nil || math.IsNaN(f) || f <= 0 || f > maxFraction {
+		return Entry{}, fmt.Errorf("%w %q: must be in (0, %g]", ErrInvalidFraction, fraction, maxFraction)
 	}
-	equityUSD, cash, err := s.base(ctx)
+	for attempt := 1; ; attempt++ {
+		locked := attempt >= maxSizeAttempts
+		s.mu.Lock()
+		releases := s.releases
+		if !locked {
+			s.mu.Unlock()
+		}
+		equityUSD, cash, openBuys, err := s.read(ctx, anchor)
+		if !locked {
+			s.mu.Lock()
+		}
+		if err == nil && !locked && s.releases != releases {
+			s.mu.Unlock()
+			continue
+		}
+		entry, err := s.hold(f, equityUSD, cash, openBuys, err)
+		s.mu.Unlock()
+		return entry, err
+	}
+}
+
+// read loads the base equity, the wallet's cash and the USD in working buys.
+func (s *Sizer) read(ctx context.Context, anchor *LossAnchor) (equityUSD, cash, openBuys float64, err error) {
+	equityUSD, cash, err = s.base(ctx, anchor)
 	if err != nil {
-		return Entry{}, err
+		return 0, 0, 0, err
 	}
 	committed, err := s.openBuys.OpenBuyNotional(ctx)
 	if err != nil {
-		return Entry{}, fmt.Errorf("load open buy notional: %w", err)
+		return 0, 0, 0, fmt.Errorf("load open buy notional: %w", err)
 	}
-	openBuys, err := decimal.NonNegativeFloat(committed)
+	openBuys, err = decimal.NonNegativeFloat(committed)
 	if err != nil {
-		return Entry{}, fmt.Errorf("open buy notional: %w", err)
+		return 0, 0, 0, fmt.Errorf("open buy notional: %w", err)
+	}
+	return equityUSD, cash, openBuys, nil
+}
+
+// hold checks the entry against free cash and claims it. s.mu must be held.
+func (s *Sizer) hold(f, equityUSD, cash, openBuys float64, readErr error) (Entry, error) {
+	if readErr != nil {
+		return Entry{}, readErr
 	}
 	free := cash - openBuys - s.pending
 	// Floor to USDC precision so the entry never exceeds its share.
@@ -121,20 +168,21 @@ func (s *Sizer) Size(ctx context.Context, fraction string) (Entry, error) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
 				s.pending -= target
+				s.releases++
 			})
 		},
 	}, nil
 }
 
 // base is the equity an entry is a fraction of, and the wallet's cash.
-func (s *Sizer) base(ctx context.Context) (equityUSD, cash float64, err error) {
-	if s.anchor == nil {
+func (s *Sizer) base(ctx context.Context, anchor *LossAnchor) (equityUSD, cash float64, err error) {
+	if anchor == nil {
 		snapshot, err := s.tracker.Snapshot(ctx)
 		return snapshot.EquityUSD, snapshot.CashUSD, err
 	}
 	// Until the first base is recorded, which waits for any unredeemed
 	// winner to settle, entries size from live equity rather than fail.
-	if equityUSD, err = s.anchor.Equity(); errors.Is(err, ErrNoSizingBase) {
+	if equityUSD, err = anchor.Equity(); errors.Is(err, ErrNoSizingBase) {
 		snapshot, err := s.tracker.Snapshot(ctx)
 		return snapshot.EquityUSD, snapshot.CashUSD, err
 	} else if err != nil {

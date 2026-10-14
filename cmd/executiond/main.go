@@ -166,13 +166,15 @@ func run() error {
 	orders.SetEventPublisher(events)
 	repair.SetEventPublisher(events)
 
-	if err := nats.SubscribeOpen(bus, execution, cfg.AllowedStrategies); err != nil {
+	openWork, err := nats.SubscribeOpen(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError)
+	if err != nil {
 		return err
 	}
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {
 		return err
 	}
-	if err := nats.SubscribeClose(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError); err != nil {
+	closeWork, err := nats.SubscribeClose(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError)
+	if err != nil {
 		return err
 	}
 	if err := nats.SubscribePositionQuery(bus, store, identity, time.Now); err != nil {
@@ -317,6 +319,14 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGracePeriod)
 	defer cancel()
 	closeErr := closeModules(shutdownCtx, modules)
+	// Opens and closes run off the NATS delivery goroutine, so draining the
+	// bus does not wait for them. Wait here, before the store closes, so an
+	// order being placed is not cut off between persisting and its POST.
+	for name, work := range map[string]nats.Drainer{"opens": openWork, "closes": closeWork} {
+		if err := work.Wait(shutdownCtx); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("wait for in-flight %s: %w", name, err))
+		}
+	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return errors.Join(runErr, closeErr)
 	}

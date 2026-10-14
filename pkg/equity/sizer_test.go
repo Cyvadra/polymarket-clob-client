@@ -170,3 +170,38 @@ func TestSizeFromLossAnchorStillChecksLiveCash(t *testing.T) {
 		t.Fatalf("err=%v, want insufficient cash", err)
 	}
 }
+
+// releasingOpenBuys answers the first read with the working buys as they were
+// before an entry's reservation landed, releasing that entry mid-read as its
+// reservation commits. Later reads see the reservation.
+type releasingOpenBuys struct {
+	before, after string
+	release       func()
+	reads         int
+}
+
+func (r *releasingOpenBuys) OpenBuyNotional(context.Context) (string, error) {
+	r.reads++
+	if r.reads == 1 {
+		r.release()
+		return r.before, nil
+	}
+	return r.after, nil
+}
+
+// Free cash is read outside the lock, so an entry released during the read is
+// in neither pending nor the stale read; Size must read again, or it counts
+// the same cash twice.
+func TestSizeRereadsWhenAnEntryIsReleasedMidRead(t *testing.T) {
+	// $6 cash + $50 of shares = $56 equity; 8% entries cost $4.48, so only
+	// one fits in the $6 free.
+	sizer := newTestSizer(t, "6000000", "0")
+	first, err := sizer.Size(context.Background(), "0.08")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizer.openBuys = &releasingOpenBuys{before: "0", after: first.TargetUSD, release: first.Release}
+	if _, err := sizer.Size(context.Background(), "0.08"); !errors.Is(err, ErrInsufficientCash) {
+		t.Fatalf("second entry err=%v, want insufficient cash: the first entry's buy still holds its cash", err)
+	}
+}

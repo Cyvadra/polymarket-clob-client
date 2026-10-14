@@ -62,10 +62,10 @@ func TestSubscribersRequireAnAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new executor: %v", err)
 	}
-	if err := SubscribeOpen(&fakeSubscriber{}, execution, nil); err == nil {
+	if _, err := SubscribeOpen(context.Background(), &fakeSubscriber{}, execution, nil, nil); err == nil {
 		t.Fatal("expected open subscription without an allowlist to fail")
 	}
-	if err := SubscribeClose(context.Background(), &fakeSubscriber{}, &fakeCloseExecutor{}, nil, nil); err == nil {
+	if _, err := SubscribeClose(context.Background(), &fakeSubscriber{}, &fakeCloseExecutor{}, nil, nil); err == nil {
 		t.Fatal("expected close subscription without an allowlist to fail")
 	}
 }
@@ -79,10 +79,7 @@ func TestSubscribeOpenDropsAnotherWalletsStrategySilently(t *testing.T) {
 	}
 	publisher := &recordedPublisher{}
 	execution.SetEventPublisher(publisher)
-	subscriber := &fakeSubscriber{}
-	if err := SubscribeOpen(subscriber, execution, testAllowlist(t)); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
+	d := newOpenDispatcher(context.Background(), execution, testAllowlist(t), nil)
 	// The style is unsupported, so an open that reached the executor would
 	// publish a failure result.
 	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", Strategy: "other", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1, Style: "UNSUPPORTED"}}
@@ -90,9 +87,10 @@ func TestSubscribeOpenDropsAnotherWalletsStrategySilently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := subscriber.handler(context.Background(), payload); err != nil {
+	if err := d.handle(context.Background(), payload); err != nil {
 		t.Fatalf("expected a silent drop, got %v", err)
 	}
+	_ = d.Wait(context.Background())
 	if publisher.value != nil {
 		t.Fatalf("expected nothing published, got %+v on %q", publisher.value, publisher.subject)
 	}
@@ -181,16 +179,14 @@ func TestSubscribeOpenAnswersAnOpenWithoutAStrategy(t *testing.T) {
 	}
 	publisher := &recordedPublisher{}
 	execution.SetEventPublisher(publisher)
-	subscriber := &fakeSubscriber{}
-	if err := SubscribeOpen(subscriber, execution, testAllowlist(t)); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
+	d := newOpenDispatcher(context.Background(), execution, testAllowlist(t), nil)
 	intent := protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, UniqueTag: "lane-a", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy, TargetUSD: "1", LimitPrice: "0.5", TimeInForce: protocol.TimeInForceGTC, Policy: protocol.ExecutionPolicy{CompleteWithinMillis: 1}}
 	payload, err := json.Marshal(intent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	_ = subscriber.handler(context.Background(), payload)
+	_ = d.handle(context.Background(), payload)
+	_ = d.Wait(context.Background())
 	if publisher.value == nil {
 		t.Fatal("expected a failure result for an open without a strategy")
 	}

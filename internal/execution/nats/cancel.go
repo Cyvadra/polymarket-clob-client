@@ -3,7 +3,6 @@ package nats
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
@@ -35,15 +34,18 @@ type LaneHolder interface {
 // on the bus and is dropped silently, as an open is, unless the executor
 // reports this wallet still holds the lane: a strategy taken off the list
 // must still be able to close what it opened here.
-func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, allowed *Allowlist, onError func(error)) error {
+func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, allowed *Allowlist, onError func(error)) (Drainer, error) {
 	if ctx == nil {
-		return fmt.Errorf("context is required")
+		return nil, fmt.Errorf("context is required")
 	}
 	if bus == nil || execution == nil || allowed == nil {
-		return fmt.Errorf("NATS subscriber, close executor, and strategy allowlist are required")
+		return nil, fmt.Errorf("NATS subscriber, close executor, and strategy allowlist are required")
 	}
 	dispatcher := newCloseDispatcher(ctx, execution, allowed, onError)
-	return bus.Subscribe(protocol.SubjectStrategyExecutionClose, dispatcher.handle)
+	if err := bus.Subscribe(protocol.SubjectStrategyExecutionClose, dispatcher.handle); err != nil {
+		return nil, err
+	}
+	return dispatcher, nil
 }
 
 // closeDispatcher fans strategy.execution.close commands out to one worker
@@ -52,23 +54,17 @@ func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor
 // pending one, so a burst on a single lane collapses to at most the running
 // close plus the latest queued.
 type closeDispatcher struct {
+	*laneWorkers[protocol.ExecutionCloseRequest]
 	ctx     context.Context
 	exec    CloseExecutor
 	allowed *Allowlist
 	onError func(error)
-
-	mu    sync.Mutex
-	lanes map[string]*closeLane
-}
-
-type closeLane struct {
-	mu      sync.Mutex
-	pending *protocol.ExecutionCloseRequest
-	running bool
 }
 
 func newCloseDispatcher(ctx context.Context, exec CloseExecutor, allowed *Allowlist, onError func(error)) *closeDispatcher {
-	return &closeDispatcher{ctx: ctx, exec: exec, allowed: allowed, onError: onError, lanes: make(map[string]*closeLane)}
+	d := &closeDispatcher{ctx: ctx, exec: exec, allowed: allowed, onError: onError}
+	d.laneWorkers = newLaneWorkers(true, 0, nil, d.execute)
+	return d
 }
 
 func (d *closeDispatcher) handle(_ context.Context, payload []byte) error {
@@ -83,80 +79,29 @@ func (d *closeDispatcher) handle(_ context.Context, payload []byte) error {
 	return nil
 }
 
+func (d *closeDispatcher) enqueue(req protocol.ExecutionCloseRequest) {
+	d.laneWorkers.enqueue(closeLaneKey(req), req)
+}
+
 // closeLaneKey groups closes the same way the executor's lane lock does, so
 // the dispatcher serializes exactly the closes that would contend on it.
 func closeLaneKey(req protocol.ExecutionCloseRequest) string {
 	return req.Strategy + "\x00" + req.UniqueTag + "\x00" + req.ConditionID + "\x00" + req.AssetID
 }
 
-func (d *closeDispatcher) enqueue(req protocol.ExecutionCloseRequest) {
-	key := closeLaneKey(req)
-	d.mu.Lock()
-	lane := d.lanes[key]
-	if lane == nil {
-		lane = &closeLane{}
-		d.lanes[key] = lane
-	}
-	lane.mu.Lock()
-	lane.pending = &req
-	start := !lane.running
-	lane.running = true
-	lane.mu.Unlock()
-	d.mu.Unlock()
-	if start {
-		go d.run(key, lane)
-	}
-}
-
-func (d *closeDispatcher) run(key string, lane *closeLane) {
-	for {
-		lane.mu.Lock()
-		next := lane.pending
-		lane.pending = nil
-		lane.mu.Unlock()
-
-		if next == nil {
-			// Nothing left to run. Retire the lane while holding both locks so
-			// a concurrent enqueue either still finds this lane and revives it,
-			// or misses it and creates a fresh one, but never starts a second
-			// worker for the same lane.
-			d.mu.Lock()
-			lane.mu.Lock()
-			if lane.pending == nil {
-				lane.running = false
-				if d.lanes[key] == lane {
-					delete(d.lanes, key)
-				}
-				lane.mu.Unlock()
-				d.mu.Unlock()
-				return
-			}
-			lane.mu.Unlock()
-			d.mu.Unlock()
-			continue
+func (d *closeDispatcher) execute(next protocol.ExecutionCloseRequest) {
+	// The lane lookup runs here, off the NATS delivery goroutine, since
+	// every close for every other wallet on the bus reaches this check.
+	if !d.allowed.Allows(next.Strategy) {
+		held, err := d.exec.(LaneHolder).HoldsLane(d.ctx, next)
+		if err != nil && d.onError != nil {
+			d.onError(fmt.Errorf("check lane of close for strategy %q: %w", next.Strategy, err))
 		}
-
-		// The lane lookup runs here, off the NATS delivery goroutine, since
-		// every close for every other wallet on the bus reaches this check.
-		if !d.allowed.Allows(next.Strategy) {
-			held, err := d.exec.(LaneHolder).HoldsLane(d.ctx, *next)
-			if err != nil && d.onError != nil {
-				d.onError(fmt.Errorf("check lane of close for strategy %q: %w", next.Strategy, err))
-			}
-			if err != nil || !held {
-				continue
-			}
-		}
-		if err := d.exec.ExecuteClose(d.ctx, *next); err != nil && d.onError != nil {
-			d.onError(fmt.Errorf("handle NATS subject %s: %w", protocol.SubjectStrategyExecutionClose, err))
+		if err != nil || !held {
+			return
 		}
 	}
-}
-
-// idle reports whether every lane worker has finished. It exists for tests,
-// which drive the handler directly and need to wait for the async workers.
-func (d *closeDispatcher) idle() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.lanes) == 0
+	if err := d.exec.ExecuteClose(d.ctx, next); err != nil && d.onError != nil {
+		d.onError(fmt.Errorf("handle NATS subject %s: %w", protocol.SubjectStrategyExecutionClose, err))
+	}
 }

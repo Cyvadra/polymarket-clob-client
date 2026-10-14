@@ -65,7 +65,7 @@ func closeReq(tag, mode string) protocol.ExecutionCloseRequest {
 
 func TestSubscribeCloseWiresTheSubject(t *testing.T) {
 	subscriber := &fakeSubscriber{}
-	if err := SubscribeClose(context.Background(), subscriber, &fakeCloseExecutor{}, testAllowlist(t), nil); err != nil {
+	if _, err := SubscribeClose(context.Background(), subscriber, &fakeCloseExecutor{}, testAllowlist(t), nil); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 	if subscriber.subject != protocol.SubjectStrategyExecutionClose || subscriber.handler == nil {
