@@ -13,6 +13,9 @@ PRIVATE_DIR="$SCRIPT_DIR/private/$HOST"
 
 # Optional per-host deploy overrides (EXECUTIOND_PM2_BIN, etc.); see
 # scripts/deploy.env.example.
+# The instance is a per-host identity, so a stale export in the caller's shell
+# must not leak into another host's deploy.
+unset EXECUTIOND_INSTANCE
 if [[ -n $HOST && -f "$PRIVATE_DIR/deploy.env" ]]; then
 	# shellcheck disable=SC1091
 	source "$PRIVATE_DIR/deploy.env"
@@ -22,11 +25,21 @@ TARGET=${EXECUTIOND_DEPLOY_TARGET:-root}
 ARCH=${EXECUTIOND_DEPLOY_ARCH:-amd64}
 OS=${EXECUTIOND_DEPLOY_OS:-linux}
 PM2_BIN=${EXECUTIOND_PM2_BIN:-/root/.nvm/versions/node/v24.21.0/bin/pm2}
-APP_USER=executiond
-APP_GROUP=executiond
-INSTALL_ROOT=/opt/executiond
-CONFIG_ROOT=/etc/executiond
-DATA_ROOT=/var/lib/executiond
+# EXECUTIOND_INSTANCE (from deploy.env) namespaces the pm2 app and every
+# directory, so several ssh aliases of one machine run independent daemons.
+# Unset keeps the original single-instance names.
+if [[ -n ${EXECUTIOND_INSTANCE:-} && ! $EXECUTIOND_INSTANCE =~ ^[a-z0-9][a-z0-9-]{0,23}$ ]]; then
+	printf '[deploy:%s] ERROR: EXECUTIOND_INSTANCE must match ^[a-z0-9][a-z0-9-]{0,23}$\n' "$HOST" >&2
+	exit 1
+fi
+APP_NAME=executiond${EXECUTIOND_INSTANCE:+-$EXECUTIOND_INSTANCE}
+INSTALL_ROOT=/opt/$APP_NAME
+CONFIG_ROOT=/etc/$APP_NAME
+DATA_ROOT=/var/lib/$APP_NAME
+# Each instance runs as its own system user, so one wallet's daemon cannot
+# read another's keys or data.
+APP_USER=$APP_NAME
+APP_GROUP=$APP_NAME
 RELEASE_ID=${EXECUTIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 STAGE_DIR=
 # Encrypted signing key material, shipped alongside executiond.env when the env
@@ -172,7 +185,7 @@ verify_target() {
 }
 
 upload_and_activate() {
-	local remote_stage=/tmp/executiond-deploy-$RELEASE_ID
+	local remote_stage=/tmp/$APP_NAME-deploy-$RELEASE_ID
 	ssh "$TARGET@$HOST" "rm -rf '$remote_stage' && install -d -m 0700 '$remote_stage'"
 	local key_material=()
 	if (( USE_KEY_FILE )); then
@@ -181,7 +194,7 @@ upload_and_activate() {
 	scp "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256" \
 		"$PRIVATE_DIR/executiond.env" ${key_material[@]+"${key_material[@]}"} \
 		"$TARGET@$HOST:$remote_stage/"
-	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' bash -s" <<'REMOTE'
+	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_NAME='$APP_NAME' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 
 release_dir="$INSTALL_ROOT/releases/$RELEASE_ID"
@@ -197,17 +210,17 @@ cleanup() {
 trap cleanup EXIT
 
 pm2_app_status() {
-	# Prints "status restart_time" for the executiond pm2 app, or nothing if absent.
-	"$PM2_BIN" jlist | "$node_bin" -e '
+	# Prints "status restart_time" for the $APP_NAME pm2 app, or nothing if absent.
+	"$PM2_BIN" jlist | APP_NAME="$APP_NAME" "$node_bin" -e '
 		const apps = JSON.parse(require("fs").readFileSync(0, "utf8"));
-		const app = apps.find((a) => a.name === "executiond");
+		const app = apps.find((a) => a.name === process.env.APP_NAME);
 		if (app) process.stdout.write(app.pm2_env.status + " " + app.pm2_env.restart_time + "\n");
 	'
 }
 
 start_pm2_app() {
-	"$PM2_BIN" delete executiond >/dev/null 2>&1 || true
-	"$PM2_BIN" start "$run_script" --name executiond --interpreter bash --cwd "$DATA_ROOT"
+	"$PM2_BIN" delete "$APP_NAME" >/dev/null 2>&1 || true
+	"$PM2_BIN" start "$run_script" --name "$APP_NAME" --interpreter bash --cwd "$DATA_ROOT"
 	"$PM2_BIN" save
 }
 
@@ -240,14 +253,14 @@ rollback() {
 		start_pm2_app || true
 	else
 		rm -f "$current_link" "$current_link.new"
-		"$PM2_BIN" delete executiond >/dev/null 2>&1 || true
+		"$PM2_BIN" delete "$APP_NAME" >/dev/null 2>&1 || true
 		"$PM2_BIN" save >/dev/null 2>&1 || true
 	fi
 	exit "$status"
 }
 
-command -v "$PM2_BIN" >/dev/null || { echo "[executiond] ERROR: pm2 not found at $PM2_BIN (set EXECUTIOND_PM2_BIN)" >&2; exit 1; }
-command -v runuser >/dev/null || { echo "[executiond] ERROR: runuser not found; required to drop to $APP_USER" >&2; exit 1; }
+command -v "$PM2_BIN" >/dev/null || { echo "[$APP_NAME] ERROR: pm2 not found at $PM2_BIN (set EXECUTIOND_PM2_BIN)" >&2; exit 1; }
+command -v runuser >/dev/null || { echo "[$APP_NAME] ERROR: runuser not found; required to drop to $APP_USER" >&2; exit 1; }
 
 # Probe the NATS server itself rather than a particular supervisor: pmm may run
 # it as pmm-nats.service or as the pm2 app pmm-nats.
@@ -260,8 +273,30 @@ nats_host=${nats_addr%:*}
 nats_port=${nats_addr##*:}
 [[ $nats_port == "$nats_addr" ]] && nats_port=4222
 if ! timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$nats_host" "$nats_port" 2>/dev/null; then
-	echo "[executiond] WARNING: no NATS server reachable at $nats_host:$nats_port (EXECUTION_NATS_URL); executiond will keep retrying" >&2
+	echo "[$APP_NAME] WARNING: no NATS server reachable at $nats_host:$nats_port (EXECUTION_NATS_URL); executiond will keep retrying" >&2
 fi
+
+# Refuse to start a second daemon for a wallet or database another instance on
+# this machine already uses: both would act on the same commands from the
+# shared NATS bus. This also catches an alias that used to deploy as the
+# default instance and is now being renamed while the old app still runs.
+env_value() {
+	(set +u; set -a; source "$1" >/dev/null 2>&1; printf '%s' "${!2:-}")
+}
+new_maker=$(env_value "$REMOTE_STAGE/executiond.env" POLYMARKET_MAKER_ADDRESS)
+new_db=$(env_value "$REMOTE_STAGE/executiond.env" EXECUTION_POSTGRES_URL)
+for other_env in /etc/executiond*/executiond.env; do
+	[[ -f $other_env && $other_env != "$CONFIG_ROOT/executiond.env" ]] || continue
+	other_maker=$(env_value "$other_env" POLYMARKET_MAKER_ADDRESS)
+	if [[ -n $new_maker && ${new_maker,,} == "${other_maker,,}" ]]; then
+		echo "[$APP_NAME] ERROR: $other_env already trades wallet $new_maker on this machine" >&2
+		exit 1
+	fi
+	if [[ $new_db == "$(env_value "$other_env" EXECUTION_POSTGRES_URL)" ]]; then
+		echo "[$APP_NAME] ERROR: $other_env already uses the same EXECUTION_POSTGRES_URL" >&2
+		exit 1
+	fi
+done
 
 if ! getent group "$APP_GROUP" >/dev/null; then
 	groupadd --system "$APP_GROUP"
@@ -342,7 +377,7 @@ for attempt in {1..20}; do
 	sleep 1
 done
 if (( ! ready )); then
-	"$PM2_BIN" logs executiond --lines 50 --nostream >&2 || true
+	"$PM2_BIN" logs "$APP_NAME" --lines 50 --nostream >&2 || true
 	false
 fi
 trap - ERR
@@ -360,6 +395,7 @@ main() {
 	require_deploy_host
 	require_commands
 	require_go_version
+	log "deploying pm2 app $APP_NAME ($CONFIG_ROOT)"
 	require_private_bundle
 	verify_target
 	build_bundle

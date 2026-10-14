@@ -24,6 +24,10 @@ exporting them by hand.
 
 ## Layout on the target
 
+Paths and names below are for the default instance. With
+`EXECUTIOND_INSTANCE=<name>` (see below) every `executiond` in them — the
+directories, the pm2 app and the system user — becomes `executiond-<name>`.
+
 | Path | Purpose |
 |---|---|
 | `/opt/executiond/releases/<timestamp>` | Immutable application releases (`executiond`, `executiontest`, `polykey`) |
@@ -57,10 +61,21 @@ definition itself never changes between releases.
 - `executiond` uses its own PostgreSQL database from `EXECUTION_POSTGRES_URL`
   and applies its own schema on startup. The deploy refuses the placeholder
   default URL.
-- One `executiond` instance per wallet and per host: the deploy deletes and
-  recreates the pm2 app on every run. Several hosts may share one NATS server;
+- One `executiond` instance per ssh alias: the deploy deletes and recreates
+  that alias's pm2 app on every run. Several hosts may share one NATS server;
   each trades only the strategies in its `EXECUTION_ALLOWED_STRATEGIES`, which
   the deploy requires.
+- Several wallets on one machine: add an ssh alias per wallet (e.g. `aws-a`,
+  `aws-b` with the same `HostName`) and set `EXECUTIOND_INSTANCE=b` in
+  `scripts/private/aws-b/deploy.env`. That instance runs as the pm2 app
+  `executiond-b` under `/opt`, `/etc` and `/var/lib/executiond-b`, so its key
+  paths in `executiond.env` are `/etc/executiond-b/private-key.{json,pass}`.
+  Each instance runs as its own system user (`executiond-b`). Give each its
+  own wallet, its own Postgres database and disjoint
+  `EXECUTION_ALLOWED_STRATEGIES` (no `*` on more than one): the deploy refuses
+  to install an instance whose `POLYMARKET_MAKER_ADDRESS` or
+  `EXECUTION_POSTGRES_URL` another instance on the machine already uses. The
+  instance name is read only from `deploy.env`, never from your shell.
 
 ## Private bundle
 
