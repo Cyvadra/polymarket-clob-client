@@ -67,6 +67,14 @@ type namedModule struct {
 }
 
 func main() {
+	// -check-config validates the environment and exits, so a deploy can
+	// refuse a bad config before it replaces the running release.
+	if len(os.Args) == 2 && os.Args[1] == "-check-config" {
+		if _, err := configFromEnv(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}

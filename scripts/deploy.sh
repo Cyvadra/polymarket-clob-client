@@ -120,6 +120,18 @@ require_private_bundle() {
 	if grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=postgres://user:password@127\.0\.0\.1:5432/execution' "$env_file"; then
 		fail "$env_file still uses the placeholder EXECUTION_POSTGRES_URL; point it at the real database"
 	fi
+	# Let executiond itself parse the config: a mistake it rejects would
+	# otherwise only surface as a crash loop after the release is swapped.
+	# EXECUTION_* from the caller's shell are cleared so only the file counts.
+	(
+		cd "$REPO_ROOT"
+		unset $(compgen -e | grep '^EXECUTION_') 2>/dev/null || true
+		set -a
+		# shellcheck disable=SC1090
+		source "$env_file"
+		set +a
+		go run ./cmd/executiond -check-config
+	) || fail "executiond rejects $env_file (see the error above)"
 }
 
 # require_key_paths checks that the daemon will look for the keystore where
@@ -360,6 +372,7 @@ start_pm2_app
 
 # executiond exposes no HTTP endpoint; treat it as ready once pm2 reports it
 # online and stable (no new restarts) for a few consecutive seconds.
+echo "[$APP_NAME] waiting up to 20s for $APP_NAME to stay online"
 read -r baseline_status baseline_restarts <<<"$(pm2_app_status)"
 stable=0
 ready=0
