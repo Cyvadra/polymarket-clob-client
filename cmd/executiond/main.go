@@ -31,27 +31,28 @@ import (
 )
 
 type config struct {
-	NATSURL                string
-	AllowedStrategies      *nats.Allowlist
-	PostgresURL            string
-	MaxOpenBuyNotionalUSD  string
-	FeatureInterval        time.Duration
-	ReconcileInterval      time.Duration
-	SettlementInterval     time.Duration
-	MissingOrderGrace      time.Duration
-	MaxTradeAge            time.Duration
-	ResultPriceWait        time.Duration
-	BalanceCacheTTL        time.Duration
-	EquityMaxQuoteAge      time.Duration
-	MaxEquityFraction      float64
-	MaxDrawdown            equity.DrawdownLimit
-	StrategyMaxDrawdown    map[string]equity.DrawdownLimit
-	DrawdownStart          time.Time
-	EquityFlowThresholdUSD float64
-	SizeAfterLossOnly      bool
-	ConnectTimeout         time.Duration
-	KeepWarmInterval       time.Duration
-	ShutdownGracePeriod    time.Duration
+	NATSURL                    string
+	AllowedStrategies          *nats.Allowlist
+	PostgresURL                string
+	MaxOpenBuyNotionalUSD      string
+	FeatureInterval            time.Duration
+	ReconcileInterval          time.Duration
+	SettlementInterval         time.Duration
+	MissingOrderGrace          time.Duration
+	MaxTradeAge                time.Duration
+	ResultPriceWait            time.Duration
+	BalanceCacheTTL            time.Duration
+	EquityMaxQuoteAge          time.Duration
+	MaxEquityFraction          float64
+	MaxDrawdown                equity.DrawdownLimit
+	StrategyMaxDrawdown        map[string]equity.DrawdownLimit
+	StrategyDefaultMaxDrawdown equity.DrawdownLimit
+	DrawdownStart              time.Time
+	EquityFlowThresholdUSD     float64
+	SizeAfterLossOnly          bool
+	ConnectTimeout             time.Duration
+	KeepWarmInterval           time.Duration
+	ShutdownGracePeriod        time.Duration
 }
 
 type module interface {
@@ -447,6 +448,9 @@ func configFromEnv() (config, error) {
 		return config{}, fmt.Errorf("EXECUTION_ALLOWED_STRATEGIES must list the strategies this wallet trades, comma-separated: %w", err)
 	}
 	cfg.AllowedStrategies = allowed
+	if allowed.Wildcard() {
+		log.Printf("EXECUTION_ALLOWED_STRATEGIES is %q: this wallet acts on every strategy on the bus, so any other executiond on this NATS server repeats its trades", nats.Wildcard)
+	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
 	}
@@ -474,6 +478,16 @@ func configFromEnv() (config, error) {
 		}
 		cfg.StrategyMaxDrawdown = limits
 		deprecated = append(deprecated, bare...)
+	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN")); value != "" {
+		limit, bare, err := parseDrawdownLimit(value)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN: %w", err)
+		}
+		if bare {
+			deprecated = append(deprecated, value)
+		}
+		cfg.StrategyDefaultMaxDrawdown = limit
 	}
 	if cfg.drawdownLimited() {
 		start, err := parseStart(os.Getenv("EXECUTION_DRAWDOWN_START"))
@@ -559,6 +573,8 @@ func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]equi
 		switch {
 		case name == "":
 			return nil, nil, fmt.Errorf("%q names no strategy", entry)
+		case name == nats.Wildcard:
+			return nil, nil, fmt.Errorf("%q: set a limit for every strategy with EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN", entry)
 		case err != nil:
 			return nil, nil, fmt.Errorf("strategy %q: %w", name, err)
 		case !allowed.Allows(name):
@@ -584,7 +600,7 @@ func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]equi
 func parseStart(value string) (time.Time, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return time.Time{}, fmt.Errorf("required with EXECUTION_MAX_DRAWDOWN or EXECUTION_STRATEGY_MAX_DRAWDOWN")
+		return time.Time{}, fmt.Errorf("required with EXECUTION_MAX_DRAWDOWN, EXECUTION_STRATEGY_MAX_DRAWDOWN or EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN")
 	}
 	if start, err := time.Parse(time.RFC3339, value); err == nil {
 		return start, nil
@@ -650,7 +666,8 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
 	return nil
 }
 
-// drawdownLimits builds the wallet's limit, if set, and each strategy's.
+// drawdownLimits builds the wallet's limit, if set, each listed strategy's,
+// and the default for the other strategies.
 func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits, error) {
 	var wallet *equity.DrawdownGuard
 	if !cfg.MaxDrawdown.IsZero() {
@@ -668,7 +685,13 @@ func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits,
 		}
 		strategies = append(strategies, guard)
 	}
-	return equity.NewDrawdownLimits(wallet, strategies...), nil
+	limits := equity.NewDrawdownLimits(s, cfg.DrawdownStart, wallet, strategies...)
+	if !cfg.StrategyDefaultMaxDrawdown.IsZero() {
+		if err := limits.SetStrategyDefault(cfg.StrategyDefaultMaxDrawdown, cfg.AllowedStrategies.Allows); err != nil {
+			return nil, err
+		}
+	}
+	return limits, nil
 }
 
 // refreshDrawdown refreshes every guard, so one that fails does not leave
@@ -687,5 +710,5 @@ func refreshDrawdown(ctx context.Context, limits *equity.DrawdownLimits) error {
 
 // drawdownLimited reports whether any drawdown limit, wallet or strategy, is set.
 func (c config) drawdownLimited() bool {
-	return !c.MaxDrawdown.IsZero() || len(c.StrategyMaxDrawdown) > 0
+	return !c.MaxDrawdown.IsZero() || len(c.StrategyMaxDrawdown) > 0 || !c.StrategyDefaultMaxDrawdown.IsZero()
 }

@@ -24,6 +24,27 @@ func testAllowlist(t *testing.T) *Allowlist {
 	return allowed
 }
 
+func TestParseAllowlistWildcardAllowsEveryStrategy(t *testing.T) {
+	allowed, err := ParseAllowlist(" * ")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !allowed.Wildcard() || !reflect.DeepEqual(allowed.Names(), []string{"*"}) {
+		t.Fatalf("wildcard=%v names=%v", allowed.Wildcard(), allowed.Names())
+	}
+	for _, name := range []string{"late-gap", "Other", "*"} {
+		if !allowed.Allows(name) {
+			t.Fatalf("expected %q to be allowed", name)
+		}
+	}
+	if _, err := ParseAllowlist("*,late-gap"); err == nil {
+		t.Fatal("expected * alongside a name to be rejected")
+	}
+	if listed, _ := ParseAllowlist("late-gap"); listed.Wildcard() {
+		t.Fatal("a listed strategy is not a wildcard")
+	}
+}
+
 func TestParseAllowlistTrimsAndDropsDuplicates(t *testing.T) {
 	allowed, err := ParseAllowlist(" late-gap , momentum,,late-gap ")
 	if err != nil {
@@ -221,5 +242,18 @@ func TestCloseDispatcherClosesAHeldLaneOfAnotherStrategy(t *testing.T) {
 		if calls := exec.recorded(); (len(calls) == 1) != held {
 			t.Fatalf("held=%v: calls=%+v", held, calls)
 		}
+	}
+}
+
+func TestWildcardAllowlistRejectsBlankStrategy(t *testing.T) {
+	list, err := ParseAllowlist("*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Allows("") {
+		t.Fatal("wildcard allowlist allowed a blank strategy")
+	}
+	if !list.Allows("late-gap") {
+		t.Fatal("wildcard allowlist rejected a named strategy")
 	}
 }

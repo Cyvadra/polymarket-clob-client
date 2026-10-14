@@ -10,7 +10,7 @@
 
 ## Wallets and strategies
 
-Each `executiond` trades one wallet and a fixed list of strategies, set by `EXECUTION_ALLOWED_STRATEGIES`. Every instance on a shared NATS server receives every command, and acts only on those whose `strategy` is on its list. A strategy name is matched exactly, including case.
+Each `executiond` trades one wallet and a fixed list of strategies, set by `EXECUTION_ALLOWED_STRATEGIES`. Every instance on a shared NATS server receives every command, and acts only on those whose `strategy` is on its list. A strategy name is matched exactly, including case. An instance configured with `*` acts on every strategy and reports its allowed strategies as `["*"]`.
 
 A command for any other strategy is dropped without a result, an order event, or a log line. It belongs to another wallet, and a failure result would read as that wallet refusing the order. A command for a strategy that no instance allows therefore gets no answer at all: the strategy only sees a timeout.
 

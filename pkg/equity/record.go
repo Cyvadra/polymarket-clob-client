@@ -507,56 +507,110 @@ func (g *DrawdownGuard) measured() string {
 }
 
 // DrawdownLimits holds back opens while the wallet's drawdown is over its
-// limit, and a strategy's opens while that strategy's is over its own.
+// limit, and a strategy's opens while that strategy's is over its own. With a
+// default set, a strategy that has no limit of its own gets the default once
+// it first appears in a snapshot's split; one that has never traded has no
+// drawdown to limit.
 type DrawdownLimits struct {
-	wallet     *DrawdownGuard
+	store store.EquityStore
+	start time.Time
+
+	wallet       *DrawdownGuard
+	defaultLimit DrawdownLimit
+	covers       func(string) bool
+
+	refreshMu  sync.Mutex // serializes Refresh
+	mu         sync.RWMutex
 	strategies map[string]*DrawdownGuard
 	guards     []*DrawdownGuard // the wallet's first, then the strategies' in name order
 }
 
-// NewDrawdownLimits takes a nil wallet guard for no wallet limit.
-func NewDrawdownLimits(wallet *DrawdownGuard, strategies ...*DrawdownGuard) *DrawdownLimits {
-	limits := &DrawdownLimits{wallet: wallet, strategies: map[string]*DrawdownGuard{}}
-	if wallet != nil {
-		limits.guards = append(limits.guards, wallet)
-	}
-	sorted := append([]*DrawdownGuard(nil), strategies...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].strategy < sorted[j].strategy })
-	for _, guard := range sorted {
+// NewDrawdownLimits takes a nil wallet guard for no wallet limit. s and start
+// are what default strategy guards are measured with.
+func NewDrawdownLimits(s store.EquityStore, start time.Time, wallet *DrawdownGuard, strategies ...*DrawdownGuard) *DrawdownLimits {
+	limits := &DrawdownLimits{store: s, start: start, wallet: wallet, strategies: map[string]*DrawdownGuard{}}
+	for _, guard := range strategies {
 		limits.strategies[guard.strategy] = guard
 	}
-	limits.guards = append(limits.guards, sorted...)
+	limits.sortGuards()
 	return limits
 }
 
+// SetStrategyDefault limits every strategy covers accepts that has no guard
+// of its own, as it appears. Call it once, before the first Refresh.
+func (l *DrawdownLimits) SetStrategyDefault(limit DrawdownLimit, covers func(string) bool) error {
+	if l.store == nil {
+		return fmt.Errorf("equity store is required")
+	}
+	if !limit.Valid() {
+		return fmt.Errorf("drawdown limit must be a fraction in (0, 1) or a positive dollar amount")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.defaultLimit.IsZero() {
+		return fmt.Errorf("strategy default drawdown limit is already set")
+	}
+	l.defaultLimit, l.covers = limit, covers
+	return nil
+}
+
+// sortGuards rebuilds guards from wallet and strategies; l.mu must be held
+// or l not yet shared.
+func (l *DrawdownLimits) sortGuards() {
+	guards := make([]*DrawdownGuard, 0, len(l.strategies)+1)
+	if l.wallet != nil {
+		guards = append(guards, l.wallet)
+	}
+	sorted := make([]*DrawdownGuard, 0, len(l.strategies))
+	for _, guard := range l.strategies {
+		sorted = append(sorted, guard)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].strategy < sorted[j].strategy })
+	l.guards = append(guards, sorted...)
+}
+
 // Guards lists the wallet guard, if any, then the strategies' in name order.
-func (l *DrawdownLimits) Guards() []*DrawdownGuard { return l.guards }
+func (l *DrawdownLimits) Guards() []*DrawdownGuard {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.guards
+}
 
 // Refresh refreshes every guard from one read of the latest snapshot and its
-// split, so one that fails does not leave the others stale. It returns the
-// guards that refreshed, in Guards order, and the errors joined.
+// split, so one that fails does not leave the others stale. It first adds a
+// default guard for each strategy new to the split. It returns the guards
+// that refreshed, in Guards order, and the errors joined.
 func (l *DrawdownLimits) Refresh(ctx context.Context) ([]*DrawdownGuard, error) {
-	guards := l.Guards()
-	if len(guards) == 0 {
+	l.refreshMu.Lock()
+	defer l.refreshMu.Unlock()
+	l.mu.RLock()
+	defaulted := !l.defaultLimit.IsZero()
+	empty := len(l.guards) == 0
+	l.mu.RUnlock()
+	if empty && !defaulted {
 		return nil, nil
 	}
-	s := guards[0].store
-	latest, ok, err := s.LatestEquitySnapshot(ctx)
+	latest, ok, err := l.store.LatestEquitySnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var parts []store.StrategyEquityRecord
-	if ok && l.fractionStrategies() {
-		if parts, err = s.StrategyEquity(ctx, latest.ID); err != nil {
+	if ok && (defaulted || l.fractionStrategies()) {
+		if parts, err = l.store.StrategyEquity(ctx, latest.ID); err != nil {
 			return nil, err
 		}
 		if parts == nil {
 			parts = []store.StrategyEquityRecord{}
 		}
 	}
-	var refreshed []*DrawdownGuard
 	var errs []error
-	for _, guard := range guards {
+	if defaulted {
+		if err := l.addDefaults(parts); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	var refreshed []*DrawdownGuard
+	for _, guard := range l.Guards() {
 		if _, err := guard.refresh(ctx, latest, ok, parts); err != nil {
 			errs = append(errs, err)
 			continue
@@ -566,9 +620,37 @@ func (l *DrawdownLimits) Refresh(ctx context.Context) ([]*DrawdownGuard, error) 
 	return refreshed, errors.Join(errs...)
 }
 
+// addDefaults gives each covered strategy in parts without a guard the
+// default limit, skipping any it cannot build. Unattributed lanes, kept under "", are no strategy's.
+func (l *DrawdownLimits) addDefaults(parts []store.StrategyEquityRecord) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	added := false
+	var errs []error
+	for _, part := range parts {
+		name := part.Strategy
+		if name == "" || l.strategies[name] != nil || (l.covers != nil && !l.covers(name)) {
+			continue
+		}
+		guard, err := NewStrategyDrawdownGuard(l.store, name, l.start, l.defaultLimit)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		l.strategies[name] = guard
+		added = true
+	}
+	if added {
+		l.sortGuards()
+	}
+	return errors.Join(errs...)
+}
+
 // fractionStrategies reports whether a strategy guard reads the split's
 // index, which only fraction limits do.
 func (l *DrawdownLimits) fractionStrategies() bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	for _, guard := range l.strategies {
 		if !guard.limit.Dollars() {
 			return true
@@ -584,7 +666,10 @@ func (l *DrawdownLimits) Suspended(strategy string) (bool, string) {
 			return true, reason
 		}
 	}
-	if guard, ok := l.strategies[strategy]; ok {
+	l.mu.RLock()
+	guard, ok := l.strategies[strategy]
+	l.mu.RUnlock()
+	if ok {
 		return guard.Suspended()
 	}
 	return false, ""

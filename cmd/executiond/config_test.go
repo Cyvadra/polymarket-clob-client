@@ -175,3 +175,50 @@ func TestConfigFromEnvStrategyDrawdownLimits(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigFromEnvAllowsEveryStrategyWithAWildcard(t *testing.T) {
+	withEnv(t, map[string]string{
+		"EXECUTION_ALLOWED_STRATEGIES":    " * ",
+		"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10%",
+		"EXECUTION_DRAWDOWN_START":        "2026-09-28",
+	})
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if !cfg.AllowedStrategies.Wildcard() || !cfg.AllowedStrategies.Allows("anything") || cfg.StrategyMaxDrawdown["late-gap"] != equity.FractionLimit(0.1) {
+		t.Fatalf("allowed=%v limits=%+v", cfg.AllowedStrategies.Names(), cfg.StrategyMaxDrawdown)
+	}
+	withEnv(t, map[string]string{"EXECUTION_ALLOWED_STRATEGIES": "*,late-gap"})
+	if _, err := configFromEnv(); err == nil {
+		t.Fatal("expected * alongside a name to be rejected")
+	}
+}
+
+func TestConfigFromEnvStrategyDefaultDrawdown(t *testing.T) {
+	for value, want := range map[string]equity.DrawdownLimit{"15%": equity.FractionLimit(0.15), "$250": equity.DollarLimit(250)} {
+		withEnv(t, map[string]string{
+			"EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN": value,
+			"EXECUTION_DRAWDOWN_START":                "2026-09-28",
+		})
+		cfg, err := configFromEnv()
+		if err != nil {
+			t.Fatalf("%s: %v", value, err)
+		}
+		if cfg.StrategyDefaultMaxDrawdown != want || !cfg.drawdownLimited() {
+			t.Fatalf("%s read as %+v", value, cfg.StrategyDefaultMaxDrawdown)
+		}
+	}
+	for name, kv := range map[string]map[string]string{
+		"no start":          {"EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN": "10%", "EXECUTION_DRAWDOWN_START": ""},
+		"invalid":           {"EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN": "10", "EXECUTION_DRAWDOWN_START": "2026-09-28"},
+		"wildcard per-name": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "*:10%", "EXECUTION_DRAWDOWN_START": "2026-09-28"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withEnv(t, kv)
+			if _, err := configFromEnv(); err == nil {
+				t.Fatal("expected an error")
+			}
+		})
+	}
+}

@@ -529,7 +529,7 @@ func TestDrawdownLimitsHoldBackOnlyTheStrategyOverItsLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	limits := NewDrawdownLimits(walletGuard, a, b)
+	limits := NewDrawdownLimits(s, recordStart, walletGuard, a, b)
 	for _, guard := range limits.Guards() {
 		if _, err := guard.Refresh(context.Background()); err != nil {
 			t.Fatal(err)
@@ -543,6 +543,43 @@ func TestDrawdownLimitsHoldBackOnlyTheStrategyOverItsLimit(t *testing.T) {
 	}
 	if suspended, _ := limits.Suspended("c"); suspended {
 		t.Fatal("a strategy with no limit is held back")
+	}
+}
+
+func TestDrawdownLimitsGiveTheDefaultToStrategiesWithoutALimit(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	// a, b and c each start at $20; a and b fall 25%, c is not covered.
+	recordSplit(t, r, s, wallet, 0, 40, map[string]float64{"a": 20, "b": 20, "c": 20}, map[string]float64{"a": -20, "b": -20, "c": -20})
+	recordSplit(t, r, s, wallet, 1, 40, map[string]float64{"a": 15, "b": 15, "c": 15}, nil)
+	a, err := NewStrategyDrawdownGuard(s, "a", recordStart, FractionLimit(0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := NewDrawdownLimits(s, recordStart, nil, a)
+	if err := limits.SetStrategyDefault(FractionLimit(0.01), func(name string) bool { return name != "c" }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := limits.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, guard := range limits.Guards() {
+		names = append(names, guard.Strategy())
+	}
+	if strings.Join(names, ",") != "a,b" {
+		t.Fatalf("guards %v, want a,b", names)
+	}
+	if suspended, _ := limits.Suspended("a"); suspended {
+		t.Fatal("a's own limit was replaced by the default")
+	}
+	if suspended, _ := limits.Suspended("b"); !suspended {
+		t.Fatal("b is past the default and not held back")
+	}
+	if suspended, _ := limits.Suspended("c"); suspended {
+		t.Fatal("an uncovered strategy is held back")
+	}
+	if suspended, _ := limits.Suspended("d"); suspended {
+		t.Fatal("a strategy that never traded is held back")
 	}
 }
 

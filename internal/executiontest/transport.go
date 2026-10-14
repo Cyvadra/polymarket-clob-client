@@ -243,14 +243,14 @@ func (o *Observer) Query(ctx context.Context, request protocol.PositionQueryRequ
 }
 
 // answersFor reports whether a position reply comes from the executiond this
-// run talks to: one that trades strategy and, when wallet is known, that
+// run talks to: one that trades strategy, or every strategy, and, when wallet is known, that
 // wallet.
 func answersFor(response protocol.PositionQueryResponse, strategy, wallet string) bool {
 	if wallet != "" && response.WalletAddress != wallet {
 		return false
 	}
 	for _, allowed := range response.AllowedStrategies {
-		if allowed == strategy {
+		if allowed == strategy || allowed == "*" {
 			return true
 		}
 	}
