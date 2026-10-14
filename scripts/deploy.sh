@@ -76,6 +76,10 @@ require_private_bundle() {
 	# <CHANGE_ME> on purpose and are meant to be left alone.
 	! grep -Eq '^[[:space:]]*[^#[:space:]].*<CHANGE_ME>' "$env_file" || \
 		fail "replace every <CHANGE_ME> value in $env_file (commented lines are ignored)"
+	# run.sh sources this file under set -u, so an unquoted $100 aborts the
+	# daemon on the remote host; catch it here instead.
+	bash -c 'set -eu; set -a; source "$1"' _ "$env_file" >/dev/null || \
+		fail "$env_file does not source cleanly; single-quote values containing \$ (e.g. '\$100')"
 	local has_plaintext_key=0 has_key_file=0
 	grep -Eq '^[[:space:]]*POLYMARKET_PRIVATE_KEY=[^[:space:]]+' "$env_file" && has_plaintext_key=1
 	grep -Eq '^[[:space:]]*POLYMARKET_PRIVATE_KEY_FILE=[^[:space:]]+' "$env_file" && has_key_file=1
@@ -245,8 +249,18 @@ rollback() {
 command -v "$PM2_BIN" >/dev/null || { echo "[executiond] ERROR: pm2 not found at $PM2_BIN (set EXECUTIOND_PM2_BIN)" >&2; exit 1; }
 command -v runuser >/dev/null || { echo "[executiond] ERROR: runuser not found; required to drop to $APP_USER" >&2; exit 1; }
 
-if ! systemctl is-active --quiet pmm-nats.service 2>/dev/null; then
-	echo "[executiond] WARNING: pmm-nats.service is not active; executiond needs a NATS server at its EXECUTION_NATS_URL" >&2
+# Probe the NATS server itself rather than a particular supervisor: pmm may run
+# it as pmm-nats.service or as the pm2 app pmm-nats.
+nats_url=$(set +u; set -a; source "$REMOTE_STAGE/executiond.env"; printf '%s' "${EXECUTION_NATS_URL:-nats://127.0.0.1:4222}")
+nats_addr=${nats_url%%,*}
+nats_addr=${nats_addr#*://}
+nats_addr=${nats_addr##*@}
+nats_addr=${nats_addr%%/*}
+nats_host=${nats_addr%:*}
+nats_port=${nats_addr##*:}
+[[ $nats_port == "$nats_addr" ]] && nats_port=4222
+if ! timeout 3 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$nats_host" "$nats_port" 2>/dev/null; then
+	echo "[executiond] WARNING: no NATS server reachable at $nats_host:$nats_port (EXECUTION_NATS_URL); executiond will keep retrying" >&2
 fi
 
 if ! getent group "$APP_GROUP" >/dev/null; then

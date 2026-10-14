@@ -49,8 +49,9 @@ definition itself never changes between releases.
   any `pmm*` unit, path, or pm2 app.
 - Shared NATS: `executiond` connects to `EXECUTION_NATS_URL`
   (`nats://127.0.0.1:4222` by default), which is the `pmm-nats.service` pmm's
-  deploy installs. The deploy only warns (does not fail) when
-  `pmm-nats.service` is not active — a standalone NATS server is allowed. If
+  deploy installs (as a systemd unit or the pm2 app `pmm-nats`). The deploy
+  only warns (does not fail) when nothing accepts TCP connections at that
+  address — any NATS server there is fine. If
   the connection is lost for good the process exits and pm2's own restart
   policy brings it back.
 - `executiond` uses its own PostgreSQL database from `EXECUTION_POSTGRES_URL`
