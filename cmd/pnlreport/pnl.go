@@ -207,3 +207,44 @@ func (s *Series) Sample(start, end time.Time, n int) ([]time.Time, []float64) {
 	}
 	return times, values
 }
+
+// Combine sums member series into one group curve: at each member event the
+// group value is the sum of every member's latest cumulative PnL.
+func Combine(key string, members []*Series) *Series {
+	type step struct {
+		at     time.Time
+		member int
+		pnl    float64
+	}
+	var steps []step
+	latest := make([]float64, len(members))
+	out := &Series{Key: key, active: true}
+	for i, m := range members {
+		out.Base += m.Base
+		latest[i] = m.Base
+		for _, p := range m.Points {
+			steps = append(steps, step{p.At, i, p.PnL})
+		}
+		o, t := &out.Metrics, m.Metrics
+		o.Fees += t.Fees
+		o.BuyVolume += t.BuyVolume
+		o.SellVolume += t.SellVolume
+		o.Fills += t.Fills
+		o.Closed += t.Closed
+		o.Wins += t.Wins
+		o.OpenCost += t.OpenCost
+		o.AllTime += t.AllTime
+	}
+	sort.SliceStable(steps, func(i, j int) bool { return steps[i].at.Before(steps[j].at) })
+	for _, st := range steps {
+		latest[st.member] = st.pnl
+		sum := 0.0
+		for _, v := range latest {
+			sum += v
+		}
+		out.Points = append(out.Points, Point{At: st.at, PnL: sum})
+	}
+	out.Metrics.PnL = out.Metrics.AllTime - out.Base
+	out.Metrics.MaxDrawdown = maxDrawdown(out)
+	return out
+}

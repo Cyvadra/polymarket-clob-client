@@ -118,14 +118,15 @@ func TestChartAndTable(t *testing.T) {
 		{At: at(2), Tag: "strat_1", Condition: "c", Token: "t", Side: "SELL", Shares: 10, Price: 0.6},
 	}
 	series := Compute(events, t0, at(3))
-	png, err := Chart(series[0], "test · wallet · 3h", t0, at(3))
+	png, err := MultiChart("test · overview · 3h", summary(series[0]),
+		[]Line{{Name: "wallet", S: series[0]}, {Name: "strat_1", S: series[1], RightAxis: true}}, t0, at(3))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.HasPrefix(png, []byte("\x89PNG")) {
 		t.Fatal("not a PNG")
 	}
-	tables := Table("executiond-b", series, 3, at(3))
+	tables := Table("executiond-b", series[0], GroupSeries(series[1:], nil), 3, at(3))
 	if len(tables) != 1 {
 		t.Fatalf("want one message, got %d", len(tables))
 	}
@@ -162,7 +163,8 @@ func TestTableSplitsLongReports(t *testing.T) {
 		tag := strings.Repeat("s", 40) + string(rune('A'+i%26)) + string(rune('a'+i/26))
 		events = append(events, Event{At: at(1), Tag: tag, Condition: tag, Token: "t", Side: "BUY", Shares: 1, Price: 0.5})
 	}
-	tables := Table("x", Compute(events, t0, at(2)), 2, at(2))
+	series := Compute(events, t0, at(2))
+	tables := Table("x", series[0], GroupSeries(series[1:], nil), 2, at(2))
 	if len(tables) < 2 {
 		t.Fatalf("want several messages, got %d", len(tables))
 	}
@@ -170,5 +172,39 @@ func TestTableSplitsLongReports(t *testing.T) {
 		if len(table) > 4096 || !strings.Contains(table, "strategy") || strings.Count(table, "```") != 2 {
 			t.Fatalf("bad chunk (%d chars):\n%s", len(table), table)
 		}
+	}
+}
+
+func TestCombineSumsMembers(t *testing.T) {
+	events := []Event{
+		{At: at(1), Tag: "Up:btc:1", Condition: "1", Token: "t", Side: "BUY", Shares: 10, Price: 0.5},
+		{At: at(1), Tag: "Down:btc:2", Condition: "2", Token: "t", Side: "BUY", Shares: 10, Price: 0.5},
+		{At: at(2), Tag: "Up:btc:1", Condition: "1", Token: "t", Side: "SELL", Shares: 10, Price: 0.7},   // +2
+		{At: at(3), Tag: "Down:btc:2", Condition: "2", Token: "t", Side: "SELL", Shares: 10, Price: 0.4}, // -1
+		{At: at(4), Tag: "solo:btc:3", Condition: "3", Token: "t", Side: "BUY", Shares: 1, Price: 0.5},
+	}
+	series := Compute(events, t0, at(5))
+	groups := GroupSeries(series[1:], map[string]string{"Up": "g", "Down": "g"})
+	if len(groups) != 2 || groups[0].Series.Key != "g" || len(groups[0].Members) != 2 || groups[1].Series.Key != "solo" {
+		t.Fatalf("groups = %+v", groups)
+	}
+	g := groups[0].Series
+	near(t, "group pnl", g.Metrics.PnL, 1)
+	near(t, "group maxdd", g.Metrics.MaxDrawdown, 1)
+	if g.Metrics.Fills != 4 || len(g.Points) != 4 {
+		t.Fatalf("group = %+v, %d points", g.Metrics, len(g.Points))
+	}
+	near(t, "last point", g.Points[len(g.Points)-1].PnL, 1)
+}
+
+func TestLoadGroups(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.yaml")
+	body := "strategies:\n  - name: A\n    exclusive_group: g\n  - name: B\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := LoadGroups([]string{path})
+	if err != nil || len(groups) != 1 || groups["A"] != "g" {
+		t.Fatalf("groups = %v, err = %v", groups, err)
 	}
 }

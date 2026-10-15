@@ -129,8 +129,12 @@ secrets, is only read locally by `deploy.sh`, and is never uploaded.
 
 Each release also ships `pnlreport`. It rebuilds realized PnL from the
 instance's `fills` and `settlement_payouts` and sends a metrics table, the
-wallet curve and one curve per strategy (the `unique_tag` prefix before the
-first `:`) to Telegram. Set
+merged charts to Telegram: an overview (wallet on the left axis, one curve per
+exclusive group on a shared right axis) and one chart per multi-strategy group
+(the group total plus each member strategy; a strategy is the `unique_tag`
+prefix before the first `:`). Groups come from `exclusive_group` in the pmm
+strategies YAML files listed in `PNL_STRATEGIES` (or `--strategies`); without
+them every strategy is its own group. Set
 `PNL_TELEGRAM_TOKEN` and `PNL_TELEGRAM_CHAT_ID` in that instance's
 `executiond.env`. It is not scheduled automatically, so add one root cron line
 per instance:

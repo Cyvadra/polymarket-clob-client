@@ -14,18 +14,29 @@ const messageBudget = 3500
 // Table renders the metrics as MarkdownV2 messages: a header line and a
 // monospace table, since Telegram does not render markdown tables. Rows are
 // split across messages when the table would not fit in one.
-func Table(label string, series []*Series, hours int, end time.Time) []string {
+func Table(label string, wallet *Series, groups []Grouped, hours int, end time.Time) []string {
 	var table strings.Builder
 	writer := tabwriter.NewWriter(&table, 0, 0, 1, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(writer, "strategy\tPnL\tMaxDD\tFees\tVol\tFills\tWin\tOpen\t")
-	for _, s := range series {
+	row := func(name string, s *Series) {
 		m := s.Metrics
 		win := "-"
 		if m.Closed > 0 {
 			win = fmt.Sprintf("%d/%d", m.Wins, m.Closed)
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t\n", s.Key, usd(m.PnL), usd(m.MaxDrawdown),
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t\n", name, usd(m.PnL), usd(m.MaxDrawdown),
 			usd(m.Fees), usd(m.BuyVolume+m.SellVolume), m.Fills, win, usd(m.OpenCost))
+	}
+	row(WalletKey, wallet)
+	for _, g := range groups {
+		if len(g.Members) < 2 {
+			row(g.Series.Key, g.Series)
+			continue
+		}
+		row("["+g.Series.Key+"]", g.Series)
+		for _, m := range g.Members {
+			row("  "+m.Key, m)
+		}
 	}
 	writer.Flush()
 	lines := strings.SplitAfter(strings.TrimSuffix(table.String(), "\n"), "\n")
@@ -39,7 +50,6 @@ func Table(label string, series []*Series, hours int, end time.Time) []string {
 		chunks[len(chunks)-1] = append(chunks[len(chunks)-1], row)
 	}
 
-	wallet := series[0].Metrics
 	code := strings.NewReplacer("\\", "\\\\", "`", "\\`")
 	messages := make([]string, len(chunks))
 	for i, chunk := range chunks {
@@ -48,7 +58,7 @@ func Table(label string, series []*Series, hours int, end time.Time) []string {
 		if len(chunks) > 1 {
 			out.WriteString(escape(fmt.Sprintf(" (%d/%d)", i+1, len(chunks))))
 		}
-		fmt.Fprintf(&out, "\n%s\n", escape(fmt.Sprintf("last %dh to %s · all-time %s", hours, end.UTC().Format("2006-01-02 15:04 UTC"), usd(wallet.AllTime))))
+		fmt.Fprintf(&out, "\n%s\n", escape(fmt.Sprintf("last %dh to %s · all-time %s", hours, end.UTC().Format("2006-01-02 15:04 UTC"), usd(wallet.Metrics.AllTime))))
 		out.WriteString("```\n")
 		out.WriteString(code.Replace(header + strings.Join(chunk, "")))
 		out.WriteString("\n```\n")

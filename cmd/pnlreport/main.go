@@ -30,6 +30,7 @@ func run() error {
 	envPath := flag.String("env", "", "executiond.env of the instance to report (required)")
 	hours := flag.Int("hours", 72, "report window in hours")
 	label := flag.String("label", "", "report label (default: the env file's directory name)")
+	strategies := flag.String("strategies", "", "comma-separated pmm strategies.yaml paths for exclusive_group (default: PNL_STRATEGIES)")
 	dryRun := flag.Bool("dry-run", false, "write the charts and table to --out instead of sending")
 	outDir := flag.String("out", ".", "output directory for --dry-run")
 	flag.Parse()
@@ -69,16 +70,45 @@ func run() error {
 	end := time.Now().UTC()
 	start := end.Add(-time.Duration(*hours) * time.Hour)
 	series := Compute(events, start, end)
-	tables := Table(*label, series, *hours, end)
+	var groupMap map[string]string
+	if paths := ParsePaths(firstNonEmpty(*strategies, env["PNL_STRATEGIES"])); len(paths) > 0 {
+		if groupMap, err = LoadGroups(paths); err != nil {
+			return err
+		}
+	}
+	groups := GroupSeries(series[1:], groupMap)
+	tables := Table(*label, series[0], groups, *hours, end)
 
-	photos := make([]telegram.File, 0, len(series))
-	for _, s := range series {
-		title := fmt.Sprintf("%s · %s · %dh", *label, s.Key, *hours)
-		png, err := Chart(s, title, start, end)
+	// Chart 1: the wallet on the left axis, every group on a shared right axis.
+	overview := []Line{{Name: WalletKey, S: series[0]}}
+	for _, g := range groups {
+		overview = append(overview, Line{Name: g.Series.Key, S: g.Series, RightAxis: true})
+	}
+	var photos []telegram.File
+	add := func(name, subtitle string, lines []Line) error {
+		title := fmt.Sprintf("%s · %s · %dh", *label, name, *hours)
+		png, err := MultiChart(title, subtitle, lines, start, end)
 		if err != nil {
 			return err
 		}
-		photos = append(photos, telegram.File{Name: fileName(s.Key) + ".png", Data: png, Caption: s.Key})
+		photos = append(photos, telegram.File{Name: fileName(name) + ".png", Data: png, Caption: name})
+		return nil
+	}
+	if err := add("overview", summary(series[0]), overview); err != nil {
+		return err
+	}
+	// One chart per multi-strategy group: the group total and each member.
+	for _, g := range groups {
+		if len(g.Members) < 2 {
+			continue
+		}
+		lines := []Line{{Name: g.Series.Key, S: g.Series}}
+		for _, m := range g.Members {
+			lines = append(lines, Line{Name: m.Key, S: m})
+		}
+		if err := add(g.Series.Key, summary(g.Series), lines); err != nil {
+			return err
+		}
 	}
 
 	if *dryRun {
@@ -183,4 +213,13 @@ var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 func fileName(key string) string {
 	return unsafeName.ReplaceAllString(key, "_")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
