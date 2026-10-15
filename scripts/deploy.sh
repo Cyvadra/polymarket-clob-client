@@ -185,7 +185,8 @@ build_bundle() {
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/executiond" ./cmd/executiond)
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/executiontest" ./cmd/executiontest)
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/polykey" ./cmd/polykey)
-	tar -C "$STAGE_DIR" -czf "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" executiond executiontest polykey
+	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/pnlreport" ./cmd/pnlreport)
+	tar -C "$STAGE_DIR" -czf "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" executiond executiontest polykey pnlreport
 	(cd "$STAGE_DIR" && sha256sum "executiond-$RELEASE_ID.tar.gz" >"executiond-$RELEASE_ID.tar.gz.sha256")
 }
 
@@ -328,6 +329,7 @@ install -d -o root -g root -m 0755 "$release_dir"
 install -o root -g root -m 0755 "$REMOTE_STAGE/executiond" "$release_dir/executiond"
 install -o root -g root -m 0755 "$REMOTE_STAGE/executiontest" "$release_dir/executiontest"
 install -o root -g root -m 0755 "$REMOTE_STAGE/polykey" "$release_dir/polykey"
+install -o root -g root -m 0755 "$REMOTE_STAGE/pnlreport" "$release_dir/pnlreport"
 
 if [[ -L $current_link ]]; then
 	previous_release=$(readlink -f "$current_link")

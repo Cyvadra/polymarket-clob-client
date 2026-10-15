@@ -30,7 +30,7 @@ directories, the pm2 app and the system user — becomes `executiond-<name>`.
 
 | Path | Purpose |
 |---|---|
-| `/opt/executiond/releases/<timestamp>` | Immutable application releases (`executiond`, `executiontest`, `polykey`) |
+| `/opt/executiond/releases/<timestamp>` | Immutable application releases (`executiond`, `executiontest`, `polykey`, `pnlreport`) |
 | `/opt/executiond/current` | Active release symlink |
 | `/opt/executiond/run.sh` | Wrapper pm2 runs: sources the env file, then drops to `executiond` and execs `current/executiond` |
 | `/etc/executiond/executiond.env` | Runtime environment, sourced by `run.sh`. Mode 0600, owned by `root` — `run.sh` sources it as root, so `executiond` must not be able to write it |
@@ -124,3 +124,23 @@ Copy `scripts/deploy.env.example` to `deploy.env` if a host needs different
 deploy-time settings (e.g. a non-default `EXECUTIOND_PM2_BIN`). It holds no
 secrets, is only read locally by `deploy.sh`, and is never uploaded.
 `scripts/private/` is excluded by `.gitignore`.
+
+## PnL report
+
+Each release also ships `pnlreport`. It rebuilds realized PnL from the
+instance's `fills` and `settlement_payouts` and sends a metrics table, the
+wallet curve and one curve per strategy (the `unique_tag` prefix before the
+first `:`) to Telegram. Set
+`PNL_TELEGRAM_TOKEN` and `PNL_TELEGRAM_CHAT_ID` in that instance's
+`executiond.env`. It is not scheduled automatically, so add one root cron line
+per instance:
+
+```cron
+0 */6 * * * /opt/executiond/current/pnlreport --env /etc/executiond/executiond.env
+0 */6 * * * /opt/executiond-b/current/pnlreport --env /etc/executiond-b/executiond.env
+```
+
+The report covers the last 72 hours by default (`--hours`) and is labelled by
+the env file's directory, so each instance reports separately. Use
+`--dry-run --out <dir>` to write the PNGs and `report.md` instead of sending
+them. Open positions are carried at cost, not marked to market.
