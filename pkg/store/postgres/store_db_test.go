@@ -898,3 +898,36 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 		t.Fatalf("untraded strategy loss: ok=%v err=%v", ok, err)
 	}
 }
+
+// The drift mark lands only on an intent whose order is still resting, and a
+// fill that lands after it replaces it.
+func TestMarkIntentDriftedOnlyWhileResting(t *testing.T) {
+	s := testStore(t)
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	seedSignedOrder(t, s, intentID)
+	ctx := context.Background()
+	order := store.SignedOrderRecord{IntentID: intentID, ChildSequence: 1, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0"}
+	var err error
+	for _, event := range []statemachine.Event{statemachine.EventSubmitStarted, statemachine.EventSubmitAcknowledged} {
+		if order, err = s.TransitionOrder(ctx, order, event, "0", "", string(event)); err != nil {
+			t.Fatalf("%s: %v", event, err)
+		}
+	}
+	if marked, err := s.MarkIntentDrifted(ctx, intentID, 1); err != nil || !marked {
+		t.Fatalf("mark a LIVE order: marked=%v err=%v", marked, err)
+	}
+	if intent, _ := s.Intent(ctx, intentID); intent.Status != store.IntentStatusSignalDrift {
+		t.Fatalf("intent status = %s, want SIGNAL_DRIFT", intent.Status)
+	}
+	if _, err := s.TransitionOrder(ctx, order, statemachine.EventFillObserved, "2", "", "filled"); err != nil {
+		t.Fatalf("fill: %v", err)
+	}
+	if marked, err := s.MarkIntentDrifted(ctx, intentID, 1); err != nil || marked {
+		t.Fatalf("mark a FILLED order: marked=%v err=%v", marked, err)
+	}
+	if intent, _ := s.Intent(ctx, intentID); intent.Status != statemachine.StateFilled {
+		t.Fatalf("intent status = %s, want FILLED", intent.Status)
+	}
+}

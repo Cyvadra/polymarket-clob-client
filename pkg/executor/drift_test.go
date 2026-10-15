@@ -1,0 +1,330 @@
+package executor
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	clobclient "github.com/Cyvadra/polymarket-clob-client"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
+)
+
+// freshQuote is a two-sided quote for the fixtures' token, stamped now.
+func freshQuote(bid, ask float64) fakeQuotes {
+	now := time.Now().UTC()
+	return fakeQuotes{has: true, snapshot: marketquotes.Snapshot{
+		ConditionID: "condition", At: now,
+		Up: marketquotes.Quote{AssetID: "token", Bid: bid, Ask: ask, Mid: (bid + ask) / 2, Timestamp: now},
+	}}
+}
+
+func driftOpenRequest() protocol.ExecutionOpenRequest {
+	req := openRequest()
+	req.SignalPrice, req.MaxSignalDrift = "0.5000", "0.0300"
+	return req
+}
+
+func openResults(pub *recordingPublisher) []protocol.ExecutionOpenResult {
+	var results []protocol.ExecutionOpenResult
+	for _, record := range pub.publishes {
+		if result, ok := record.value.(protocol.ExecutionOpenResult); ok && record.subject == protocol.SubjectExecutionOpenResult {
+			results = append(results, result)
+		}
+	}
+	return results
+}
+
+// An open whose market has already fallen away from the signal is refused
+// before it is signed, since once on the book it could fill at once.
+func TestExecuteOpenRefusesAnOpenAlreadyDrifted(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	exec.SetQuoteProvider(freshQuote(0.44, 0.46))
+	if err := exec.ExecuteOpen(context.Background(), driftOpenRequest()); err == nil {
+		t.Fatal("expected the drifted open to be refused")
+	}
+	if client.submissions != 0 || client.created.TokenID != "" {
+		t.Fatalf("a drifted open must not be signed or sent: created=%+v submissions=%d", client.created, client.submissions)
+	}
+	results := openResults(pub)
+	if len(results) != 1 || results[0].Status != protocol.ResultFailed || results[0].ReasonCode != protocol.ReasonSignalDrift {
+		t.Fatalf("expected one FAILED SIGNAL_DRIFT result, got %+v", results)
+	}
+}
+
+// A market that moved in the entry's favour, or not past the bound, is no
+// reason to refuse it.
+func TestExecuteOpenSubmitsWhenTheMarketMovedItsWay(t *testing.T) {
+	for _, quote := range []fakeQuotes{freshQuote(0.60, 0.62), freshQuote(0.48, 0.50)} {
+		storer := &fakeStore{inserted: true}
+		client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+		exec, err := New(storer, client, time.Now)
+		if err != nil {
+			t.Fatalf("new executor: %v", err)
+		}
+		exec.SetQuoteProvider(quote)
+		if err := exec.ExecuteOpen(context.Background(), driftOpenRequest()); err != nil {
+			t.Fatalf("execute open at %+v: %v", quote.snapshot.Up, err)
+		}
+		if client.submissions != 1 || storer.insertedIntents[0].SignalPrice != "0.5000" {
+			t.Fatalf("expected the open submitted with its bound stored: submissions=%d intents=%+v", client.submissions, storer.insertedIntents)
+		}
+	}
+}
+
+func TestExecuteOpenRefusesADriftBoundOnAnImmediateOrder(t *testing.T) {
+	exec, err := New(&fakeStore{inserted: true}, &fakeCLOB{}, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	req := driftOpenRequest()
+	req.TimeInForce = protocol.TimeInForceFAK
+	if err := exec.ExecuteOpen(context.Background(), req); err == nil {
+		t.Fatal("expected a FAK with a drift bound to be refused")
+	}
+	if results := openResults(pub); len(results) != 1 || results[0].ReasonCode != protocol.ReasonInvalidIntent {
+		t.Fatalf("expected INVALID_INTENT, got %+v", results)
+	}
+}
+
+func restingDriftOpen() *fakeStore {
+	now := time.Now().UTC()
+	return &fakeStore{
+		inserted: true,
+		order: store.SignedOrderRecord{
+			IntentID: "open-1", ChildSequence: store.StrategyChildSequence, ExchangeOrderID: "order-open",
+			State: statemachine.StateLive, Revision: 2, RequestedShares: "20", MatchedShares: "0",
+		},
+		intent: store.OrderIntentRecord{
+			IntentID: "open-1", UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition",
+			TokenID: "token", Outcome: "Up", Kind: store.IntentOpen, Side: "BUY",
+			LimitPrice: "0.53", TimeInForce: "GTC", Status: statemachine.StateLive,
+			CreatedAt: now, ExpiresAt: now.Add(3 * time.Second),
+			SignalPrice: "0.500000000000000000", MaxSignalDrift: "0.030000000000000000",
+		},
+	}
+}
+
+// watchingExecutor is an executor watching storer's resting order, with the
+// given quote and clock.
+func watchingExecutor(t *testing.T, storer *fakeStore, client *fakeCLOB, quotes fakeQuotes, now func() time.Time) *Executor {
+	t.Helper()
+	exec, err := New(storer, client, now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&recordingPublisher{})
+	exec.SetQuoteProvider(quotes)
+	exec.watchOrder(mapping.ExecutionIntent(storer.intent), storer.order.ChildSequence, storer.intent.CreatedAt)
+	return exec
+}
+
+func watching(exec *Executor) int {
+	exec.watchMu.Lock()
+	defer exec.watchMu.Unlock()
+	return len(exec.watched)
+}
+
+// A resting open is cancelled by the watcher once the market falls away from
+// its signal, its intent marked so the result names it, and it is dropped
+// once the store shows the cancel accepted.
+func TestCheckWatchedCancelsARestingOpenThatDrifted(t *testing.T) {
+	storer := restingDriftOpen()
+	client := &fakeCLOB{}
+	exec := watchingExecutor(t, storer, client, freshQuote(0.43, 0.45), time.Now)
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "order-open" || storer.order.State != statemachine.StateCancelPending {
+		t.Fatalf("expected the drifted order cancelled, got %q in %q", client.canceledOrderID, storer.order.State)
+	}
+	if storer.intent.Status != store.IntentStatusSignalDrift {
+		t.Fatalf("expected the intent marked SIGNAL_DRIFT, got %q", storer.intent.Status)
+	}
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if len(client.canceledOrderIDs) != 1 || watching(exec) != 0 {
+		t.Fatalf("expected one cancel then unwatched: cancels=%v watching=%d", client.canceledOrderIDs, watching(exec))
+	}
+}
+
+// The watcher reads only quotes and the clock while nothing is due.
+func TestCheckWatchedLeavesARestingOpenThatMovedItsWay(t *testing.T) {
+	storer := restingDriftOpen()
+	client := &fakeCLOB{}
+	exec := watchingExecutor(t, storer, client, freshQuote(0.70, 0.72), time.Now)
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "" || storer.intent.Status != statemachine.StateLive {
+		t.Fatalf("a favourable move must not cancel: canceled=%q status=%q", client.canceledOrderID, storer.intent.Status)
+	}
+	if watching(exec) != 1 {
+		t.Fatal("expected the open still watched")
+	}
+}
+
+// An order past its deadline is cancelled without a drift mark.
+func TestCheckWatchedCancelsAnExpiredOrder(t *testing.T) {
+	storer := restingDriftOpen()
+	client := &fakeCLOB{}
+	now := time.Now().UTC()
+	exec := watchingExecutor(t, storer, client, freshQuote(0.70, 0.72), func() time.Time { return now })
+	now = storer.intent.ExpiresAt
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "order-open" || storer.intent.Status == store.IntentStatusSignalDrift {
+		t.Fatalf("expected a plain deadline cancel: canceled=%q status=%q", client.canceledOrderID, storer.intent.Status)
+	}
+}
+
+// A cancel the exchange refuses is re-sent every pass until it lands.
+func TestCheckWatchedRetriesAFailedCancel(t *testing.T) {
+	storer := restingDriftOpen()
+	client := &fakeCLOB{cancelErrs: []error{errors.New("timeout")}}
+	now := time.Now().UTC()
+	exec := watchingExecutor(t, storer, client, freshQuote(0.43, 0.45), func() time.Time { return now })
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("a failed attempt is retried, not reported: %v", err)
+	}
+	if storer.order.State != statemachine.StateCancelRequested {
+		t.Fatalf("expected the order left CANCEL_REQUESTED, got %q", storer.order.State)
+	}
+	now = now.Add(watchInterval)
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("retry pass: %v", err)
+	}
+	if len(client.canceledOrderIDs) != 2 || storer.order.State != statemachine.StateCancelPending {
+		t.Fatalf("expected the cancel re-sent and accepted: cancels=%v state=%q", client.canceledOrderIDs, storer.order.State)
+	}
+}
+
+// A cancel that fails because the order filled stops once the fill lands.
+func TestCheckWatchedStopsOnceTheOrderFilled(t *testing.T) {
+	storer := restingDriftOpen()
+	client := &fakeCLOB{cancelErrs: []error{errors.New("order already matched")}}
+	now := time.Now().UTC()
+	exec := watchingExecutor(t, storer, client, freshQuote(0.43, 0.45), func() time.Time { return now })
+	_ = exec.checkWatched(context.Background())
+	storer.order.State = statemachine.StateFilled
+	now = now.Add(watchInterval)
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if len(client.canceledOrderIDs) != 1 || watching(exec) != 0 {
+		t.Fatalf("expected no cancel after the fill: cancels=%v watching=%d", client.canceledOrderIDs, watching(exec))
+	}
+}
+
+// After cancelRetryWindow of refused cancels the watcher gives up and reports
+// it, and is not restarted by the recovery pass while the order stays open.
+func TestCheckWatchedGivesUpAfterTheRetryWindow(t *testing.T) {
+	storer := restingDriftOpen()
+	storer.intent.ExpiresAt = time.Now().Add(time.Minute)
+	refused := make([]error, 100)
+	for i := range refused {
+		refused[i] = errors.New("timeout")
+	}
+	client := &fakeCLOB{cancelErrs: refused}
+	now := time.Now().UTC()
+	exec := watchingExecutor(t, storer, client, freshQuote(0.43, 0.45), func() time.Time { return now })
+	for elapsed := time.Duration(0); elapsed < cancelRetryWindow; elapsed += watchInterval {
+		if err := exec.checkWatched(context.Background()); err != nil {
+			t.Fatalf("retry at %s reported early: %v", elapsed, err)
+		}
+		now = now.Add(watchInterval)
+	}
+	if err := exec.checkWatched(context.Background()); err == nil {
+		t.Fatal("expected giving up reported")
+	}
+	attempts := int(cancelRetryWindow / watchInterval)
+	if err := exec.recoverOpenOrders(context.Background()); err != nil {
+		t.Fatalf("recovery pass: %v", err)
+	}
+	now = now.Add(watchInterval)
+	_ = exec.checkWatched(context.Background())
+	if got := len(client.canceledOrderIDs); got != attempts {
+		t.Fatalf("expected %d attempts and no more: got %d", attempts, got)
+	}
+	storer.order = store.SignedOrderRecord{} // no longer in the open set
+	if err := exec.recoverOpenOrders(context.Background()); err != nil {
+		t.Fatalf("recovery pass: %v", err)
+	}
+	if watching(exec) != 0 {
+		t.Fatal("expected the order dropped once no longer open")
+	}
+}
+
+// An order another path already asked to cancel is still cancelled when due,
+// but not marked as drifted.
+func TestCheckWatchedDoesNotMarkACancelItDidNotStart(t *testing.T) {
+	storer := restingDriftOpen()
+	storer.order.State = statemachine.StateCancelRequested
+	client := &fakeCLOB{}
+	exec := watchingExecutor(t, storer, client, freshQuote(0.43, 0.45), time.Now)
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "order-open" || storer.intent.Status == store.IntentStatusSignalDrift {
+		t.Fatalf("expected a cancel without the mark: canceled=%q status=%q", client.canceledOrderID, storer.intent.Status)
+	}
+}
+
+// A resting order open before a restart is adopted by the recovery pass.
+func TestRecoverOpenOrdersAdoptsARestingOrder(t *testing.T) {
+	storer := restingDriftOpen()
+	exec, err := New(storer, &fakeCLOB{}, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	if err := exec.recoverOpenOrders(context.Background()); err != nil {
+		t.Fatalf("recovery pass: %v", err)
+	}
+	if watching(exec) != 1 {
+		t.Fatal("expected the resting order watched")
+	}
+}
+
+// An order that filled between the watcher's read and its drift mark is not
+// marked, and its cancel is not sent; the next pass drops it.
+func TestCheckWatchedDoesNotMarkAnOrderThatJustFilled(t *testing.T) {
+	storer := restingDriftOpen()
+	client := &fakeCLOB{}
+	exec := watchingExecutor(t, storer, client, freshQuote(0.43, 0.45), time.Now)
+	filled := &fillOnReadStore{fakeStore: storer}
+	exec.store = filled
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "" || storer.intent.Status == store.IntentStatusSignalDrift {
+		t.Fatalf("expected no mark and no cancel: canceled=%q status=%q", client.canceledOrderID, storer.intent.Status)
+	}
+	if err := exec.checkWatched(context.Background()); err != nil || watching(exec) != 0 {
+		t.Fatalf("expected the filled order dropped: err=%v watching=%d", err, watching(exec))
+	}
+}
+
+// fillOnReadStore fills the order just after the watcher reads it, as the
+// account feed would between the read and the drift mark.
+type fillOnReadStore struct{ *fakeStore }
+
+func (s *fillOnReadStore) OrderByIntent(ctx context.Context, intentID string, childSequence int) (store.SignedOrderRecord, error) {
+	order, err := s.fakeStore.OrderByIntent(ctx, intentID, childSequence)
+	s.fakeStore.order.State = statemachine.StateFilled
+	return order, err
+}

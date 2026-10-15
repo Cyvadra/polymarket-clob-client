@@ -39,6 +39,7 @@ func (fakeStore) Intent(_ context.Context, intentID string) (store.OrderIntentRe
 	return store.OrderIntentRecord{IntentID: intentID, UniqueTag: "lane-a", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy}, nil
 }
 func (fakeStore) UpdateIntentStatus(context.Context, string, string) error { return nil }
+func (fakeStore) MarkIntentDrifted(context.Context, string, int) (bool, error) { return false, nil }
 func (fakeStore) PersistSubmittingOrder(_ context.Context, record store.SignedOrderRecord, _ string) (store.SignedOrderRecord, error) {
 	record.State, record.Revision = statemachine.StateSubmitting, record.Revision+1
 	return record, nil

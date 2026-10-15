@@ -71,6 +71,16 @@ func (s *fakeStore) UpdateIntentStatus(_ context.Context, intentID, status strin
 	s.intent.Status = statemachine.State(status)
 	return nil
 }
+func (s *fakeStore) MarkIntentDrifted(_ context.Context, intentID string, childSequence int) (bool, error) {
+	if s.intent.IntentID != intentID || s.order.IntentID != intentID || s.order.ChildSequence != childSequence {
+		return false, nil
+	}
+	if s.order.State != statemachine.StateLive && s.order.State != statemachine.StatePartiallyFilled {
+		return false, nil
+	}
+	s.intent.Status = store.IntentStatusSignalDrift
+	return true, nil
+}
 func (s *fakeStore) PersistSubmittingOrder(ctx context.Context, record store.SignedOrderRecord, reason string) (store.SignedOrderRecord, error) {
 	if err := s.PersistSignedOrder(ctx, record); err != nil {
 		return store.SignedOrderRecord{}, err
@@ -222,6 +232,9 @@ type fakeCLOB struct {
 	created          clobclient.UserOrder
 	canceledOrderID  string
 	canceledOrderIDs []string
+	// cancelErrs, when set, script the error of each cancel in turn; once
+	// drained, cancels succeed.
+	cancelErrs []error
 	// minOrderSize is the market minimum the planner enforces; zero means the
 	// market publishes no minimum, which is the default in most tests.
 	minOrderSize float64
@@ -258,6 +271,11 @@ func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrder
 func (c *fakeCLOB) CancelOrder(_ context.Context, orderID string) error {
 	c.canceledOrderID = orderID
 	c.canceledOrderIDs = append(c.canceledOrderIDs, orderID)
+	if len(c.cancelErrs) > 0 {
+		err := c.cancelErrs[0]
+		c.cancelErrs = c.cancelErrs[1:]
+		return err
+	}
 	return nil
 }
 

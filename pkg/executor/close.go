@@ -152,7 +152,7 @@ func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.Execut
 		if candidate.intent.Kind == store.IntentClose {
 			continue
 		}
-		if err := e.cancelOpenOrder(ctx, candidate.intent, candidate.order); err != nil {
+		if err := e.cancelOpenOrder(ctx, mapping.ExecutionIntent(candidate.intent).Policy, candidate.order, cancelRequested); err != nil {
 			cancelErr = errors.Join(cancelErr, err)
 		}
 	}
@@ -190,13 +190,13 @@ func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declar
 // that is still live keeps its truthful result instead of vanishing silently.
 func (e *Executor) replaceStaleChild(ctx context.Context, candidate closeableOrder) error {
 	if candidate.intent.Kind != store.IntentClose {
-		return e.cancelOpenOrder(ctx, candidate.intent, candidate.order)
+		return e.cancelOpenOrder(ctx, mapping.ExecutionIntent(candidate.intent).Policy, candidate.order, cancelRequested)
 	}
 	prior := string(candidate.intent.Status)
 	if err := e.store.UpdateIntentStatus(ctx, candidate.intent.IntentID, store.IntentStatusSuperseded); err != nil {
 		return err
 	}
-	if err := e.cancelOpenOrder(ctx, candidate.intent, candidate.order); err != nil {
+	if err := e.cancelOpenOrder(ctx, mapping.ExecutionIntent(candidate.intent).Policy, candidate.order, cancelRequested); err != nil {
 		if prior != "" {
 			// The stale close is still live: undo the marker so it reports its
 			// own terminal outcome instead of being silently suppressed.

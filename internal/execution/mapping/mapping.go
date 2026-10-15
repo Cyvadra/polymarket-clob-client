@@ -30,6 +30,7 @@ func IntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 		Kind: store.IntentKind(intent.Kind), EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, TargetEquityFraction: intent.TargetEquityFraction, SizedEquityUSD: intent.SizedEquityUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
 		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
+		SignalPrice: intent.SignalPrice, MaxSignalDrift: intent.MaxSignalDrift,
 		Status: statemachine.StateIntentReceived, Policy: policy, CreatedAt: now, UpdatedAt: now,
 	}
 }
@@ -46,7 +47,7 @@ func ExecutionIntent(record store.OrderIntentRecord) protocol.ExecutionIntent {
 		ConditionID: record.ConditionID, TokenID: record.TokenID, Outcome: record.Outcome, Side: protocol.Side(record.Side),
 		TargetUSD: record.TargetUSD, LimitPrice: record.LimitPrice, TimeInForce: protocol.TimeInForce(record.TimeInForce),
 		PostOnly: record.PostOnly, FeatureSeq: record.FeatureSeq, FeatureCompletedAt: record.FeatureCompletedAt,
-		ExpiresAt: record.ExpiresAt, Policy: policy,
+		ExpiresAt: record.ExpiresAt, SignalPrice: record.SignalPrice, MaxSignalDrift: record.MaxSignalDrift, Policy: policy,
 	}
 }
 
@@ -101,6 +102,9 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 	status, reasonCode, ok := terminalStatus(order.State, order.MatchedShares)
 	if !ok {
 		return protocol.ExecutionOpenResult{}, false
+	}
+	if status == protocol.ResultFailed && reasonCode == "" && intent.Status == store.IntentStatusSignalDrift {
+		reasonCode = protocol.ReasonSignalDrift
 	}
 	filledShares, err := decimal.NonNegativeFloat(order.MatchedShares)
 	if err != nil {

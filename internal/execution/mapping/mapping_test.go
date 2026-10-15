@@ -235,3 +235,32 @@ func TestTerminalCloseResultIgnoresOpenIntentAndInternalChild(t *testing.T) {
 		t.Fatal("expected no close result for a force-close exit")
 	}
 }
+
+func TestIntentRecordKeepsTheDriftBound(t *testing.T) {
+	intent := protocol.ExecutionIntent{IntentID: "intent", Kind: protocol.IntentOpen, SignalPrice: "0.3050", MaxSignalDrift: "0.0300"}
+	round := ExecutionIntent(IntentRecord(intent, time.Unix(100, 0).UTC()))
+	if round.SignalPrice != "0.3050" || round.MaxSignalDrift != "0.0300" {
+		t.Fatalf("drift bound lost in the round trip: %+v", round)
+	}
+}
+
+// An open executiond cancelled for drift says so; one it cancelled for its
+// deadline, or one that filled some before the cancel, does not.
+func TestTerminalResultNamesASignalDriftCancel(t *testing.T) {
+	at := time.Unix(100, 0).UTC()
+	drifted := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy, Status: store.IntentStatusSignalDrift}
+	canceled := store.SignedOrderRecord{IntentID: "intent", ChildSequence: store.StrategyChildSequence, State: statemachine.StateCanceled, MatchedShares: "0"}
+	result, ok := TerminalResult(canceled, drifted, "account order event CANCELED", "", at)
+	if !ok || result.Status != protocol.ResultFailed || result.ReasonCode != protocol.ReasonSignalDrift {
+		t.Fatalf("expected FAILED SIGNAL_DRIFT, got %+v", result)
+	}
+	plain := drifted
+	plain.Status = statemachine.StateCanceled
+	if result, _ := TerminalResult(canceled, plain, "account order event CANCELED", "", at); result.ReasonCode != "" {
+		t.Fatalf("a deadline cancel must keep an empty reason code, got %+v", result)
+	}
+	canceled.MatchedShares = "3"
+	if result, _ := TerminalResult(canceled, drifted, "reason", "0.4", at); result.Status != protocol.ResultSucceeded || result.ReasonCode != "" {
+		t.Fatalf("a partial fill before the drift cancel is a success, got %+v", result)
+	}
+}

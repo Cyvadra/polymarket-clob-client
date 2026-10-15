@@ -68,6 +68,9 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 			return invalid("execution intent requires expires_at or complete_within_ms")
 		}
 	}
+	if _, err := tactics.ParseDrift(intent); err != nil {
+		return invalid("%s", err)
+	}
 	if err := validatePolicyDurations(intent.Policy); err != nil {
 		return err
 	}

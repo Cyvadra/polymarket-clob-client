@@ -209,6 +209,7 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 		"token", "Up", "BUY", "1.20", "0.49",
 		"GTC", false, int64(0), nil, nil,
 		"INTENT_RECEIVED", []byte(`{}`), now, now, "req-1",
+		nil, nil,
 	}}
 	record, err := scanIntent(row)
 	if err != nil {
@@ -221,14 +222,23 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 		t.Fatalf("unexpected record: %+v", record)
 	}
 
+	if record.SignalPrice != "" || record.MaxSignalDrift != "" {
+		t.Fatalf("an intent without a drift bound must read back without one: %+v", record)
+	}
+
 	expires := now.Add(time.Hour)
 	row.values[15] = now
 	row.values[16] = expires
+	row.values[22] = "0.305000000000000000"
+	row.values[23] = "0.030000000000000000"
 	record, err = scanIntent(row)
 	if err != nil {
 		t.Fatalf("scan intent with populated timestamps: %v", err)
 	}
 	if record.FeatureCompletedAt != now || record.ExpiresAt != expires {
 		t.Fatalf("populated timestamps lost: %+v", record)
+	}
+	if record.SignalPrice != "0.305000000000000000" || record.MaxSignalDrift != "0.030000000000000000" {
+		t.Fatalf("drift bound lost: %+v", record)
 	}
 }

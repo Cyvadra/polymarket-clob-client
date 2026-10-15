@@ -95,16 +95,24 @@ type ExecutionIntent struct {
 	TargetUSD     string     `json:"target_usd,omitempty"`
 	// TargetEquityFraction and SizedEquityUSD record how an equity-sized open
 	// resolved to TargetUSD.
-	TargetEquityFraction string          `json:"target_equity_fraction,omitempty"`
-	SizedEquityUSD       string          `json:"sized_equity_usd,omitempty"`
-	LimitPrice           string          `json:"limit_price"`
-	TimeInForce          TimeInForce     `json:"time_in_force"`
-	PostOnly             bool            `json:"post_only"`
-	FeatureSeq           int64           `json:"feature_seq,omitempty"`
-	FeatureCompletedAt   time.Time       `json:"feature_completed_at"`
-	CreatedAt            time.Time       `json:"created_at"`
-	ExpiresAt            time.Time       `json:"expires_at"`
-	Policy               ExecutionPolicy `json:"policy,omitempty"`
+	TargetEquityFraction string      `json:"target_equity_fraction,omitempty"`
+	SizedEquityUSD       string      `json:"sized_equity_usd,omitempty"`
+	LimitPrice           string      `json:"limit_price"`
+	TimeInForce          TimeInForce `json:"time_in_force"`
+	PostOnly             bool        `json:"post_only"`
+	FeatureSeq           int64       `json:"feature_seq,omitempty"`
+	FeatureCompletedAt   time.Time   `json:"feature_completed_at"`
+	CreatedAt            time.Time   `json:"created_at"`
+	ExpiresAt            time.Time   `json:"expires_at"`
+	// SignalPrice is the side's mid on the frame that decided an open, and
+	// MaxSignalDrift how far the market may move against the entry from it
+	// before the order is worth cancelling unfilled: for a BUY, the mid falling
+	// more than MaxSignalDrift under SignalPrice; for a SELL, rising more than
+	// it above. A move in the entry's favour never cancels it. Both are empty
+	// when the strategy sets no bound, and only a GTC order may carry one.
+	SignalPrice    string          `json:"signal_price,omitempty"`
+	MaxSignalDrift string          `json:"max_signal_drift,omitempty"`
+	Policy         ExecutionPolicy `json:"policy,omitempty"`
 }
 
 type ExecutionOpenRequest struct {
@@ -124,15 +132,18 @@ type ExecutionOpenRequest struct {
 	TargetUSD   string `json:"target_usd,omitempty"`
 	// TargetEquityFraction sizes the open as a fraction of wallet equity
 	// (0.03 = 3%) instead of TargetUSD. Exactly one of the two must be set.
-	TargetEquityFraction string          `json:"target_equity_fraction,omitempty"`
-	LimitPrice           string          `json:"limit_price"`
-	TimeInForce          TimeInForce     `json:"time_in_force"`
-	PostOnly             bool            `json:"post_only"`
-	FeatureSeq           int64           `json:"feature_seq,omitempty"`
-	FeatureCompletedAt   time.Time       `json:"feature_completed_at"`
-	CreatedAt            time.Time       `json:"created_at"`
-	ExpiresAt            time.Time       `json:"expires_at"`
-	Policy               ExecutionPolicy `json:"policy,omitempty"`
+	TargetEquityFraction string      `json:"target_equity_fraction,omitempty"`
+	LimitPrice           string      `json:"limit_price"`
+	TimeInForce          TimeInForce `json:"time_in_force"`
+	PostOnly             bool        `json:"post_only"`
+	FeatureSeq           int64       `json:"feature_seq,omitempty"`
+	FeatureCompletedAt   time.Time   `json:"feature_completed_at"`
+	CreatedAt            time.Time   `json:"created_at"`
+	ExpiresAt            time.Time   `json:"expires_at"`
+	// SignalPrice and MaxSignalDrift are ExecutionIntent's drift bound.
+	SignalPrice    string          `json:"signal_price,omitempty"`
+	MaxSignalDrift string          `json:"max_signal_drift,omitempty"`
+	Policy         ExecutionPolicy `json:"policy,omitempty"`
 }
 
 type ExecutionCloseMode string
@@ -179,6 +190,10 @@ const (
 	ReasonUnplannable           = "UNPLANNABLE"
 	ReasonOrderRejected         = "ORDER_REJECTED"
 	ReasonExecutionFailed       = "EXECUTION_FAILED"
+	// ReasonSignalDrift fails an open the market moved away from: refused
+	// before submission, or cancelled unfilled while it rested. The code is
+	// the one pmm's backtest venue reports for the same decision.
+	ReasonSignalDrift = "SIGNAL_DRIFT"
 )
 
 type ResultStatus string

@@ -174,20 +174,23 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 			token_id, outcome, side, target_usd, limit_price,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at,
-			target_equity_fraction, sized_equity_usd, request_id
+			target_equity_fraction, sized_equity_usd, request_id,
+			signal_price, max_signal_drift
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, NULLIF($11, '')::numeric, $12,
 			$13, $14, $15, $16, $17,
 			$18, $19, $20, $21,
-			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric, $24
+			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric, $24,
+			NULLIF($25, '')::numeric, NULLIF($26, '')::numeric
 		)
 		ON CONFLICT (intent_id) DO NOTHING
 	`, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt,
-		record.TargetEquityFraction, record.SizedEquityUSD, record.RequestID)
+		record.TargetEquityFraction, record.SizedEquityUSD, record.RequestID,
+		record.SignalPrice, record.MaxSignalDrift)
 	if err != nil {
 		return false, fmt.Errorf("insert intent: %w", err)
 	}
@@ -202,7 +205,8 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 		SELECT intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
-			status, policy, created_at, updated_at, request_id
+			status, policy, created_at, updated_at, request_id,
+			signal_price::text, max_signal_drift::text
 		FROM order_intents
 		WHERE intent_id = $1
 	`, intentID)
@@ -221,7 +225,8 @@ func (s *Store) LatestLimitCloseIntent(ctx context.Context, conditionID, tokenID
 		SELECT intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
-			status, policy, created_at, updated_at, request_id
+			status, policy, created_at, updated_at, request_id,
+			signal_price::text, max_signal_drift::text
 		FROM order_intents
 		WHERE condition_id = $1 AND token_id = $2 AND unique_tag = $3
 			AND kind = 'CLOSE' AND time_in_force <> 'FAK'
@@ -641,13 +646,18 @@ func oppositeSide(side string) string {
 // updateIntentStatus mirrors the child order lifecycle onto the parent intent
 // so order_intents.status reflects the latest observed state instead of the
 // write-once INTENT_RECEIVED sentinel. Superseded close intents keep their
-// marker even if the old order later reaches a terminal state.
+// marker even if the old order later reaches a terminal state. A drifted open
+// keeps its marker too, unless its order filled anyway: the cancel came too
+// late and the intent did what it asked for.
 func updateIntentStatus(ctx context.Context, tx pgx.Tx, intentID string, state statemachine.State) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE order_intents
-		SET status = CASE WHEN status = $1 THEN status ELSE $2 END, updated_at = now()
+		SET status = CASE
+			WHEN status = $1 THEN status
+			WHEN status = $4 AND $2 <> $5 THEN status
+			ELSE $2 END, updated_at = now()
 		WHERE intent_id = $3
-	`, store.IntentStatusSuperseded, string(state), intentID); err != nil {
+	`, store.IntentStatusSuperseded, string(state), intentID, store.IntentStatusSignalDrift, string(statemachine.StateFilled)); err != nil {
 		return fmt.Errorf("update intent status: %w", err)
 	}
 	return nil
@@ -665,6 +675,28 @@ func (s *Store) UpdateIntentStatus(ctx context.Context, intentID string, status 
 		return fmt.Errorf("update intent status: %w", err)
 	}
 	return nil
+}
+
+// MarkIntentDrifted marks an open intent SIGNAL_DRIFT, but only while its
+// order is still resting (LIVE or PARTIALLY_FILLED), and reports whether it
+// did. Locking the order row orders the mark against the account feed's
+// transitions, which update the order and then the intent in one
+// transaction: a FILLED that commits first is seen here and the mark is
+// skipped, and one that commits after replaces the mark (updateIntentStatus).
+func (s *Store) MarkIntentDrifted(ctx context.Context, intentID string, childSequence int) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		WITH resting AS (
+			SELECT 1 FROM orders
+			WHERE intent_id = $1 AND child_sequence = $2 AND state IN ($3, $4)
+			FOR UPDATE
+		)
+		UPDATE order_intents SET status = $5, updated_at = now()
+		WHERE intent_id = $1 AND EXISTS (SELECT 1 FROM resting)
+	`, intentID, childSequence, statemachine.StateLive, statemachine.StatePartiallyFilled, store.IntentStatusSignalDrift)
+	if err != nil {
+		return false, fmt.Errorf("mark intent drifted: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func setPositionSettlementState(ctx context.Context, tx pgx.Tx, conditionID, tokenID, uniqueTag, tradeStatus string) error {
@@ -1137,11 +1169,13 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	// NULL for a zero time. They must be read back through pointers or every
 	// intent stored without them fails to scan.
 	var featureCompletedAt, expiresAt *time.Time
+	var signalPrice, maxSignalDrift *string
 	err := row.Scan(
 		&record.IntentID, &record.UniqueTag, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &featureCompletedAt, &expiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt, &record.RequestID,
+		&signalPrice, &maxSignalDrift,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.OrderIntentRecord{}, store.ErrNotFound
@@ -1157,6 +1191,12 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	}
 	if expiresAt != nil {
 		record.ExpiresAt = *expiresAt
+	}
+	if signalPrice != nil {
+		record.SignalPrice = *signalPrice
+	}
+	if maxSignalDrift != nil {
+		record.MaxSignalDrift = *maxSignalDrift
 	}
 	if len(policy) > 0 {
 		record.Policy = policy

@@ -67,6 +67,8 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		FeatureCompletedAt: req.FeatureCompletedAt,
 		CreatedAt:          req.CreatedAt,
 		ExpiresAt:          req.ExpiresAt,
+		SignalPrice:        req.SignalPrice,
+		MaxSignalDrift:     req.MaxSignalDrift,
 		Policy:             req.Policy,
 	}
 	if e.gate != nil {
@@ -115,10 +117,14 @@ func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent)
 // close lane lock in ExecuteClose) call this directly so the child is placed
 // without nesting a second lock transaction on a second pool connection.
 func (e *Executor) persistAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
-	if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, e.now().UTC())); err != nil {
+	createdAt := e.now().UTC()
+	if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, createdAt)); err != nil {
 		return fmt.Errorf("persist intent: %w", err)
 	}
-	return e.prepareAndSubmit(ctx, intent)
+	// The order is watched once live, its complete_within_ms counted from
+	// the stored created_at. A resumed order carries no stamp; the recovery
+	// pass adopts it from its stored intent instead.
+	return e.prepareAndSubmit(context.WithValue(ctx, intentCreatedAtKey{}, createdAt), intent)
 }
 
 func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err error) {
@@ -268,6 +274,14 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	if e.quotes != nil {
 		request.Quote, request.HasQuote = e.quotes.Get(intent.ConditionID)
 	}
+	// An open the market has already moved away from is refused before it is
+	// signed: once it reaches the book it may fill at once, and no cancel can
+	// take that back.
+	drift, _ := tactics.ParseDrift(intent)
+	if mid, breached := tactics.DriftBreach(intent, drift, request.Quote, request.HasQuote, request.Now); breached {
+		return plannedChild{}, reject(protocol.ReasonSignalDrift, "mid %s moved more than %s against the signal %s before submission",
+			decimal.FormatPrice(mid), intent.MaxSignalDrift, intent.SignalPrice)
+	}
 	decision, err := tactics.Plan(request)
 	if err != nil {
 		if tactics.BelowMinOrderSize(err) {
@@ -365,6 +379,9 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 	}
 	e.publishTransition(live, intent, "submit acknowledged")
 	e.settleFromResponse(ctx, intent, child, live, response)
+	if createdAt, ok := ctx.Value(intentCreatedAtKey{}).(time.Time); ok {
+		e.watchOrder(intent, child.Sequence, createdAt)
+	}
 	return nil
 }
 

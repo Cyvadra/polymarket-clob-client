@@ -50,6 +50,14 @@ const (
 // close request on the same lane. Its terminal result must not be surfaced.
 const IntentStatusSuperseded = "SUPERSEDED"
 
+// IntentStatusSignalDrift marks an open intent whose order executiond
+// cancelled because the market drifted from the signal. Like
+// IntentStatusSuperseded it outlives the order's later transitions, so the
+// terminal result can name the cause rather than a bare cancel. The one
+// exception is FILLED: an order that filled before the cancel landed replaces
+// the marker.
+const IntentStatusSignalDrift = "SIGNAL_DRIFT"
+
 // StrategyChildSequence is the child order a strategy intent maps onto.
 // Higher sequences are internal children (such as a force-close exit) that the
 // strategy never acknowledged and must not receive intent acknowledgements for.
@@ -78,10 +86,14 @@ type OrderIntentRecord struct {
 	FeatureSeq           int64
 	FeatureCompletedAt   time.Time
 	ExpiresAt            time.Time
-	Status               statemachine.State
-	Policy               json.RawMessage
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	// SignalPrice and MaxSignalDrift are the open's drift bound
+	// (protocol.ExecutionIntent); both are empty when it has none.
+	SignalPrice    string
+	MaxSignalDrift string
+	Status         statemachine.State
+	Policy         json.RawMessage
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type SignedOrderRecord struct {
