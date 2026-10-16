@@ -71,14 +71,14 @@ func (s *fakeStore) UpdateIntentStatus(_ context.Context, intentID, status strin
 	s.intent.Status = statemachine.State(status)
 	return nil
 }
-func (s *fakeStore) MarkIntentDrifted(_ context.Context, intentID string, childSequence int) (bool, error) {
+func (s *fakeStore) MarkIntentCanceling(_ context.Context, intentID string, childSequence int, status string) (bool, error) {
 	if s.intent.IntentID != intentID || s.order.IntentID != intentID || s.order.ChildSequence != childSequence {
 		return false, nil
 	}
 	if s.order.State != statemachine.StateLive && s.order.State != statemachine.StatePartiallyFilled {
 		return false, nil
 	}
-	s.intent.Status = store.IntentStatusSignalDrift
+	s.intent.Status = statemachine.State(status)
 	return true, nil
 }
 func (s *fakeStore) PersistSubmittingOrder(ctx context.Context, record store.SignedOrderRecord, reason string) (store.SignedOrderRecord, error) {

@@ -88,6 +88,8 @@ A lane in a market that has resolved is emptied by executiond once its shares ar
 
 Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request, or `target_equity_fraction` sizes it from wallet equity (see Equity-fraction sizing). A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
 
+`policy.rest_after_ack_ms` (optional, GTC only) lets an open rest that long after the exchange acknowledged it, so a slow submission does not use up its window. `expires_at` still caps it, counted from the decision, and so does `complete_within_ms`. An order adopted after a restart has no ack time and keeps the cap. A window on a FAK, a FOK or a `TAKER_AGGRESSIVE` open is rejected with `INVALID_INTENT`.
+
 `signal_price` and `max_signal_drift` (decimal strings, optional, set together, GTC only) bound how far the market may move against an open before executiond withdraws it. `signal_price` is the side's mid the strategy decided on. The bound is adverse only: a BUY is withdrawn when the token's mid, (bid + ask) / 2 of the latest `pmm.market.quotes` snapshot, falls more than `max_signal_drift` under `signal_price`; a SELL when it rises that far above. A move in the entry's favour never withdraws it. executiond checks it before signing, refusing a drifted open with `SIGNAL_DRIFT`, and every 50ms while the order rests, cancelling it. A quote older than `policy.quote_max_age_ms` (2s when unset), one-sided, or missing is not acted on. A bound on a FAK or FOK is rejected with `INVALID_INTENT`, since nothing can withdraw an immediate order. That includes a GTC with `policy.style` `TAKER_AGGRESSIVE`, which is sent as a FAK.
 
 | Field | Rules |
@@ -147,11 +149,13 @@ Order events use the same numeric representation for `matched_shares` when the f
 
 ## Reason codes
 
-`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `DRAWDOWN_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`, `SIGNAL_DRIFT`.
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `DRAWDOWN_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`, `SIGNAL_DRIFT`, `EXPIRED`, `CANCELED`.
 
 `DRAWDOWN_LIMIT` means opens are suspended by the wallet's drawdown limit, which applies to every strategy, or by the request's own strategy limit, which leaves other strategies trading. Closes are never rejected with it.
 
 `SIGNAL_DRIFT` means the market moved against an open by more than its `max_signal_drift`: either before it was sent, when it is refused unsigned, or while it rested, when executiond cancelled it unfilled. An open cancelled after filling some reports `SUCCEEDED` with the shares it got.
+
+`EXPIRED` means the order rested unfilled until its deadline (the earliest of `expires_at`, `complete_within_ms` and `rest_after_ack_ms`), where executiond cancelled it, or the exchange expired it. `CANCELED` means an unfilled order was cancelled for another reason: the strategy withdrew it, a force close superseded it, or the exchange cancelled it. Both apply to open and close results.
 
 `BELOW_MIN_ORDER_SIZE` means the position is smaller than the market's minimum order size, so no order can be placed for it. It is not a permanent failure: executiond keeps the shares and retries as the lane grows, and takes the residual with a FAK if the bid reaches the close's limit price before settlement.
 

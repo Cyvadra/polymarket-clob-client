@@ -67,6 +67,13 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 		if intent.ExpiresAt.IsZero() && intent.Policy.CompleteWithinMillis == 0 {
 			return invalid("execution intent requires expires_at or complete_within_ms")
 		}
+		// A FAK or FOK is decided on arrival and never rests, so a window
+		// after the ack would be a promise nothing keeps. TAKER_AGGRESSIVE
+		// is sent as a FAK.
+		if intent.Policy.RestAfterAckMillis > 0 && (intent.TimeInForce == protocol.TimeInForceFAK || intent.TimeInForce == protocol.TimeInForceFOK ||
+			intent.Policy.Style == protocol.ExecutionStyleTakerAggressive) {
+			return invalid("rest_after_ack_ms needs an order that rests")
+		}
 	}
 	if _, err := tactics.ParseDrift(intent); err != nil {
 		return invalid("%s", err)
@@ -88,7 +95,8 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 
 func validatePolicyDurations(policy protocol.ExecutionPolicy) error {
 	if policy.CompleteWithinMillis < 0 || policy.CancelTimeoutMillis < 0 || policy.MaxFeatureAgeMillis < 0 || policy.RepriceIntervalMillis < 0 ||
-		policy.QuoteMaxAgeMillis < 0 || policy.SoftCloseAfterMillis < 0 || policy.ForceCloseAfterMillis < 0 || policy.CancelReplaceTimeoutMillis < 0 {
+		policy.QuoteMaxAgeMillis < 0 || policy.SoftCloseAfterMillis < 0 || policy.ForceCloseAfterMillis < 0 || policy.CancelReplaceTimeoutMillis < 0 ||
+		policy.RestAfterAckMillis < 0 {
 		return invalid("execution policy durations must not be negative")
 	}
 	if policy.MaxReprices < 0 {

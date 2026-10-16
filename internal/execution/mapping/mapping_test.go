@@ -244,8 +244,9 @@ func TestIntentRecordKeepsTheDriftBound(t *testing.T) {
 	}
 }
 
-// An open executiond cancelled for drift says so; one it cancelled for its
-// deadline, or one that filled some before the cancel, does not.
+// An open executiond cancelled for drift says so, one cancelled at its
+// deadline or expired says EXPIRED, any other unfilled cancel says CANCELED,
+// and one that filled some before the cancel is a success with no code.
 func TestTerminalResultNamesASignalDriftCancel(t *testing.T) {
 	at := time.Unix(100, 0).UTC()
 	drifted := store.OrderIntentRecord{IntentID: "intent", Kind: store.IntentOpen, ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: store.SideBuy, Status: store.IntentStatusSignalDrift}
@@ -256,8 +257,23 @@ func TestTerminalResultNamesASignalDriftCancel(t *testing.T) {
 	}
 	plain := drifted
 	plain.Status = statemachine.StateCanceled
-	if result, _ := TerminalResult(canceled, plain, "account order event CANCELED", "", at); result.ReasonCode != "" {
-		t.Fatalf("a deadline cancel must keep an empty reason code, got %+v", result)
+	if result, _ := TerminalResult(canceled, plain, "account order event CANCELED", "", at); result.ReasonCode != protocol.ReasonCanceled {
+		t.Fatalf("an unmarked cancel is CANCELED, got %+v", result)
+	}
+	deadline := drifted
+	deadline.Status = store.IntentStatusDeadline
+	if result, _ := TerminalResult(canceled, deadline, "account order event CANCELED", "", at); result.ReasonCode != protocol.ReasonExpired {
+		t.Fatalf("a deadline cancel is EXPIRED, got %+v", result)
+	}
+	expired := canceled
+	expired.State = statemachine.StateExpired
+	if result, _ := TerminalResult(expired, plain, "expired", "", at); result.ReasonCode != protocol.ReasonExpired {
+		t.Fatalf("an exchange expiry is EXPIRED, got %+v", result)
+	}
+	closeIntent := deadline
+	closeIntent.Kind, closeIntent.Side = store.IntentClose, store.SideSell
+	if result, _ := TerminalCloseResult(canceled, closeIntent, "account order event CANCELED", "", at); result.ReasonCode != protocol.ReasonExpired {
+		t.Fatalf("a close cancelled at its deadline is EXPIRED, got %+v", result)
 	}
 	canceled.MatchedShares = "3"
 	if result, _ := TerminalResult(canceled, drifted, "reason", "0.4", at); result.Status != protocol.ResultSucceeded || result.ReasonCode != "" {

@@ -100,6 +100,25 @@ func TestExecuteOpenRefusesADriftBoundOnAnImmediateOrder(t *testing.T) {
 	}
 }
 
+func TestExecuteOpenRefusesARestWindowOnAnImmediateOrder(t *testing.T) {
+	exec, err := New(&fakeStore{inserted: true}, &fakeCLOB{}, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	pub := &recordingPublisher{}
+	exec.SetEventPublisher(pub)
+	req := driftOpenRequest()
+	req.SignalPrice, req.MaxSignalDrift = "", ""
+	req.TimeInForce = protocol.TimeInForceFAK
+	req.Policy.RestAfterAckMillis = 350
+	if err := exec.ExecuteOpen(context.Background(), req); err == nil {
+		t.Fatal("expected a FAK with rest_after_ack_ms to be refused")
+	}
+	if results := openResults(pub); len(results) != 1 || results[0].ReasonCode != protocol.ReasonInvalidIntent {
+		t.Fatalf("expected INVALID_INTENT, got %+v", results)
+	}
+}
+
 func restingDriftOpen() *fakeStore {
 	now := time.Now().UTC()
 	return &fakeStore{
@@ -128,7 +147,7 @@ func watchingExecutor(t *testing.T, storer *fakeStore, client *fakeCLOB, quotes 
 	}
 	exec.SetEventPublisher(&recordingPublisher{})
 	exec.SetQuoteProvider(quotes)
-	exec.watchOrder(mapping.ExecutionIntent(storer.intent), storer.order.ChildSequence, storer.intent.CreatedAt)
+	exec.watchOrder(mapping.ExecutionIntent(storer.intent), storer.order.ChildSequence, storer.intent.CreatedAt, time.Time{})
 	return exec
 }
 
@@ -178,7 +197,8 @@ func TestCheckWatchedLeavesARestingOpenThatMovedItsWay(t *testing.T) {
 	}
 }
 
-// An order past its deadline is cancelled without a drift mark.
+// An order past its deadline is cancelled with a deadline mark, not a drift
+// mark, so its result says EXPIRED.
 func TestCheckWatchedCancelsAnExpiredOrder(t *testing.T) {
 	storer := restingDriftOpen()
 	client := &fakeCLOB{}
@@ -188,8 +208,38 @@ func TestCheckWatchedCancelsAnExpiredOrder(t *testing.T) {
 	if err := exec.checkWatched(context.Background()); err != nil {
 		t.Fatalf("watch pass: %v", err)
 	}
-	if client.canceledOrderID != "order-open" || storer.intent.Status == store.IntentStatusSignalDrift {
-		t.Fatalf("expected a plain deadline cancel: canceled=%q status=%q", client.canceledOrderID, storer.intent.Status)
+	if client.canceledOrderID != "order-open" || storer.intent.Status != store.IntentStatusDeadline {
+		t.Fatalf("expected a deadline cancel: canceled=%q status=%q", client.canceledOrderID, storer.intent.Status)
+	}
+}
+
+// rest_after_ack_ms runs from the ack, so a slow submission keeps its whole
+// window; expires_at still caps it.
+func TestWatchOrderRestsAfterTheAck(t *testing.T) {
+	storer := restingDriftOpen()
+	storer.intent.MaxSignalDrift = ""
+	created := storer.intent.CreatedAt
+	exec, err := New(storer, &fakeCLOB{}, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	intent := mapping.ExecutionIntent(storer.intent)
+	deadline := func(ack time.Time, rest time.Duration, expires time.Time) time.Time {
+		exec.watched = nil
+		intent.Policy.RestAfterAckMillis = rest.Milliseconds()
+		intent.ExpiresAt = expires
+		exec.watchOrder(intent, storer.order.ChildSequence, created, ack)
+		return exec.watched[orderKey{intent.IntentID, storer.order.ChildSequence}].deadline
+	}
+	ack := created.Add(700 * time.Millisecond)
+	if got, want := deadline(ack, 350*time.Millisecond, created.Add(2*time.Second)), ack.Add(350*time.Millisecond); !got.Equal(want) {
+		t.Fatalf("a slow ack keeps its window: deadline %v, want %v", got, want)
+	}
+	if got, want := deadline(ack, 3*time.Second, created.Add(2*time.Second)), created.Add(2*time.Second); !got.Equal(want) {
+		t.Fatalf("expires_at caps the window: deadline %v, want %v", got, want)
+	}
+	if got, want := deadline(time.Time{}, 350*time.Millisecond, created.Add(2*time.Second)), created.Add(2*time.Second); !got.Equal(want) {
+		t.Fatalf("an adopted order without an ack keeps the cap: deadline %v, want %v", got, want)
 	}
 }
 

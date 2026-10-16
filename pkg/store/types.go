@@ -58,6 +58,11 @@ const IntentStatusSuperseded = "SUPERSEDED"
 // the marker.
 const IntentStatusSignalDrift = "SIGNAL_DRIFT"
 
+// IntentStatusDeadline marks an intent whose order executiond cancelled at its
+// deadline, so the result can say EXPIRED rather than a bare cancel. It
+// outlives later transitions exactly as IntentStatusSignalDrift does.
+const IntentStatusDeadline = "DEADLINE_CANCEL"
+
 // StrategyChildSequence is the child order a strategy intent maps onto.
 // Higher sequences are internal children (such as a force-close exit) that the
 // strategy never acknowledged and must not receive intent acknowledgements for.

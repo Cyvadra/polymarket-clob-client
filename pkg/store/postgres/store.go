@@ -654,10 +654,10 @@ func updateIntentStatus(ctx context.Context, tx pgx.Tx, intentID string, state s
 		UPDATE order_intents
 		SET status = CASE
 			WHEN status = $1 THEN status
-			WHEN status = $4 AND $2 <> $5 THEN status
+			WHEN status IN ($4, $6) AND $2 <> $5 THEN status
 			ELSE $2 END, updated_at = now()
 		WHERE intent_id = $3
-	`, store.IntentStatusSuperseded, string(state), intentID, store.IntentStatusSignalDrift, string(statemachine.StateFilled)); err != nil {
+	`, store.IntentStatusSuperseded, string(state), intentID, store.IntentStatusSignalDrift, string(statemachine.StateFilled), store.IntentStatusDeadline); err != nil {
 		return fmt.Errorf("update intent status: %w", err)
 	}
 	return nil
@@ -677,13 +677,14 @@ func (s *Store) UpdateIntentStatus(ctx context.Context, intentID string, status 
 	return nil
 }
 
-// MarkIntentDrifted marks an open intent SIGNAL_DRIFT, but only while its
+// MarkIntentCanceling marks an intent with why its order is being cancelled
+// (SIGNAL_DRIFT or DEADLINE_CANCEL), but only while its
 // order is still resting (LIVE or PARTIALLY_FILLED), and reports whether it
 // did. Locking the order row orders the mark against the account feed's
 // transitions, which update the order and then the intent in one
 // transaction: a FILLED that commits first is seen here and the mark is
 // skipped, and one that commits after replaces the mark (updateIntentStatus).
-func (s *Store) MarkIntentDrifted(ctx context.Context, intentID string, childSequence int) (bool, error) {
+func (s *Store) MarkIntentCanceling(ctx context.Context, intentID string, childSequence int, status string) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 		WITH resting AS (
 			SELECT 1 FROM orders
@@ -692,9 +693,9 @@ func (s *Store) MarkIntentDrifted(ctx context.Context, intentID string, childSeq
 		)
 		UPDATE order_intents SET status = $5, updated_at = now()
 		WHERE intent_id = $1 AND EXISTS (SELECT 1 FROM resting)
-	`, intentID, childSequence, statemachine.StateLive, statemachine.StatePartiallyFilled, store.IntentStatusSignalDrift)
+	`, intentID, childSequence, statemachine.StateLive, statemachine.StatePartiallyFilled, status)
 	if err != nil {
-		return false, fmt.Errorf("mark intent drifted: %w", err)
+		return false, fmt.Errorf("mark intent %s: %w", status, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }

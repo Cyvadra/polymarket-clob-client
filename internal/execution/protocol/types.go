@@ -60,7 +60,11 @@ const (
 )
 
 type ExecutionPolicy struct {
-	CompleteWithinMillis       int64          `json:"complete_within_ms,omitempty"`
+	CompleteWithinMillis int64 `json:"complete_within_ms,omitempty"`
+	// RestAfterAckMillis is how long a GTC open may rest once the exchange
+	// acknowledged it, so a slow submission does not eat its window.
+	// expires_at still caps it, counted from the decision.
+	RestAfterAckMillis         int64          `json:"rest_after_ack_ms,omitempty"`
 	CancelTimeoutMillis        int64          `json:"cancel_timeout_ms,omitempty"`
 	MaxFeatureAgeMillis        int64          `json:"max_feature_age_ms,omitempty"`
 	Style                      ExecutionStyle `json:"style,omitempty"`
@@ -194,6 +198,13 @@ const (
 	// before submission, or cancelled unfilled while it rested. The code is
 	// the one pmm's backtest venue reports for the same decision.
 	ReasonSignalDrift = "SIGNAL_DRIFT"
+	// ReasonExpired fails an order that rested unfilled until its deadline:
+	// executiond cancelled it there, or the exchange expired it.
+	ReasonExpired = "EXPIRED"
+	// ReasonCanceled fails an unfilled order cancelled for any other cause:
+	// the strategy withdrew it, a force close superseded it, or the exchange
+	// cancelled it on its own.
+	ReasonCanceled = "CANCELED"
 )
 
 type ResultStatus string

@@ -380,7 +380,7 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 	e.publishTransition(live, intent, "submit acknowledged")
 	e.settleFromResponse(ctx, intent, child, live, response)
 	if createdAt, ok := ctx.Value(intentCreatedAtKey{}).(time.Time); ok {
-		e.watchOrder(intent, child.Sequence, createdAt)
+		e.watchOrder(intent, child.Sequence, createdAt, e.now().UTC())
 	}
 	return nil
 }

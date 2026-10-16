@@ -43,14 +43,23 @@ type watchedOrder struct {
 }
 
 // watchOrder starts watching a resting order. createdAt is when the intent
-// was stored, from which complete_within_ms runs. An order with neither a
-// deadline nor a drift bound has nothing to be cancelled for.
-func (e *Executor) watchOrder(intent protocol.ExecutionIntent, childSequence int, createdAt time.Time) {
+// was stored, from which complete_within_ms runs; ackAt is when the exchange
+// acknowledged the order, from which rest_after_ack_ms runs. The earliest of
+// those and expires_at is the deadline. An order adopted after a restart has
+// no ackAt and keeps expires_at, the cap. An order with neither a deadline
+// nor a drift bound has nothing to be cancelled for.
+func (e *Executor) watchOrder(intent protocol.ExecutionIntent, childSequence int, createdAt, ackAt time.Time) {
 	watched := &watchedOrder{intent: intent, deadline: intent.ExpiresAt}
-	if within := intent.Policy.CompleteWithinMillis; within > 0 && !createdAt.IsZero() {
-		if completeBy := createdAt.Add(time.Duration(within) * time.Millisecond); watched.deadline.IsZero() || completeBy.Before(watched.deadline) {
-			watched.deadline = completeBy
+	earlier := func(at time.Time) {
+		if watched.deadline.IsZero() || at.Before(watched.deadline) {
+			watched.deadline = at
 		}
+	}
+	if within := intent.Policy.CompleteWithinMillis; within > 0 && !createdAt.IsZero() {
+		earlier(createdAt.Add(time.Duration(within) * time.Millisecond))
+	}
+	if rest := intent.Policy.RestAfterAckMillis; rest > 0 && !ackAt.IsZero() {
+		earlier(ackAt.Add(time.Duration(rest) * time.Millisecond))
 	}
 	// Only an open's strategy child is cancelled for drift. A bound that does
 	// not parse was refused at validation; it reads as none.
@@ -149,20 +158,25 @@ func (e *Executor) cancelWatched(ctx context.Context, key orderKey, watched *wat
 		return fmt.Errorf("cancel order %s still open after %s of attempts; leaving it to the reconciler", order.ExchangeOrderID, cancelRetryWindow)
 	}
 	reason := cancelRequested
-	// The drift mark goes on before the cancel is sent, since the exchange
-	// may confirm the cancel on the account stream before the call returns.
+	// The cause goes on the intent before the cancel is sent, since the
+	// exchange may confirm the cancel on the account stream before the call
+	// returns: SIGNAL_DRIFT for a drift, DEADLINE_CANCEL for the deadline.
 	// An order another path already asked to cancel is not marked, nor one
 	// the store no longer shows resting: it filled after the read above, and
 	// the next pass drops it.
-	if drifted && order.State != statemachine.StateCancelRequested {
-		marked, err := e.store.MarkIntentDrifted(ctx, key.intentID, key.child)
+	if order.State != statemachine.StateCancelRequested {
+		status, code := store.IntentStatusDeadline, protocol.ReasonExpired
+		if drifted {
+			status, code = store.IntentStatusSignalDrift, protocol.ReasonSignalDrift
+		}
+		marked, err := e.store.MarkIntentCanceling(ctx, key.intentID, key.child, status)
 		if err != nil {
-			return fmt.Errorf("mark intent %s drifted: %w", key.intentID, err)
+			return fmt.Errorf("mark intent %s %s: %w", key.intentID, status, err)
 		}
 		if !marked {
 			return nil
 		}
-		reason = cancelRequested + ": " + protocol.ReasonSignalDrift
+		reason = cancelRequested + ": " + code
 	}
 	// A refused cancel is retried on the next pass rather than reported: it
 	// is usually an order that has just filled.
@@ -200,7 +214,7 @@ func (e *Executor) adoptOpenOrders(ctx context.Context, orders []store.SignedOrd
 			errs = errors.Join(errs, fmt.Errorf("load intent %s to watch: %w", order.IntentID, err))
 			continue
 		}
-		e.watchOrder(mapping.ExecutionIntent(intent), order.ChildSequence, intent.CreatedAt)
+		e.watchOrder(mapping.ExecutionIntent(intent), order.ChildSequence, intent.CreatedAt, time.Time{})
 	}
 	return errs
 }

@@ -86,6 +86,26 @@ func terminalStatus(state statemachine.State, matchedShares string) (protocol.Re
 	}
 }
 
+// unfilledReason names why an order ended with nothing filled, which
+// terminalStatus leaves blank: the cause executiond marked on the intent
+// before cancelling (SIGNAL_DRIFT, or EXPIRED for its deadline), EXPIRED for
+// an order the exchange expired, and CANCELED for any other cancel. A code
+// terminalStatus already gave, and every success, pass through.
+func unfilledReason(status protocol.ResultStatus, code string, state statemachine.State, intentStatus statemachine.State) string {
+	if status != protocol.ResultFailed || code != "" {
+		return code
+	}
+	switch {
+	case intentStatus == store.IntentStatusSignalDrift:
+		return protocol.ReasonSignalDrift
+	case intentStatus == store.IntentStatusDeadline, state == statemachine.StateExpired:
+		return protocol.ReasonExpired
+	case state == statemachine.StateCanceled:
+		return protocol.ReasonCanceled
+	}
+	return code
+}
+
 // TerminalResult derives the strategy-facing open result for an order of an
 // OPEN intent that reached a terminal state. Only the strategy child of an
 // open intent produces a result: internal children (a force-close exit) and
@@ -103,9 +123,7 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 	if !ok {
 		return protocol.ExecutionOpenResult{}, false
 	}
-	if status == protocol.ResultFailed && reasonCode == "" && intent.Status == store.IntentStatusSignalDrift {
-		reasonCode = protocol.ReasonSignalDrift
-	}
+	reasonCode = unfilledReason(status, reasonCode, order.State, intent.Status)
 	filledShares, err := decimal.NonNegativeFloat(order.MatchedShares)
 	if err != nil {
 		return protocol.ExecutionOpenResult{}, false
@@ -143,6 +161,7 @@ func TerminalCloseResult(order store.SignedOrderRecord, intent store.OrderIntent
 	if !ok {
 		return protocol.ExecutionCloseResult{}, false
 	}
+	reasonCode = unfilledReason(status, reasonCode, order.State, intent.Status)
 	filledShares, err := decimal.NonNegativeFloat(order.MatchedShares)
 	if err != nil {
 		return protocol.ExecutionCloseResult{}, false

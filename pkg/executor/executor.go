@@ -40,9 +40,11 @@ type repository interface {
 	// wallet's strategy checks it to learn the lane is not held here, so it
 	// must not cost a read of every position.
 	LanePosition(ctx context.Context, conditionID, tokenID, uniqueTag string) (position store.PositionRecord, found bool, err error)
-	// MarkIntentDrifted marks an open SIGNAL_DRIFT only while its order is
-	// still resting, so it never overwrites a fill that has just landed.
-	MarkIntentDrifted(ctx context.Context, intentID string, childSequence int) (marked bool, err error)
+	// MarkIntentCanceling records why executiond is about to cancel an
+	// intent's order (store.IntentStatusSignalDrift or
+	// store.IntentStatusDeadline), only while the order is still resting, so
+	// it never overwrites a fill that has just landed.
+	MarkIntentCanceling(ctx context.Context, intentID string, childSequence int, status string) (marked bool, err error)
 }
 
 type Executor struct {
