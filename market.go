@@ -191,6 +191,10 @@ func (c *Client) NegRisk(ctx context.Context, tokenID string) (bool, error) {
 	return out.NegRisk, nil
 }
 
+// FeeRateBps reads GET /fee-rate.
+//
+// Deprecated: CLOB V2 orders carry no fee rate and fees follow the market's
+// schedule since 2026-03-31; use FeeSchedule.
 func (c *Client) FeeRateBps(ctx context.Context, tokenID string) (int, error) {
 	c.metadata.mu.RLock()
 	value, ok := c.metadata.feeRate[tokenID]
@@ -261,14 +265,50 @@ func (c *Client) LastTradePrice(ctx context.Context, tokenID string) (float64, e
 	return value, nil
 }
 
+// Market reads conditionID's market, with its tokens and, once it resolved,
+// the winner. It reads GET /markets/{condition_id}, which still answers but
+// is no longer in Polymarket's CLOB spec (2026-10-16). Should that route be
+// removed (404 or 410), Market falls back to the documented
+// /clob-markets/{condition_id}, which lists the tokens in outcome-index order
+// but says nothing of the resolution: the market comes back open with no
+// winner, and settlement.Resolver reads the payouts from the chain instead.
 func (c *Client) Market(ctx context.Context, conditionID string) (*Market, error) {
 	var out Market
-	if err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/markets/" + url.PathEscape(conditionID)}, &out); err != nil {
+	err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/markets/" + url.PathEscape(conditionID)}, &out)
+	var httpErr *transport.HTTPError
+	if errors.As(err, &httpErr) && (httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusGone) {
+		return c.clobMarket(ctx, conditionID)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
+// clobMarket is conditionID's market as /clob-markets describes it: the
+// condition and its tokens in outcome-index order, nothing else.
+func (c *Client) clobMarket(ctx context.Context, conditionID string) (*Market, error) {
+	var out struct {
+		Condition string `json:"c"`
+		Tokens    []struct {
+			TokenID string `json:"t"`
+			Outcome string `json:"o"`
+		} `json:"t"`
+	}
+	if err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/clob-markets/" + url.PathEscape(conditionID)}, &out); err != nil {
+		return nil, err
+	}
+	market := &Market{ConditionID: out.Condition}
+	for _, token := range out.Tokens {
+		market.Tokens = append(market.Tokens, Token{TokenID: token.TokenID, Outcome: token.Outcome})
+	}
+	return market, nil
+}
+
+// Markets pages GET /markets.
+//
+// Deprecated: the route is no longer in Polymarket's CLOB spec (2026-10-16);
+// list markets through Gamma's /markets/keyset.
 func (c *Client) Markets(ctx context.Context, nextCursor string) ([]Market, string, error) {
 	query := url.Values{}
 	if nextCursor != "" {
@@ -299,6 +339,10 @@ func (c *Client) SamplingMarkets(ctx context.Context, limit int) ([]Market, stri
 	return out.Data, out.NextCursor, nil
 }
 
+// PriceHistory reads GET /prices-history.
+//
+// Deprecated: price history moved to the Data API's /v2/prices-history on
+// 2026-09-04.
 func (c *Client) PriceHistory(ctx context.Context, tokenID string, options PriceHistoryOptions) ([]PriceHistoryPoint, error) {
 	query := url.Values{"market": []string{tokenID}}
 	if options.StartUnix > 0 {

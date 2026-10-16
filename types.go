@@ -85,7 +85,12 @@ type OrderResponse struct {
 	Status             string   `json:"status"`
 	TakingAmount       string   `json:"takingAmount"`
 	MakingAmount       string   `json:"makingAmount"`
+	// TransactionsHashes is empty for a FAK/FOK match since 2026-07-24, when
+	// the CLOB moved to an async commit pipeline and began returning
+	// TradeIDs instead; poll /data/trades by trade ID for the settlement.
 	TransactionsHashes []string `json:"transactionsHashes"`
+	// TradeIDs are the trades an immediate match created (status "matched").
+	TradeIDs []string `json:"tradeIDs"`
 }
 
 type Order struct {
