@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -33,6 +34,12 @@ type Config struct {
 // host would let only two run at once (see lockSlots).
 const minPoolConns = 16
 
+// idlePoolConns is how many connections the pool keeps open when neither
+// Config nor the URL says (pool_min_conns). pgx's default is none, so after
+// a quiet spell an open's first write would wait for a new connection's
+// handshake on its way to the exchange.
+const idlePoolConns = 4
+
 type Store struct {
 	pool                  *pgxpool.Pool
 	maxOpenBuyNotionalUSD string
@@ -59,8 +66,11 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		// Only pgx's default is raised; a size the URL sets is the operator's.
 		poolConfig.MaxConns = minPoolConns
 	}
-	if cfg.MinConns > 0 {
+	switch {
+	case cfg.MinConns > 0:
 		poolConfig.MinConns = cfg.MinConns
+	case !strings.Contains(cfg.URL, "pool_min_conns"):
+		poolConfig.MinConns = min(idlePoolConns, poolConfig.MaxConns)
 	}
 	if cfg.ConnectTimeout > 0 {
 		poolConfig.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
@@ -80,16 +90,91 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	return &Store{pool: pool, maxOpenBuyNotionalUSD: cfg.MaxOpenBuyNotionalUSD, lockSlots: make(chan struct{}, lockSlotCount(poolConfig.MaxConns))}, nil
 }
 
+// execAsync runs one statement in its own transaction committed
+// asynchronously (queueAsync), as one batch: a single round trip.
+func (s *Store) execAsync(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	var tag pgconn.CommandTag
+	batch := &pgx.Batch{}
+	queueAsync(batch, func(b *pgx.Batch) {
+		b.Queue(sql, args...).Exec(func(ct pgconn.CommandTag) error {
+			tag = ct
+			return nil
+		})
+	})
+	err := s.pool.SendBatch(ctx, batch).Close()
+	return tag, err
+}
+
+// queueAsync queues the statements body queues as one transaction committed
+// with synchronous_commit off: the commit returns before its WAL reaches the
+// disk, where a durable one waits for the flush (about 4ms on a local disk,
+// against 0.1ms for the round trip). It is for the writes an open makes on
+// its way to the exchange: the intent, a BUY's reservation, and the order
+// itself (PersistSubmittingOrder).
+//
+// Postgres's WAL writer flushes such a commit within three wal_writer_delay
+// (600ms by default), and Close flushes them all (FlushCommits), so a
+// graceful shutdown loses none. A crash of the database server, not of
+// executiond, can lose that last fraction of a second, including an order
+// already posted: the exchange then holds an order the store never recorded,
+// which only the account's trades and REST reconciliation can reveal.
+func queueAsync(batch *pgx.Batch, body func(*pgx.Batch)) {
+	batch.Queue(`BEGIN`)
+	batch.Queue(`SET LOCAL synchronous_commit TO OFF`)
+	body(batch)
+	batch.Queue(`COMMIT`)
+}
+
+// asyncExecer runs each Exec through execAsync.
+type asyncExecer struct{ s *Store }
+
+func (a asyncExecer) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return a.s.execAsync(ctx, sql, args...)
+}
+
 // lockSlotCount is how many locks may hold a connection in a pool of size
 // conns: half, but at least one, which a pool of one cannot serve anyway.
 func lockSlotCount(conns int32) int {
 	return max(1, int(conns)/2)
 }
 
+// Close flushes the asynchronous commits (FlushCommits) and closes the pool.
 func (s *Store) Close() {
 	if s != nil && s.pool != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+		defer cancel()
+		if err := s.FlushCommits(ctx); err != nil {
+			log.Printf("flush asynchronous commits on close: %v", err)
+		}
 		s.pool.Close()
 	}
+}
+
+// flushTimeout bounds FlushCommits on Close: Postgres's WAL writer flushes an
+// asynchronous commit within three wal_writer_delay (600ms by default) anyway.
+const flushTimeout = 5 * time.Second
+
+// FlushCommits returns once every commit made before it is on disk, the
+// asynchronous ones included (execAsync). It commits a transaction of its own
+// durably, which waits for the WAL to be flushed up to its commit record and
+// so past every commit before it. A transaction that writes nothing writes no
+// commit record, so it takes a transaction ID first (txid_current).
+func (s *Store) FlushCommits(ctx context.Context) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("begin commit flush: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL synchronous_commit TO ON`); err != nil {
+		return fmt.Errorf("commit flush: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT txid_current()`); err != nil {
+		return fmt.Errorf("commit flush: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit flush: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
@@ -168,7 +253,7 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 		status = statemachine.StateIntentReceived
 	}
 
-	commandTag, err := s.pool.Exec(ctx, `
+	commandTag, err := s.execAsync(ctx, `
 		INSERT INTO order_intents (
 			intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
 			token_id, outcome, side, target_usd, limit_price,
@@ -252,59 +337,137 @@ func (s *Store) PersistSignedOrder(ctx context.Context, record store.SignedOrder
 }
 
 // PersistSubmittingOrder inserts a signed order and moves it to SUBMITTING in
-// one transaction. It is PersistSignedOrder followed by TransitionOrder with
-// EventSubmitStarted, minus a commit round trip on the path to the exchange.
-// Recovery sees nothing new: a crash after it leaves the same SUBMITTING row a
-// crash between the two separate calls would.
+// one transaction. It writes what PersistSignedOrder followed by
+// TransitionOrder with EventSubmitStarted would: the order at its SUBMITTING
+// revision, both events, and the intent's status. Recovery sees nothing new:
+// a crash after it leaves the same SUBMITTING row a crash between the two
+// separate calls would.
+//
+// It is on the path to the exchange, so the statements go as one batch, one
+// round trip, in a transaction that a failing statement rolls back whole and
+// that commits without waiting for the disk (queueAsync). The row is
+// inserted at its SUBMITTING revision rather than inserted and then updated,
+// since nothing could have moved it in between.
 func (s *Store) PersistSubmittingOrder(ctx context.Context, record store.SignedOrderRecord, reason string) (store.SignedOrderRecord, error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return store.SignedOrderRecord{}, fmt.Errorf("begin signed order persistence: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	signed, err := persistSignedOrderTx(ctx, tx, record)
+	signed, err := signedOrderRow(record)
 	if err != nil {
 		return store.SignedOrderRecord{}, err
 	}
-	submitting, err := transitionOrderTx(ctx, tx, signed, statemachine.EventSubmitStarted, signed.MatchedShares, "", reason)
+	transition, matchedShares, noop, err := planTransition(signed, statemachine.EventSubmitStarted, signed.MatchedShares, "")
 	if err != nil {
 		return store.SignedOrderRecord{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return store.SignedOrderRecord{}, fmt.Errorf("commit signed order persistence: %w", err)
+	if noop {
+		return store.SignedOrderRecord{}, fmt.Errorf("submitting a signed order changed nothing")
+	}
+	submitting := signed
+	submitting.State, submitting.Revision, submitting.MatchedShares = transition.To, signed.Revision+1, matchedShares
+
+	batch := &pgx.Batch{}
+	var exchangeOrderID *string
+	queueAsync(batch, func(batch *pgx.Batch) {
+		queueSubmittingOrder(batch, signed, &submitting, transition.To, reason, &exchangeOrderID)
+	})
+	if err := s.pool.SendBatch(ctx, batch).Close(); err != nil {
+		if errors.Is(err, store.ErrDuplicate) {
+			return store.SignedOrderRecord{}, store.ErrDuplicate
+		}
+		return store.SignedOrderRecord{}, fmt.Errorf("persist submitting order: %w", err)
+	}
+	submitting.ExchangeOrderID = ""
+	if exchangeOrderID != nil {
+		submitting.ExchangeOrderID = *exchangeOrderID
 	}
 	return submitting, nil
 }
 
-// persistSignedOrderTx inserts a SIGNED order and its event inside tx, and
-// returns the record as stored (defaults filled in).
-func persistSignedOrderTx(ctx context.Context, tx pgx.Tx, record store.SignedOrderRecord) (store.SignedOrderRecord, error) {
+// queueSubmittingOrder queues PersistSubmittingOrder's statements; the order
+// row's stored values are scanned into submitting and exchangeOrderID.
+func queueSubmittingOrder(batch *pgx.Batch, signed store.SignedOrderRecord, submitting *store.SignedOrderRecord, to statemachine.State, reason string, exchangeOrderID **string) {
+	insertOrder := batch.Queue(`
+		INSERT INTO orders (
+			intent_id, child_sequence, signed_payload, signed_order_hash, salt,
+			exchange_order_id, requested_shares, matched_shares, price, order_type,
+			post_only, state, revision, created_at, updated_at
+		) VALUES (
+			$1, $2, $3::jsonb, $4, $5,
+			NULLIF($6, ''), $7, COALESCE(NULLIF($8, ''), '0')::numeric, $9, $10,
+			$11, $12, $13, $14, now()
+		)
+		RETURNING matched_shares::text, exchange_order_id, updated_at
+	`, submitting.IntentID, submitting.ChildSequence, submitting.SignedPayload, submitting.SignedOrderHash, submitting.Salt,
+		submitting.ExchangeOrderID, submitting.RequestedShares, submitting.MatchedShares, submitting.Price, submitting.OrderType,
+		submitting.PostOnly, submitting.State, submitting.Revision, submitting.CreatedAt)
+	insertOrder.QueryRow(func(row pgx.Row) error {
+		err := row.Scan(&submitting.MatchedShares, exchangeOrderID, &submitting.UpdatedAt)
+		switch {
+		case isUniqueViolation(err):
+			return store.ErrDuplicate
+		case err != nil:
+			return fmt.Errorf("persist signed order: %w", err)
+		}
+		return nil
+	})
+	batch.Queue(orderEventSQL, orderEventArgs(signedOrderEvent(signed))...)
+	batch.Queue(intentStatusSQL, intentStatusArgs(signed.IntentID, to)...)
+	batch.Queue(orderEventSQL, orderEventArgs(store.OrderEventRecord{
+		EventID: eventID(signed.IntentID, signed.ChildSequence, submitting.Revision, statemachine.EventSubmitStarted), IntentID: signed.IntentID,
+		ChildSequence: signed.ChildSequence, ExchangeOrderID: signed.ExchangeOrderID, FromState: signed.State,
+		ToState: to, Event: statemachine.EventSubmitStarted, Reason: reason, ReceivedAt: time.Now().UTC(),
+	})...)
+}
+
+// signedOrderRow validates a signed order about to be inserted and fills in
+// its defaults: the record as a SIGNED row stores it.
+func signedOrderRow(record store.SignedOrderRecord) (store.SignedOrderRecord, error) {
 	if record.IntentID == "" || record.ChildSequence <= 0 || len(record.SignedPayload) == 0 || record.SignedOrderHash == "" || record.Salt == "" {
 		return store.SignedOrderRecord{}, fmt.Errorf("intent ID, child sequence, signed payload, signed order hash, and salt are required")
 	}
 	if record.RequestedShares == "" || record.Price == "" {
 		return store.SignedOrderRecord{}, fmt.Errorf("requested shares and price are required")
 	}
-	createdAt := record.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = time.Now().UTC()
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
 	}
-	updatedAt := record.UpdatedAt
-	if updatedAt.IsZero() {
-		updatedAt = createdAt
+	if record.UpdatedAt.IsZero() {
+		record.UpdatedAt = record.CreatedAt
 	}
-	state := record.State
-	if state == "" {
-		state = statemachine.StateSigned
+	if record.State == "" {
+		record.State = statemachine.StateSigned
 	}
-	if state != statemachine.StateSigned {
+	if record.State != statemachine.StateSigned {
 		return store.SignedOrderRecord{}, fmt.Errorf("signed order must start in %s", statemachine.StateSigned)
 	}
-	revision := record.Revision
-	if revision == 0 {
-		revision = 1
+	if record.Revision == 0 {
+		record.Revision = 1
 	}
-	_, err := tx.Exec(ctx, `
+	if record.MatchedShares == "" {
+		record.MatchedShares = "0"
+	}
+	return record, nil
+}
+
+// signedOrderEvent is the event that records an order being signed.
+func signedOrderEvent(record store.SignedOrderRecord) store.OrderEventRecord {
+	return store.OrderEventRecord{
+		EventID:       eventID(record.IntentID, record.ChildSequence, record.Revision, statemachine.EventSigned),
+		IntentID:      record.IntentID,
+		ChildSequence: record.ChildSequence,
+		FromState:     statemachine.StateIntentReceived,
+		ToState:       record.State,
+		Event:         statemachine.EventSigned,
+		ReceivedAt:    record.UpdatedAt,
+	}
+}
+
+// persistSignedOrderTx inserts a SIGNED order and its event inside tx, and
+// returns the record as stored (defaults filled in).
+func persistSignedOrderTx(ctx context.Context, tx pgx.Tx, record store.SignedOrderRecord) (store.SignedOrderRecord, error) {
+	record, err := signedOrderRow(record)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	_, err = tx.Exec(ctx, `
 		INSERT INTO orders (
 			intent_id, child_sequence, signed_payload, signed_order_hash, salt,
 			exchange_order_id, requested_shares, matched_shares, price, order_type,
@@ -316,27 +479,15 @@ func persistSignedOrderTx(ctx context.Context, tx pgx.Tx, record store.SignedOrd
 		)
 	`, record.IntentID, record.ChildSequence, record.SignedPayload, record.SignedOrderHash, record.Salt,
 		record.ExchangeOrderID, record.RequestedShares, record.MatchedShares, record.Price, record.OrderType,
-		record.PostOnly, state, revision, createdAt, updatedAt)
+		record.PostOnly, record.State, record.Revision, record.CreatedAt, record.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return store.SignedOrderRecord{}, store.ErrDuplicate
 		}
 		return store.SignedOrderRecord{}, fmt.Errorf("persist signed order: %w", err)
 	}
-	if err := insertOrderEvent(ctx, tx, store.OrderEventRecord{
-		EventID:       eventID(record.IntentID, record.ChildSequence, revision, statemachine.EventSigned),
-		IntentID:      record.IntentID,
-		ChildSequence: record.ChildSequence,
-		FromState:     statemachine.StateIntentReceived,
-		ToState:       state,
-		Event:         statemachine.EventSigned,
-		ReceivedAt:    updatedAt,
-	}); err != nil {
+	if err := insertOrderEvent(ctx, tx, signedOrderEvent(record)); err != nil {
 		return store.SignedOrderRecord{}, err
-	}
-	record.CreatedAt, record.UpdatedAt, record.State, record.Revision = createdAt, updatedAt, state, revision
-	if record.MatchedShares == "" {
-		record.MatchedShares = "0"
 	}
 	return record, nil
 }
@@ -649,15 +800,24 @@ func oppositeSide(side string) string {
 // marker even if the old order later reaches a terminal state. A drifted open
 // keeps its marker too, unless its order filled anyway: the cancel came too
 // late and the intent did what it asked for.
+// intentStatusSQL moves an intent's status with its order's state, except
+// that a superseded intent keeps its status, and one closed by signal drift
+// or its deadline keeps it unless the order filled.
+const intentStatusSQL = `
+	UPDATE order_intents
+	SET status = CASE
+		WHEN status = $1 THEN status
+		WHEN status IN ($4, $6) AND $2 <> $5 THEN status
+		ELSE $2 END, updated_at = now()
+	WHERE intent_id = $3
+`
+
+func intentStatusArgs(intentID string, state statemachine.State) []any {
+	return []any{store.IntentStatusSuperseded, string(state), intentID, store.IntentStatusSignalDrift, string(statemachine.StateFilled), store.IntentStatusDeadline}
+}
+
 func updateIntentStatus(ctx context.Context, tx pgx.Tx, intentID string, state statemachine.State) error {
-	if _, err := tx.Exec(ctx, `
-		UPDATE order_intents
-		SET status = CASE
-			WHEN status = $1 THEN status
-			WHEN status IN ($4, $6) AND $2 <> $5 THEN status
-			ELSE $2 END, updated_at = now()
-		WHERE intent_id = $3
-	`, store.IntentStatusSuperseded, string(state), intentID, store.IntentStatusSignalDrift, string(statemachine.StateFilled), store.IntentStatusDeadline); err != nil {
+	if _, err := tx.Exec(ctx, intentStatusSQL, intentStatusArgs(intentID, state)...); err != nil {
 		return fmt.Errorf("update intent status: %w", err)
 	}
 	return nil
@@ -804,6 +964,34 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	if state == "" {
 		state = "active"
 	}
+	insert := func(execer interface {
+		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	}) error {
+		_, err := execer.Exec(ctx, `
+			INSERT INTO reservations (
+				reservation_id, intent_id, child_sequence, unique_tag, market_id, condition_id, token_id,
+				outcome, side, shares, notional, state, reason, created_at, updated_at
+			) VALUES (
+				$1, $2, NULLIF($3, 0), $4, $5, $6, $7,
+				$8, $9, $10, $11, $12, $13, $14, $15
+			)
+		`, record.ReservationID, record.IntentID, record.ChildSequence, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
+			record.Outcome, record.Side, record.Shares, record.Notional, state, record.Reason, createdAt, updatedAt)
+		switch {
+		case err == nil:
+			return nil
+		case isUniqueConstraint(err, "reservations_one_active_sell_idx"):
+			return store.ErrActiveSellReservation
+		case isUniqueViolation(err):
+			return store.ErrDuplicate
+		}
+		return fmt.Errorf("insert reservation: %w", err)
+	}
+	// A BUY under no exposure cap checks nothing a transaction would hold: it
+	// is one insert, committed without waiting for the disk (execAsync).
+	if record.Side == "BUY" && s.maxOpenBuyNotionalUSD == "" {
+		return insert(asyncExecer{s})
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin reserve: %w", err)
@@ -827,24 +1015,8 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	} else if err := s.checkOpenBuyExposure(ctx, tx, record.Notional); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO reservations (
-			reservation_id, intent_id, child_sequence, unique_tag, market_id, condition_id, token_id,
-			outcome, side, shares, notional, state, reason, created_at, updated_at
-		) VALUES (
-			$1, $2, NULLIF($3, 0), $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, $13, $14, $15
-		)
-	`, record.ReservationID, record.IntentID, record.ChildSequence, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
-		record.Outcome, record.Side, record.Shares, record.Notional, state, record.Reason, createdAt, updatedAt)
-	if err != nil {
-		if isUniqueConstraint(err, "reservations_one_active_sell_idx") {
-			return store.ErrActiveSellReservation
-		}
-		if isUniqueViolation(err) {
-			return store.ErrDuplicate
-		}
-		return fmt.Errorf("insert reservation: %w", err)
+	if err := insert(tx); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit reservation: %w", err)
@@ -1256,7 +1428,15 @@ func positionSelectSQL() string {
 	`
 }
 
-func insertOrderEvent(ctx context.Context, execer migrationExecer, record store.OrderEventRecord) error {
+const orderEventSQL = `
+	INSERT INTO order_events (
+		event_id, intent_id, child_sequence, exchange_order_id, from_state, to_state,
+		event, observation, reason, exchange_time, received_at
+	) VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8::jsonb, $9, $10, $11)
+	ON CONFLICT (event_id) DO NOTHING
+`
+
+func orderEventArgs(record store.OrderEventRecord) []any {
 	receivedAt := record.ReceivedAt
 	if receivedAt.IsZero() {
 		receivedAt = time.Now().UTC()
@@ -1265,14 +1445,12 @@ func insertOrderEvent(ctx context.Context, execer migrationExecer, record store.
 	if len(observation) == 0 {
 		observation = []byte(`{}`)
 	}
-	_, err := execer.Exec(ctx, `
-		INSERT INTO order_events (
-			event_id, intent_id, child_sequence, exchange_order_id, from_state, to_state,
-			event, observation, reason, exchange_time, received_at
-		) VALUES ($1, $2, $3, NULLIF($4, ''), $5, $6, $7, $8::jsonb, $9, $10, $11)
-		ON CONFLICT (event_id) DO NOTHING
-	`, record.EventID, record.IntentID, record.ChildSequence, record.ExchangeOrderID, record.FromState,
-		record.ToState, record.Event, observation, record.Reason, zeroTimeToNil(record.ExchangeTime), receivedAt)
+	return []any{record.EventID, record.IntentID, record.ChildSequence, record.ExchangeOrderID, record.FromState,
+		record.ToState, record.Event, observation, record.Reason, zeroTimeToNil(record.ExchangeTime), receivedAt}
+}
+
+func insertOrderEvent(ctx context.Context, execer migrationExecer, record store.OrderEventRecord) error {
+	_, err := execer.Exec(ctx, orderEventSQL, orderEventArgs(record)...)
 	if err != nil {
 		return fmt.Errorf("insert order event: %w", err)
 	}

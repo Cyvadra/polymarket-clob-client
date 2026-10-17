@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
+	"github.com/jackc/pgx/v5"
 )
 
 // These tests exercise the real SQL invariants (optimistic revision CAS, fill
@@ -174,6 +176,104 @@ func TestPersistSubmittingOrderCommitsBothSteps(t *testing.T) {
 		RequestedShares: "2", Price: "0.5", OrderType: store.TimeInForceGTC,
 	}, "again"); err != store.ErrDuplicate {
 		t.Fatalf("second persist = %v, want ErrDuplicate", err)
+	}
+}
+
+// PersistSubmittingOrder sends its statements as one batch in one
+// transaction: it writes both events, and an order insert that fails leaves
+// the intent's status and events as they were.
+func TestPersistSubmittingOrderIsOneTransaction(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	lane := newTestLane(t, s)
+	events := func(intentID string) []string {
+		t.Helper()
+		rows, err := s.pool.Query(ctx, `SELECT event FROM order_events WHERE intent_id = $1 ORDER BY event`, intentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	written := lane.id("written")
+	seedIntent(t, s, lane, written)
+	if _, err := s.PersistSubmittingOrder(ctx, store.SignedOrderRecord{
+		IntentID: written, ChildSequence: 1, SignedPayload: []byte(`{"salt":1}`), SignedOrderHash: written + "-hash", Salt: "1",
+		RequestedShares: "2", Price: "0.5", OrderType: store.TimeInForceFAK,
+	}, "submit requested"); err != nil {
+		t.Fatalf("persist submitting order: %v", err)
+	}
+	want := []string{string(statemachine.EventSigned), string(statemachine.EventSubmitStarted)}
+	slices.Sort(want)
+	if got := events(written); !slices.Equal(got, want) {
+		t.Fatalf("events = %v, want %v", got, want)
+	}
+
+	// An order already signed for the intent makes the insert fail.
+	refused := lane.id("refused")
+	seedIntent(t, s, lane, refused)
+	seedSignedOrder(t, s, refused)
+	before, err := s.Intent(ctx, refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PersistSubmittingOrder(ctx, store.SignedOrderRecord{
+		IntentID: refused, ChildSequence: 1, SignedPayload: []byte(`{"salt":1}`), SignedOrderHash: refused + "-hash", Salt: "1",
+		RequestedShares: "2", Price: "0.5", OrderType: store.TimeInForceFAK,
+	}, "submit requested"); err != store.ErrDuplicate {
+		t.Fatalf("persist over a signed order = %v, want ErrDuplicate", err)
+	}
+	after, err := s.Intent(ctx, refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != before.Status {
+		t.Fatalf("intent status moved to %s on a failed persist, want %s", after.Status, before.Status)
+	}
+	if got := events(refused); !slices.Equal(got, []string{string(statemachine.EventSigned)}) {
+		t.Fatalf("events after a failed persist = %v, want only the seeded signing", got)
+	}
+}
+
+// A BUY under no exposure cap is reserved by a single insert outside a
+// transaction; it must still refuse a duplicate.
+func TestFlushCommits(t *testing.T) {
+	s := testStore(t)
+	if err := s.FlushCommits(context.Background()); err != nil {
+		t.Fatalf("flush commits: %v", err)
+	}
+}
+
+func TestReserveUncappedBuy(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	lane := newTestLane(t, s)
+	intentID := lane.id("intent")
+	seedIntent(t, s, lane, intentID)
+	record := store.ReservationRecord{
+		ReservationID: intentID + ":1", IntentID: intentID, ChildSequence: 1, UniqueTag: lane.tag, MarketID: "market",
+		ConditionID: lane.conditionID, TokenID: lane.tokenID, Outcome: "Up", Side: store.SideBuy,
+		Shares: "10", Notional: "8", Reason: "test",
+	}
+	if err := s.Reserve(ctx, record); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	stored, err := s.Reservation(ctx, record.ReservationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != "active" || stored.Side != store.SideBuy || stored.ChildSequence != 1 {
+		t.Fatalf("stored reservation = %+v", stored)
+	}
+	if err := s.Reserve(ctx, record); err != store.ErrDuplicate {
+		t.Fatalf("second reserve = %v, want ErrDuplicate", err)
+	}
+	if err := s.Release(ctx, record.ReservationID, "test release"); err != nil {
+		t.Fatalf("release: %v", err)
 	}
 }
 

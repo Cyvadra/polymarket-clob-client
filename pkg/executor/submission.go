@@ -98,18 +98,21 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 	return nil
 }
 
-// Execute plans, reserves, signs, and submits an intent's child order under the
-// intent's advisory lock. It returns an error without publishing: each caller
-// owns result publication so open and close intents report on their own result
-// subjects.
+// Execute plans, reserves, signs, and submits an intent's child order. It
+// returns an error without publishing: each caller owns result publication so
+// open and close intents report on their own result subjects.
+//
+// It takes no intent lock. The intent ID is minted here (newExecutionID), so
+// no other request can name it, and its order is committed straight to
+// SUBMITTING (PersistSubmittingOrder), never as the SIGNED row the recovery
+// pass resumes under that lock. A lock would cost two database round trips
+// before the POST, a commit after it, and a held connection across it.
 func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent) error {
 	if err := validateIntentAt(intent, e.now().UTC()); err != nil {
 		return err
 	}
 	ctx = withReceivedAt(ctx)
-	return e.store.WithIntentLock(ctx, intent.IntentID, func(ctx context.Context) error {
-		return e.persistAndSubmit(ctx, intent)
-	})
+	return e.persistAndSubmit(ctx, intent)
 }
 
 // persistAndSubmit durably persists the intent and then plans and submits its
