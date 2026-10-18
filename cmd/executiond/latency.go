@@ -25,9 +25,12 @@ func logOrderTiming(t transport.Timing) {
 
 // logPrePost prints the local cost of an order before it leaves: sizing,
 // locks, persistence and signing. Paired with the "order http" line it splits
-// an order's latency into ours and the network's.
+// an order's latency into ours and the network's. tif and post_only split the
+// http line's ttfb by whether the exchange's taker delay (250ms on crypto
+// up/down markets) could hold the order before it answers.
 func logPrePost(intent protocol.ExecutionIntent, prePost time.Duration) {
-	log.Printf("order pre-post %s %s %s intent=%s took=%s", intent.Kind, intent.Side, intent.Strategy, intent.IntentID, ms(prePost))
+	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s",
+		intent.Kind, intent.Side, intent.Strategy, intent.IntentID, intent.TimeInForce, intent.PostOnly, ms(prePost))
 }
 
 // warmExchangeConnections opens the order and read pools before any intent
