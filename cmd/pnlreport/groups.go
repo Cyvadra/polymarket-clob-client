@@ -43,13 +43,30 @@ type Grouped struct {
 	Members []*Series
 }
 
+// Prefix is the strategy name is one side of, as LockInDSUp and LockInDSDown
+// are of LockInDS: the name less a trailing Up or Down when names holds the
+// other side too, or else the name itself, so FollowUp is not read as one
+// side of Follow.
+func Prefix(name string, names map[string]bool) string {
+	for suffix, other := range map[string]string{"Up": "Down", "Down": "Up"} {
+		if base, ok := strings.CutSuffix(name, suffix); ok && base != "" && names[base+other] {
+			return base
+		}
+	}
+	return name
+}
+
 // GroupSeries combines the strategy series (everything after the wallet) by
-// exclusive_group, sorted by group key. A strategy with no group is its own
-// group with a single member.
+// exclusive_group, or without one by Prefix among them, sorted by group key. A group of
+// one strategy keeps that strategy's series, under the group's name.
 func GroupSeries(strategies []*Series, groups map[string]string) []Grouped {
+	names := map[string]bool{}
+	for _, s := range strategies {
+		names[s.Key] = true
+	}
 	byKey := map[string][]*Series{}
 	for _, s := range strategies {
-		key := s.Key
+		key := Prefix(s.Key, names)
 		if g := groups[s.Key]; g != "" {
 			key = g
 		}
@@ -66,6 +83,10 @@ func GroupSeries(strategies []*Series, groups map[string]string) []Grouped {
 		combined := members[0]
 		if len(members) > 1 {
 			combined = Combine(key, members)
+		} else if combined.Key != key {
+			renamed := *combined
+			renamed.Key = key
+			combined = &renamed
 		}
 		out = append(out, Grouped{Series: combined, Members: members})
 	}

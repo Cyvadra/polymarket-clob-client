@@ -197,6 +197,28 @@ func TestCombineSumsMembers(t *testing.T) {
 	near(t, "last point", g.Points[len(g.Points)-1].PnL, 1)
 }
 
+func TestGroupSeriesJoinsDirectionsByPrefix(t *testing.T) {
+	events := []Event{
+		{At: at(1), Tag: "LockInDSUp:btc:1", Condition: "1", Token: "t", Side: "BUY", Shares: 10, Price: 0.5},
+		{At: at(1), Tag: "LockInDSDown:btc:2", Condition: "2", Token: "t", Side: "BUY", Shares: 10, Price: 0.5},
+		{At: at(2), Tag: "LockInDSUp:btc:1", Condition: "1", Token: "t", Side: "SELL", Shares: 10, Price: 0.7},
+		{At: at(3), Tag: "LockInDSDown:btc:2", Condition: "2", Token: "t", Side: "SELL", Shares: 10, Price: 0.4},
+		{At: at(4), Tag: "FairDeltaUp:btc:3", Condition: "3", Token: "t", Side: "BUY", Shares: 1, Price: 0.5},
+	}
+	series := Compute(events, t0, at(5))
+	groups := GroupSeries(series[1:], nil)
+	if len(groups) != 2 || groups[0].Series.Key != "FairDeltaUp" || groups[1].Series.Key != "LockInDS" || len(groups[1].Members) != 2 {
+		t.Fatalf("groups = %+v", groups)
+	}
+	near(t, "group pnl", groups[1].Series.Metrics.PnL, 1)
+	names := map[string]bool{"LockInDSUp": true, "LockInDSDown": true, "FollowUp": true, "Follow": true, "TopDown": true, "Up": true, "Down": true}
+	for name, want := range map[string]string{"LockInDSUp": "LockInDS", "LockInDSDown": "LockInDS", "FollowUp": "FollowUp", "TopDown": "TopDown", "Up": "Up"} {
+		if got := Prefix(name, names); got != want {
+			t.Fatalf("Prefix(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestLoadGroups(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.yaml")
 	body := "strategies:\n  - name: A\n    exclusive_group: g\n  - name: B\n"

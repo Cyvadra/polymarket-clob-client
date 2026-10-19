@@ -1,7 +1,9 @@
 // Command pnlreport rebuilds realized PnL from one executiond instance's
 // fills and settlement payouts, and sends a metrics table, the wallet curve
-// and one curve per strategy (the unique_tag prefix) to Telegram. Run it from
-// cron once per instance, pointing --env at that instance's executiond.env.
+// and one curve per strategy group to Telegram: strategies (the unique_tag
+// prefix) are joined by exclusive_group or, without one, as the Up and Down
+// sides of one name. Run it from cron once per instance, pointing --env at
+// that instance's executiond.env.
 package main
 
 import (
