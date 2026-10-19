@@ -47,6 +47,10 @@ STAGE_DIR=
 KEY_FILE="$PRIVATE_DIR/private-key.json"
 PASSPHRASE_FILE="$PRIVATE_DIR/private-key.pass"
 USE_KEY_FILE=0
+# Every binary shipped in a release. Only the ones whose sha256 differs from
+# the host's current release are uploaded; the rest are linked over from it.
+BINARIES=(executiond executiontest polykey pnlreport takerholdtest)
+CHANGED=()
 
 log() {
 	printf '[deploy:%s] %s\n' "$HOST" "$*"
@@ -182,12 +186,35 @@ build_bundle() {
 	log "testing source"
 	(cd "$REPO_ROOT" && go test ./...)
 	log "building $OS/$ARCH release $RELEASE_ID"
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/executiond" ./cmd/executiond)
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/executiontest" ./cmd/executiontest)
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/polykey" ./cmd/polykey)
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -o "$STAGE_DIR/pnlreport" ./cmd/pnlreport)
-	tar -C "$STAGE_DIR" -czf "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" executiond executiontest polykey pnlreport
-	(cd "$STAGE_DIR" && sha256sum "executiond-$RELEASE_ID.tar.gz" >"executiond-$RELEASE_ID.tar.gz.sha256")
+	# -buildvcs=false keeps the commit out of the binary, so a binary whose
+	# code did not change hashes the same across commits and is not re-sent.
+	local bin
+	for bin in "${BINARIES[@]}"; do
+		(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -trimpath -buildvcs=false -o "$STAGE_DIR/$bin" "./cmd/$bin")
+	done
+	(cd "$STAGE_DIR" && sha256sum "${BINARIES[@]}" >binaries.sha256)
+}
+
+# select_changed compares each built binary with the host's current release
+# and keeps in CHANGED only those that differ or are missing there. The
+# manifest still lists every binary, so the host verifies the whole release
+# it assembles, not just the uploaded part.
+select_changed() {
+	local remote bin hash
+	remote=$(ssh "$TARGET@$HOST" "cd '$INSTALL_ROOT/current' 2>/dev/null && sha256sum ${BINARIES[*]} 2>/dev/null" || true)
+	CHANGED=()
+	while read -r hash bin; do
+		if grep -qxF "$hash  $bin" <<<"$remote"; then
+			log "unchanged: $bin"
+		else
+			log "changed:   $bin"
+			CHANGED+=("$bin")
+		fi
+	done <"$STAGE_DIR/binaries.sha256"
+	if (( ${#CHANGED[@]} )); then
+		tar -C "$STAGE_DIR" -czf "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "${CHANGED[@]}"
+		(cd "$STAGE_DIR" && sha256sum "executiond-$RELEASE_ID.tar.gz" >"executiond-$RELEASE_ID.tar.gz.sha256")
+	fi
 }
 
 verify_target() {
@@ -204,10 +231,14 @@ upload_and_activate() {
 	if (( USE_KEY_FILE )); then
 		key_material=("$KEY_FILE" "$PASSPHRASE_FILE")
 	fi
-	scp "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256" \
+	local bundle=()
+	if (( ${#CHANGED[@]} )); then
+		bundle=("$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256")
+	fi
+	scp ${bundle[@]+"${bundle[@]}"} "$STAGE_DIR/binaries.sha256" \
 		"$PRIVATE_DIR/executiond.env" ${key_material[@]+"${key_material[@]}"} \
 		"$TARGET@$HOST:$remote_stage/"
-	ssh "$TARGET@$HOST" "RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_NAME='$APP_NAME' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' bash -s" <<'REMOTE'
+	ssh "$TARGET@$HOST" "BINARIES='${BINARIES[*]}' RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_NAME='$APP_NAME' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 
 release_dir="$INSTALL_ROOT/releases/$RELEASE_ID"
@@ -323,13 +354,27 @@ install -d -o root -g root -m 0755 "$INSTALL_ROOT" "$INSTALL_ROOT/releases"
 # material under $CONFIG_ROOT, so the directory is group-owned by $APP_GROUP.
 install -d -o root -g "$APP_GROUP" -m 0750 "$CONFIG_ROOT"
 install -d -o "$APP_USER" -g "$APP_GROUP" -m 0750 "$DATA_ROOT"
-(cd "$REMOTE_STAGE" && sha256sum -c "executiond-$RELEASE_ID.tar.gz.sha256")
-tar -C "$REMOTE_STAGE" -xzf "$REMOTE_STAGE/executiond-$RELEASE_ID.tar.gz"
+if [[ -f $REMOTE_STAGE/executiond-$RELEASE_ID.tar.gz ]]; then
+	(cd "$REMOTE_STAGE" && sha256sum -c "executiond-$RELEASE_ID.tar.gz.sha256")
+	tar -C "$REMOTE_STAGE" -xzf "$REMOTE_STAGE/executiond-$RELEASE_ID.tar.gz"
+fi
 install -d -o root -g root -m 0755 "$release_dir"
-install -o root -g root -m 0755 "$REMOTE_STAGE/executiond" "$release_dir/executiond"
-install -o root -g root -m 0755 "$REMOTE_STAGE/executiontest" "$release_dir/executiontest"
-install -o root -g root -m 0755 "$REMOTE_STAGE/polykey" "$release_dir/polykey"
-install -o root -g root -m 0755 "$REMOTE_STAGE/pnlreport" "$release_dir/pnlreport"
+# A binary that was uploaded is installed fresh; one that was not is
+# hard-linked from the current release (releases are never modified in
+# place, so sharing the inode is safe). The manifest check then proves the
+# assembled release is exactly what was built.
+for bin in $BINARIES; do
+	if [[ -f $REMOTE_STAGE/$bin ]]; then
+		install -o root -g root -m 0755 "$REMOTE_STAGE/$bin" "$release_dir/$bin"
+	elif [[ -f $current_link/$bin ]]; then
+		ln -f "$(readlink -f "$current_link/$bin")" "$release_dir/$bin"
+	fi
+done
+(cd "$release_dir" && sha256sum --quiet -c "$REMOTE_STAGE/binaries.sha256") || {
+	echo "[$APP_NAME] ERROR: assembled release $release_dir does not match the built binaries" >&2
+	rm -rf "$release_dir"
+	exit 1
+}
 
 if [[ -L $current_link ]]; then
 	previous_release=$(readlink -f "$current_link")
@@ -414,6 +459,7 @@ main() {
 	require_private_bundle
 	verify_target
 	build_bundle
+	select_changed
 	upload_and_activate
 	log "release $RELEASE_ID is active"
 }
