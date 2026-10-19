@@ -107,63 +107,69 @@ func (f *fakeEquityStore) StrategyEquity(_ context.Context, id int64) ([]store.S
 	return f.saved[id-1].Strategies, nil
 }
 
-func (f *fakeEquityStore) PeakStrategyIndexSince(_ context.Context, strategy string, since time.Time) (string, bool, error) {
-	peak, ok := 0.0, false
-	var before *store.StrategyEquityRecord
-	for _, r := range f.saved {
-		for _, part := range r.Strategies {
-			if part.Strategy != strategy {
-				continue
-			}
-			if r.TakenAt.Before(since) {
-				before = &part
-				continue
-			}
-			v, _ := strconv.ParseFloat(part.TradeIndex, 64)
-			if !ok || v > peak {
-				peak, ok = v, true
-			}
-		}
-	}
-	if before != nil {
-		v, _ := strconv.ParseFloat(before.TradeIndex, 64)
-		if !ok || v > peak {
-			peak, ok = v, true
-		}
-	} else if ok {
-		// First seen after since: it stood at 1 before its first interval.
-		peak = max(peak, 1)
-	}
-	return strconv.FormatFloat(peak, 'f', -1, 64), ok, nil
-}
-
 // TradingPnLSince lists the saved intervals' dollars; the Postgres store's
 // test covers the rules for gaps in a strategy's split.
-func (f *fakeEquityStore) TradingPnLSince(_ context.Context, strategy string, since time.Time, snapshotID int64) ([]store.TradingPnL, bool, error) {
+func (f *fakeEquityStore) TradingPnLSince(_ context.Context, strategy string, prefix bool, since time.Time, snapshotID int64) ([]store.TradingPnL, bool, error) {
 	num := func(text string) float64 { v, _ := strconv.ParseFloat(text, 64); return v }
-	var intervals []store.TradingPnL
+	return fakeIntervals(f, strategy, prefix, since, snapshotID, func(i int, now, prior store.StrategyEquityRecord) float64 {
+		if strategy == "" {
+			r := f.saved[i]
+			return num(r.EquityUSD) - num(f.saved[i-1].EquityUSD) - num(r.ExternalFlowUSD)
+		}
+		return num(now.TradeCashUSD) + num(now.PositionsUSD) - num(prior.PositionsUSD)
+	}, func(id int64, sum float64, flow string) store.TradingPnL {
+		return store.TradingPnL{SnapshotID: id, PnLUSD: strconv.FormatFloat(sum, 'f', -1, 64), ExternalFlowUSD: flow}
+	})
+}
+
+func (f *fakeEquityStore) StrategyReturnsSince(_ context.Context, strategy string, prefix bool, since time.Time, snapshotID int64) ([]float64, bool, error) {
+	num := func(text string) float64 { v, _ := strconv.ParseFloat(text, 64); return v }
+	return fakeIntervals(f, strategy, prefix, since, snapshotID, func(_ int, now, prior store.StrategyEquityRecord) float64 {
+		before := 1.0
+		if prior.TradeIndex != "" {
+			before = num(prior.TradeIndex)
+		}
+		if before == 0 {
+			return 0
+		}
+		return num(now.TradeIndex)/before - 1
+	}, func(_ int64, sum float64, _ string) float64 { return sum })
+}
+
+// fakeIntervals adds value over the parts strategy matches in each saved
+// interval, nothing for the first, and lists them from since through
+// snapshotID as row makes them. Strategy "" is the wallet.
+func fakeIntervals[T any](f *fakeEquityStore, strategy string, prefix bool, since time.Time, snapshotID int64,
+	value func(i int, now, prior store.StrategyEquityRecord) float64, row func(id int64, sum float64, flow string) T) ([]T, bool, error) {
+	matches := func(name string) bool { return name == strategy || (prefix && strings.HasPrefix(name, strategy)) }
+	var rows []T
 	for i, r := range f.saved {
-		var pnl float64
-		part, found := strategyPart(r.Strategies, strategy)
-		switch {
-		case strategy != "" && !found:
+		var sum float64
+		found := strategy == ""
+		for _, part := range r.Strategies {
+			if !matches(part.Strategy) {
+				continue
+			}
+			found = true
+			if i > 0 {
+				prior, _ := strategyPart(f.saved[i-1].Strategies, part.Strategy)
+				sum += value(i, part, prior)
+			}
+		}
+		if strategy == "" && i > 0 {
+			sum = value(i, store.StrategyEquityRecord{}, store.StrategyEquityRecord{})
+		}
+		if !found {
 			if r.ID == snapshotID {
 				return nil, false, nil
 			}
 			continue
-		case i == 0:
-		case strategy == "":
-			pnl = num(r.EquityUSD) - num(f.saved[i-1].EquityUSD) - num(r.ExternalFlowUSD)
-		default:
-			prior, _ := strategyPart(f.saved[i-1].Strategies, strategy)
-			pnl = num(part.TradeCashUSD) + num(part.PositionsUSD) - num(prior.PositionsUSD)
 		}
 		if !r.TakenAt.Before(since) {
-			intervals = append(intervals, store.TradingPnL{SnapshotID: r.ID,
-				PnLUSD: strconv.FormatFloat(pnl, 'f', -1, 64), ExternalFlowUSD: r.ExternalFlowUSD})
+			rows = append(rows, row(r.ID, sum, r.ExternalFlowUSD))
 		}
 		if r.ID == snapshotID {
-			return intervals, !r.TakenAt.Before(since), nil
+			return rows, !r.TakenAt.Before(since), nil
 		}
 	}
 	return nil, false, nil
@@ -580,6 +586,43 @@ func TestDrawdownLimitsGiveTheDefaultToStrategiesWithoutALimit(t *testing.T) {
 	}
 	if suspended, _ := limits.Suspended("d"); suspended {
 		t.Fatal("a strategy that never traded is held back")
+	}
+}
+
+func TestDrawdownLimitsAddUpAPrefixGroup(t *testing.T) {
+	r, s, wallet := newTestRecorder()
+	// LockUp and LockDown each lose $6 of a $100 wallet: 6% apiece, 12% together.
+	recordSplit(t, r, s, wallet, 0, 40, map[string]float64{"LockUp": 20, "LockDown": 20, "Other": 20}, map[string]float64{"LockUp": -20, "LockDown": -20, "Other": -20})
+	recordSplit(t, r, s, wallet, 1, 40, map[string]float64{"LockUp": 14, "LockDown": 14, "Other": 20}, nil)
+	for _, limit := range []DrawdownLimit{DollarLimit(10), FractionLimit(0.1)} {
+		t.Run(limit.String(), func(t *testing.T) {
+			group, err := NewStrategyGroupDrawdownGuard(s, "Lock", recordStart, limit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			limits := NewDrawdownLimits(s, recordStart, nil, group)
+			if err := limits.SetStrategyDefault(FractionLimit(0.01), func(string) bool { return true }); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := limits.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, guard := range limits.Guards() {
+				names = append(names, guard.Strategy())
+			}
+			if strings.Join(names, ",") != "Lock,Other" {
+				t.Fatalf("guards %v: group members took the default", names)
+			}
+			for _, name := range []string{"LockUp", "LockDown", "LockNew"} {
+				if suspended, _ := limits.Suspended(name); !suspended {
+					t.Fatalf("%s is in a group past its limit and not held back (%s)", name, group.Status())
+				}
+			}
+			if suspended, _ := limits.Suspended("Other"); suspended {
+				t.Fatal("a strategy outside the group is held back")
+			}
+		})
 	}
 }
 

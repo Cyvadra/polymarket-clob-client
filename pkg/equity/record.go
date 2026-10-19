@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -317,12 +318,15 @@ func (l DrawdownLimit) String() string {
 // after each. Recovery needs trading to climb back, or a later start.
 //
 // A guard made by NewStrategyDrawdownGuard measures one strategy's trading
-// instead, and holds back only that strategy.
+// instead, and holds back only that strategy; one made by
+// NewStrategyGroupDrawdownGuard measures every strategy starting with a
+// prefix together, and holds back all of them.
 type DrawdownGuard struct {
 	store    store.EquityStore
 	start    time.Time
 	limit    DrawdownLimit
 	strategy string
+	group    bool // strategy is a name prefix
 
 	mu       sync.RWMutex
 	drawdown float64 // a fraction of the peak, or dollars, as the limit is
@@ -352,13 +356,37 @@ func NewStrategyDrawdownGuard(s store.EquityStore, strategy string, start time.T
 	return guard, nil
 }
 
-// Strategy is the strategy the guard measures, empty for the whole wallet.
+// NewStrategyGroupDrawdownGuard measures the strategies whose names start
+// with prefix as one: their dollars are added, and a fraction limit is read on
+// their group index; see GroupIndexDrawdown.
+func NewStrategyGroupDrawdownGuard(s store.EquityStore, prefix string, start time.Time, limit DrawdownLimit) (*DrawdownGuard, error) {
+	guard, err := NewStrategyDrawdownGuard(s, prefix, start, limit)
+	if err != nil {
+		return nil, err
+	}
+	guard.group = true
+	return guard, nil
+}
+
+// covers reports whether the guard measures strategy.
+func (g *DrawdownGuard) covers(strategy string) bool {
+	if g.group {
+		return strings.HasPrefix(strategy, g.strategy)
+	}
+	return strategy == g.strategy
+}
+
+// Strategy is the strategy, or for a group the prefix, the guard measures,
+// empty for the whole wallet.
 func (g *DrawdownGuard) Strategy() string { return g.strategy }
 
 // Label names what the guard limits, for logs and suspension reasons.
 func (g *DrawdownGuard) Label() string {
 	if g.strategy == "" {
 		return "trading drawdown"
+	}
+	if g.group {
+		return fmt.Sprintf("strategy group %q drawdown", g.strategy)
 	}
 	return fmt.Sprintf("strategy %q drawdown", g.strategy)
 }
@@ -371,12 +399,11 @@ func (g *DrawdownGuard) Refresh(ctx context.Context) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return g.refresh(ctx, latest, ok, nil)
+	return g.refresh(ctx, latest, ok)
 }
 
-// refresh is Refresh given the latest snapshot, and for a strategy guard its
-// split when the caller has it already.
-func (g *DrawdownGuard) refresh(ctx context.Context, latest store.EquitySnapshotRecord, ok bool, parts []store.StrategyEquityRecord) (float64, error) {
+// refresh is Refresh given the latest snapshot.
+func (g *DrawdownGuard) refresh(ctx context.Context, latest store.EquitySnapshotRecord, ok bool) (float64, error) {
 	read := g.readFraction
 	if g.limit.Dollars() {
 		read = g.readDollars
@@ -384,7 +411,7 @@ func (g *DrawdownGuard) refresh(ctx context.Context, latest store.EquitySnapshot
 	drawdown := 0.0
 	if ok && !latest.TakenAt.Before(g.start) {
 		var err error
-		if drawdown, err = read(ctx, latest, parts); err != nil {
+		if drawdown, err = read(ctx, latest); err != nil {
 			return 0, err
 		}
 	}
@@ -394,24 +421,15 @@ func (g *DrawdownGuard) refresh(ctx context.Context, latest store.EquitySnapshot
 	return drawdown, nil
 }
 
-func (g *DrawdownGuard) readFraction(ctx context.Context, latest store.EquitySnapshotRecord, parts []store.StrategyEquityRecord) (float64, error) {
-	var err error
-	ok := true
-	indexText, peakText := latest.TradeIndex, ""
-	if g.strategy == "" {
-		peakText, ok, err = g.store.PeakTradeIndexSince(ctx, g.start)
-	} else {
-		if parts == nil {
-			if parts, err = g.store.StrategyEquity(ctx, latest.ID); err != nil {
-				return 0, err
-			}
+func (g *DrawdownGuard) readFraction(ctx context.Context, latest store.EquitySnapshotRecord) (float64, error) {
+	if g.strategy != "" {
+		returns, ok, err := g.store.StrategyReturnsSince(ctx, g.strategy, g.group, g.start, latest.ID)
+		if err != nil || !ok {
+			return 0, err
 		}
-		indexText, ok = indexIn(parts, g.strategy)
-		if !ok {
-			return 0, nil
-		}
-		peakText, ok, err = g.store.PeakStrategyIndexSince(ctx, g.strategy, g.start)
+		return GroupIndexDrawdown(returns), nil
 	}
+	peakText, ok, err := g.store.PeakTradeIndexSince(ctx, g.start)
 	if err != nil || !ok {
 		return 0, err
 	}
@@ -419,15 +437,15 @@ func (g *DrawdownGuard) readFraction(ctx context.Context, latest store.EquitySna
 	if err != nil {
 		return 0, fmt.Errorf("peak trade index: %w", err)
 	}
-	index, err := decimal.NonNegativeFloat(indexText)
+	index, err := decimal.NonNegativeFloat(latest.TradeIndex)
 	if err != nil {
 		return 0, fmt.Errorf("trade index: %w", err)
 	}
 	return Drawdown(peak, index), nil
 }
 
-func (g *DrawdownGuard) readDollars(ctx context.Context, latest store.EquitySnapshotRecord, _ []store.StrategyEquityRecord) (float64, error) {
-	intervals, ok, err := g.store.TradingPnLSince(ctx, g.strategy, g.start, latest.ID)
+func (g *DrawdownGuard) readDollars(ctx context.Context, latest store.EquitySnapshotRecord) (float64, error) {
+	intervals, ok, err := g.store.TradingPnLSince(ctx, g.strategy, g.group, g.start, latest.ID)
 	if err != nil || !ok {
 		return 0, err
 	}
@@ -468,15 +486,17 @@ func DollarDrawdown(intervals []store.TradingPnL) (float64, error) {
 	return max(peak-total, 0), nil
 }
 
-// indexIn is the strategy's index in parts. It reports false when the
-// strategy is not there, having never traded.
-func indexIn(parts []store.StrategyEquityRecord, strategy string) (string, bool) {
-	for _, part := range parts {
-		if part.Strategy == strategy {
-			return part.TradeIndex, true
-		}
+// GroupIndexDrawdown chains returns, each interval's return of a strategy or
+// group, into an index from 1 before the first, and is how far it ends below
+// its highest value, as a fraction. Every strategy's return in an interval is
+// over the same wallet base, so a group's is the sum of its members'.
+func GroupIndexDrawdown(returns []float64) float64 {
+	index, peak := 1.0, 1.0
+	for _, r := range returns {
+		index = max(index*(1+r), 0)
+		peak = max(peak, index)
 	}
-	return "", false
+	return Drawdown(peak, index)
 }
 
 // Suspended reports whether new positions are held back, and why.
@@ -507,8 +527,9 @@ func (g *DrawdownGuard) measured() string {
 }
 
 // DrawdownLimits holds back opens while the wallet's drawdown is over its
-// limit, and a strategy's opens while that strategy's is over its own. With a
-// default set, a strategy that has no limit of its own gets the default once
+// limit, and a strategy's opens while that strategy's, or its group's, is
+// over its own. With a default set, a strategy in no group and with no limit
+// of its own gets the default once
 // it first appears in a snapshot's split; one that has never traded has no
 // drawdown to limit.
 type DrawdownLimits struct {
@@ -595,7 +616,7 @@ func (l *DrawdownLimits) Refresh(ctx context.Context) ([]*DrawdownGuard, error) 
 		return nil, err
 	}
 	var parts []store.StrategyEquityRecord
-	if ok && (defaulted || l.fractionStrategies()) {
+	if ok && defaulted {
 		if parts, err = l.store.StrategyEquity(ctx, latest.ID); err != nil {
 			return nil, err
 		}
@@ -611,7 +632,7 @@ func (l *DrawdownLimits) Refresh(ctx context.Context) ([]*DrawdownGuard, error) 
 	}
 	var refreshed []*DrawdownGuard
 	for _, guard := range l.Guards() {
-		if _, err := guard.refresh(ctx, latest, ok, parts); err != nil {
+		if _, err := guard.refresh(ctx, latest, ok); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -629,7 +650,7 @@ func (l *DrawdownLimits) addDefaults(parts []store.StrategyEquityRecord) error {
 	var errs []error
 	for _, part := range parts {
 		name := part.Strategy
-		if name == "" || l.strategies[name] != nil || (l.covers != nil && !l.covers(name)) {
+		if name == "" || l.guardFor(name) != nil || (l.covers != nil && !l.covers(name)) {
 			continue
 		}
 		guard, err := NewStrategyDrawdownGuard(l.store, name, l.start, l.defaultLimit)
@@ -646,19 +667,6 @@ func (l *DrawdownLimits) addDefaults(parts []store.StrategyEquityRecord) error {
 	return errors.Join(errs...)
 }
 
-// fractionStrategies reports whether a strategy guard reads the split's
-// index, which only fraction limits do.
-func (l *DrawdownLimits) fractionStrategies() bool {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for _, guard := range l.strategies {
-		if !guard.limit.Dollars() {
-			return true
-		}
-	}
-	return false
-}
-
 // Suspended reports whether opens for strategy are held back, and why.
 func (l *DrawdownLimits) Suspended(strategy string) (bool, string) {
 	if l.wallet != nil {
@@ -667,10 +675,25 @@ func (l *DrawdownLimits) Suspended(strategy string) (bool, string) {
 		}
 	}
 	l.mu.RLock()
-	guard, ok := l.strategies[strategy]
+	guard := l.guardFor(strategy)
 	l.mu.RUnlock()
-	if ok {
+	if guard != nil {
 		return guard.Suspended()
 	}
 	return false, ""
+}
+
+// guardFor is the guard measuring strategy, its own or its group's, or nil;
+// l.mu must be held. Configured groups do not overlap, and a strategy in one
+// gets no default guard, so at most one matches.
+func (l *DrawdownLimits) guardFor(strategy string) *DrawdownGuard {
+	if guard, ok := l.strategies[strategy]; ok {
+		return guard
+	}
+	for _, guard := range l.strategies {
+		if guard.covers(strategy) {
+			return guard
+		}
+	}
+	return nil
 }

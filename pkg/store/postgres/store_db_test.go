@@ -919,8 +919,8 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 		t.Fatalf("flow after the latest snapshot %q, %v", flow, err)
 	}
 
-	// The split by strategy is saved with its snapshot, and its peak is read
-	// the same way.
+	// The split by strategy is saved with its snapshot, and its returns chain
+	// into the index it recorded: 1.3, then 0.9, 0.4/1.3 below the peak.
 	strategy := "strategy-" + lane.tag
 	for i, index := range []string{"1.3", "0.9"} {
 		record := store.EquitySnapshotRecord{
@@ -940,19 +940,19 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 	if err != nil || len(parts) != 1 || parts[0].Strategy != strategy || parts[0].TradeIndex != "0.900000000000000000" {
 		t.Fatalf("strategy equity %+v, %v", parts, err)
 	}
-	peak, ok, err = s.PeakStrategyIndexSince(ctx, strategy, start)
-	if got, _ := strconv.ParseFloat(peak, 64); err != nil || !ok || got != 1.3 {
-		t.Fatalf("strategy peak %s, %v, %v; want 1.3", peak, ok, err)
+	returns, ok, err := s.StrategyReturnsSince(ctx, strategy, false, start, latest.ID)
+	if got := equity.GroupIndexDrawdown(returns); err != nil || !ok || math.Abs(got-0.4/1.3) > 1e-9 {
+		t.Fatalf("strategy index drawdown %v from %v, %v, %v; want %v", got, returns, ok, err, 0.4/1.3)
 	}
-	if _, ok, err := s.PeakStrategyIndexSince(ctx, "other-"+lane.tag, start); err != nil || ok {
-		t.Fatalf("untraded strategy peak: ok=%v err=%v", ok, err)
+	if _, ok, err := s.StrategyReturnsSince(ctx, "other-"+lane.tag, true, start, latest.ID); err != nil || ok {
+		t.Fatalf("untraded strategy returns: ok=%v err=%v", ok, err)
 	}
 
 	// The dollar loss runs each interval's profit from the start. The
 	// strategy made $1 (-1 cash, +2 held) then lost it (-1 cash, +0 held).
 	lossAt := func(strategy string, id int64) float64 {
 		t.Helper()
-		intervals, ok, err := s.TradingPnLSince(ctx, strategy, start, id)
+		intervals, ok, err := s.TradingPnLSince(ctx, strategy, false, start, id)
 		if err != nil || !ok {
 			t.Fatalf("trading pnl %q at %d: %v %v", strategy, id, ok, err)
 		}
@@ -994,8 +994,41 @@ func TestEquitySnapshotsTradeCashAndPeak(t *testing.T) {
 	if got := lossAt("", latest.ID); got != 0 {
 		t.Fatalf("wallet loss at an earlier snapshot %v, want 0", got)
 	}
-	if _, ok, err := s.TradingPnLSince(ctx, "other-"+lane.tag, start, last.ID); err != nil || ok {
+	if _, ok, err := s.TradingPnLSince(ctx, "other-"+lane.tag, true, start, last.ID); err != nil || ok {
 		t.Fatalf("untraded strategy loss: ok=%v err=%v", ok, err)
+	}
+
+	// A prefix adds up its strategies: strategy holds still and gains 10% of
+	// its index, strategy-b is new, makes $2 and gains 5%.
+	record := store.EquitySnapshotRecord{
+		TakenAt: start.Add(6 * time.Minute), Reason: reason, CashUSD: "0", PositionsUSD: "6", EquityUSD: "6",
+		TradeCashUSD: "0", ExternalFlowUSD: "0", TradeIndex: "1",
+		Strategies: []store.StrategyEquityRecord{
+			{Strategy: strategy, TradeCashUSD: "0", PositionsUSD: "3", TradeIndex: "1.1"},
+			{Strategy: strategy + "-b", TradeCashUSD: "-1", PositionsUSD: "3", TradeIndex: "1.05"},
+		},
+	}
+	grouped, err := s.RecordEquitySnapshot(ctx, record, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []bool{false, true} {
+		intervals, ok, err := s.TradingPnLSince(ctx, strategy, prefix, start, grouped.ID)
+		if err != nil || !ok {
+			t.Fatalf("pnl prefix=%v: %v %v", prefix, ok, err)
+		}
+		returns, ok, err := s.StrategyReturnsSince(ctx, strategy, prefix, start, grouped.ID)
+		if err != nil || !ok {
+			t.Fatalf("returns prefix=%v: %v %v", prefix, ok, err)
+		}
+		pnl, _ := strconv.ParseFloat(intervals[len(intervals)-1].PnLUSD, 64)
+		wantPnL, wantReturn := 0.0, 0.1
+		if prefix {
+			wantPnL, wantReturn = 2, 0.15
+		}
+		if pnl != wantPnL || math.Abs(returns[len(returns)-1]-wantReturn) > 1e-9 {
+			t.Fatalf("prefix=%v: last pnl %v, return %v; want %v, %v", prefix, pnl, returns[len(returns)-1], wantPnL, wantReturn)
+		}
 	}
 }
 

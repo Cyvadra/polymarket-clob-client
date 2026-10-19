@@ -5,7 +5,9 @@ import (
 	"strings"
 )
 
-// Allowlist holds the strategies one executiond trades for. Several
+// Allowlist holds the strategy name prefixes one executiond trades for: an
+// entry allows every strategy whose name starts with it, so an exact name
+// allows itself. Several
 // executiond instances share one NATS bus and each receives every command, so
 // a command for a strategy outside the list belongs to another wallet.
 type Allowlist struct {
@@ -17,10 +19,12 @@ type Allowlist struct {
 // Wildcard is the allowlist entry that allows every strategy.
 const Wildcard = "*"
 
-// NewAllowlist builds an allowlist from strategy names. Names are trimmed and
-// matched exactly; an empty list is an error, so trading every strategy takes
+// NewAllowlist builds an allowlist from strategy name prefixes. Entries are
+// trimmed and matched case-sensitively as prefixes; an empty list is an error, so trading every strategy takes
 // an explicit "*". A wildcard wallet repeats the trades of every other wallet
-// on the bus, so "*" must stand alone.
+// on the bus, so "*" must stand alone. Nor may one entry be a prefix of
+// another: the longer would do nothing, and a list written when names
+// matched exactly would silently widen.
 func NewAllowlist(names []string) (*Allowlist, error) {
 	list := &Allowlist{allowed: make(map[string]struct{}, len(names))}
 	for _, name := range names {
@@ -43,6 +47,13 @@ func NewAllowlist(names []string) (*Allowlist, error) {
 		}
 		list.wildcard = true
 	}
+	for i, name := range list.names {
+		for _, other := range list.names[:i] {
+			if strings.HasPrefix(name, other) || strings.HasPrefix(other, name) {
+				return nil, fmt.Errorf("allowed strategies %q and %q overlap: each entry is a name prefix, so the longer one adds nothing", other, name)
+			}
+		}
+	}
 	return list, nil
 }
 
@@ -51,7 +62,7 @@ func ParseAllowlist(value string) (*Allowlist, error) {
 	return NewAllowlist(strings.Split(value, ","))
 }
 
-// Allows reports whether strategy is traded here. A blank name is never
+// Allows reports whether strategy is traded here: some entry is a prefix of it. A blank name is never
 // allowed, not even by a wildcard.
 func (a *Allowlist) Allows(strategy string) bool {
 	if a == nil || strategy == "" {
@@ -60,14 +71,18 @@ func (a *Allowlist) Allows(strategy string) bool {
 	if a.wildcard {
 		return true
 	}
-	_, ok := a.allowed[strategy]
-	return ok
+	for _, prefix := range a.names {
+		if strings.HasPrefix(strategy, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Wildcard reports whether every strategy is allowed.
 func (a *Allowlist) Wildcard() bool { return a != nil && a.wildcard }
 
-// Names returns the allowed strategies in the order they were configured,
+// Names returns the allowed prefixes in the order they were configured,
 // or just "*" for a wildcard.
 func (a *Allowlist) Names() []string {
 	if a == nil {

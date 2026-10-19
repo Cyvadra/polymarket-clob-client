@@ -45,7 +45,7 @@ type config struct {
 	EquityMaxQuoteAge          time.Duration
 	MaxEquityFraction          float64
 	MaxDrawdown                equity.DrawdownLimit
-	StrategyMaxDrawdown        map[string]equity.DrawdownLimit
+	StrategyMaxDrawdown        map[string]equity.DrawdownLimit // by strategy name prefix
 	StrategyDefaultMaxDrawdown equity.DrawdownLimit
 	DrawdownStart              time.Time
 	EquityFlowThresholdUSD     float64
@@ -556,11 +556,12 @@ func parseDrawdownLimit(value string) (limit equity.DrawdownLimit, bare bool, er
 	return limit, bare, nil
 }
 
-// parseStrategyLimits reads comma-separated name:limit pairs, each limit as
-// parseDrawdownLimit reads it. A name is split from its limit at the last
-// colon, so it may hold one itself, and
-// must be one of allowed: a misspelt name would otherwise leave its strategy
-// without a limit. It also returns the limits written as bare fractions.
+// parseStrategyLimits reads comma-separated prefix:limit pairs, each limit as
+// parseDrawdownLimit reads it. Every strategy starting with a prefix counts
+// toward that prefix's one limit, so prefixes may not overlap. A prefix is
+// split from its limit at the last colon, so it may hold one itself, and
+// must be covered by allowed: a misspelt one would otherwise leave its
+// strategies without a limit. It also returns the limits written as bare fractions.
 func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]equity.DrawdownLimit, []string, error) {
 	limits := map[string]equity.DrawdownLimit{}
 	var bares []string
@@ -585,11 +586,17 @@ func parseStrategyLimits(value string, allowed *nats.Allowlist) (map[string]equi
 			return nil, nil, fmt.Errorf("%q: set a limit for every strategy with EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN", entry)
 		case err != nil:
 			return nil, nil, fmt.Errorf("strategy %q: %w", name, err)
+		// Some entry is a prefix of name exactly when it allows the whole group.
 		case !allowed.Allows(name):
-			return nil, nil, fmt.Errorf("strategy %q is not in EXECUTION_ALLOWED_STRATEGIES", name)
+			return nil, nil, fmt.Errorf("strategy prefix %q is not covered by EXECUTION_ALLOWED_STRATEGIES", name)
 		}
 		if _, dup := limits[name]; dup {
-			return nil, nil, fmt.Errorf("strategy %q is listed twice", name)
+			return nil, nil, fmt.Errorf("strategy prefix %q is listed twice", name)
+		}
+		for other := range limits {
+			if strings.HasPrefix(name, other) || strings.HasPrefix(other, name) {
+				return nil, nil, fmt.Errorf("strategy prefixes %q and %q overlap; a strategy may count toward one limit only", other, name)
+			}
 		}
 		limits[name] = limit
 		if bare {
@@ -674,7 +681,7 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
 	return nil
 }
 
-// drawdownLimits builds the wallet's limit, if set, each listed strategy's,
+// drawdownLimits builds the wallet's limit, if set, each listed prefix group's,
 // and the default for the other strategies.
 func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits, error) {
 	var wallet *equity.DrawdownGuard
@@ -687,7 +694,7 @@ func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits,
 	}
 	var strategies []*equity.DrawdownGuard
 	for name, limit := range cfg.StrategyMaxDrawdown {
-		guard, err := equity.NewStrategyDrawdownGuard(s, name, cfg.DrawdownStart, limit)
+		guard, err := equity.NewStrategyGroupDrawdownGuard(s, name, cfg.DrawdownStart, limit)
 		if err != nil {
 			return nil, err
 		}

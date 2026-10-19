@@ -56,9 +56,34 @@ func TestParseAllowlistTrimsAndDropsDuplicates(t *testing.T) {
 	if !allowed.Allows("late-gap") || !allowed.Allows("momentum") {
 		t.Fatal("expected configured strategies to be allowed")
 	}
-	for _, name := range []string{"", "Late-Gap", "late-gap ", "other"} {
+	for _, name := range []string{"", "Late-Gap", "late-ga", "other"} {
 		if allowed.Allows(name) {
 			t.Fatalf("expected %q to be refused", name)
+		}
+	}
+}
+
+func TestAllowlistMatchesPrefixes(t *testing.T) {
+	allowed, err := ParseAllowlist("LockInDS,FairDelta")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, name := range []string{"LockInDS", "LockInDSUp", "FairDeltaDown"} {
+		if !allowed.Allows(name) {
+			t.Fatalf("expected %q to be allowed", name)
+		}
+	}
+	for _, name := range []string{"LockIn", "LockInUp", "Fair", "fairDeltaUp"} {
+		if allowed.Allows(name) {
+			t.Fatalf("expected %q to be refused", name)
+		}
+	}
+}
+
+func TestParseAllowlistRejectsNestedEntries(t *testing.T) {
+	for _, value := range []string{"momentum,momentum-v2", "LockInDS,FairDelta,LockIn"} {
+		if _, err := ParseAllowlist(value); err == nil {
+			t.Fatalf("expected %q to be rejected", value)
 		}
 	}
 }

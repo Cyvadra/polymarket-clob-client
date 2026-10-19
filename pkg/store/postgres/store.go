@@ -1729,34 +1729,6 @@ func (s *Store) LaneStrategies(ctx context.Context) (map[store.LaneKey]string, e
 	return lanes, nil
 }
 
-func (s *Store) PeakStrategyIndexSince(ctx context.Context, strategy string, since time.Time) (string, bool, error) {
-	var peak *string
-	err := s.pool.QueryRow(ctx, `
-		WITH s AS (
-			SELECT ss.trade_index, es.taken_at, es.id FROM equity_snapshot_strategies ss
-			JOIN equity_snapshots es ON es.id = ss.snapshot_id
-			WHERE ss.strategy = $1
-		)
-		SELECT MAX(trade_index)::text FROM (
-			SELECT trade_index FROM s WHERE taken_at >= $2
-			UNION ALL
-			(SELECT trade_index FROM s WHERE taken_at < $2 ORDER BY taken_at DESC, id DESC LIMIT 1)
-			UNION ALL
-			-- A strategy first seen after since stood at 1 before its first
-			-- interval, so a loss in that interval is still a drawdown.
-			SELECT 1::numeric WHERE EXISTS (SELECT 1 FROM s WHERE taken_at >= $2)
-			AND NOT EXISTS (SELECT 1 FROM s WHERE taken_at < $2)
-		) candidates
-	`, strategy, since).Scan(&peak)
-	if err != nil {
-		return "", false, fmt.Errorf("load peak strategy index: %w", err)
-	}
-	if peak == nil {
-		return "", false, nil
-	}
-	return *peak, true, nil
-}
-
 // pnlWindow bounds the snapshots a trading profit query reads: from the last
 // one before since, which LAG needs as the level ahead of the first counted
 // interval, through snapshot $2 in (taken_at, id) order, so a later snapshot
@@ -1780,30 +1752,52 @@ const walletPnLSQL = `
 		WINDOW w AS (ORDER BY taken_at, id)
 	)` + pnlTail
 
-// strategyPnLSQL counts nothing for an interval, as the recorder does, when
-// there is no earlier snapshot, or when the one before it recorded no split
-// while the wallet held positions: what the strategy held then is unknown. A
-// strategy missing from a split held nothing.
-const strategyPnLSQL = `
+// strategyIntervals pairs each snapshot's row of each strategy matched by $3,
+// exactly or with $4 as a prefix, with that strategy's row in the snapshot
+// before; skipped marks an interval nothing is counted for, as the recorder
+// does: there is no earlier snapshot, or the one before it recorded no split
+// while the wallet held positions, so what the strategy held then is unknown.
+// A strategy missing from a split held nothing.
+const strategyIntervals = `
 	WITH e AS (
 		SELECT id, taken_at, external_flow_usd, LAG(id) OVER w AS prev_id, LAG(positions_usd) OVER w AS prev_held
 		FROM equity_snapshots` + pnlWindow + `
 		WINDOW w AS (ORDER BY taken_at, id)
-	), s AS (
-		SELECT e.id, e.taken_at, e.external_flow_usd AS flow,
-			CASE WHEN e.prev_id IS NULL THEN 0
-				WHEN p.snapshot_id IS NULL AND e.prev_held > 0
-					AND NOT EXISTS (SELECT 1 FROM equity_snapshot_strategies x WHERE x.snapshot_id = e.prev_id) THEN 0
-				ELSE ss.trade_cash_usd + ss.positions_usd - COALESCE(p.positions_usd, 0) END AS pnl
+	), m AS (
+		SELECT e.id, e.taken_at, e.external_flow_usd AS flow, ss, p,
+			e.prev_id IS NULL OR (p.snapshot_id IS NULL AND e.prev_held > 0
+				AND NOT EXISTS (SELECT 1 FROM equity_snapshot_strategies x WHERE x.snapshot_id = e.prev_id)) AS skipped
 		FROM e
-		JOIN equity_snapshot_strategies ss ON ss.snapshot_id = e.id AND ss.strategy = $3
-		LEFT JOIN equity_snapshot_strategies p ON p.snapshot_id = e.prev_id AND p.strategy = $3
+		JOIN equity_snapshot_strategies ss ON ss.snapshot_id = e.id
+			AND (ss.strategy = $3 OR ($4 AND starts_with(ss.strategy, $3)))
+		LEFT JOIN equity_snapshot_strategies p ON p.snapshot_id = e.prev_id AND p.strategy = ss.strategy
+	)`
+
+// strategyPnLSQL adds the matched strategies' dollars in each interval.
+const strategyPnLSQL = strategyIntervals + `, s AS (
+		SELECT id, taken_at, flow,
+			SUM(CASE WHEN skipped THEN 0
+				ELSE (ss).trade_cash_usd + (ss).positions_usd - COALESCE((p).positions_usd, 0) END) AS pnl
+		FROM m GROUP BY id, taken_at, flow
 	)` + pnlTail
 
-func (s *Store) TradingPnLSince(ctx context.Context, strategy string, since time.Time, snapshotID int64) ([]store.TradingPnL, bool, error) {
+// strategyReturnsSQL adds the matched strategies' returns in each interval:
+// the change in each one's index, from 1 when it is new. One whose index had
+// fallen to 0 has nothing left to return.
+const strategyReturnsSQL = strategyIntervals + `, s AS (
+		SELECT id, taken_at,
+			SUM(CASE WHEN skipped OR COALESCE((p).trade_index, 1) = 0 THEN 0
+				ELSE (ss).trade_index / COALESCE((p).trade_index, 1) - 1 END) AS ret
+		FROM m GROUP BY id, taken_at
+	)
+	SELECT ret::float8 FROM s
+	WHERE taken_at >= $1 AND EXISTS (SELECT 1 FROM s WHERE id = $2 AND taken_at >= $1)
+	ORDER BY taken_at, id`
+
+func (s *Store) TradingPnLSince(ctx context.Context, strategy string, prefix bool, since time.Time, snapshotID int64) ([]store.TradingPnL, bool, error) {
 	query, args := walletPnLSQL, []any{since, snapshotID}
 	if strategy != "" {
-		query, args = strategyPnLSQL, append(args, strategy)
+		query, args = strategyPnLSQL, append(args, strategy, prefix)
 	}
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -1822,6 +1816,26 @@ func (s *Store) TradingPnLSince(ctx context.Context, strategy string, since time
 		return nil, false, fmt.Errorf("load trading pnl: %w", err)
 	}
 	return intervals, len(intervals) > 0, nil
+}
+
+func (s *Store) StrategyReturnsSince(ctx context.Context, strategy string, prefix bool, since time.Time, snapshotID int64) ([]float64, bool, error) {
+	rows, err := s.pool.Query(ctx, strategyReturnsSQL, since, snapshotID, strategy, prefix)
+	if err != nil {
+		return nil, false, fmt.Errorf("load strategy returns: %w", err)
+	}
+	defer rows.Close()
+	var returns []float64
+	for rows.Next() {
+		var r float64
+		if err := rows.Scan(&r); err != nil {
+			return nil, false, fmt.Errorf("scan strategy return: %w", err)
+		}
+		returns = append(returns, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("load strategy returns: %w", err)
+	}
+	return returns, len(returns) > 0, nil
 }
 
 const equitySnapshotColumns = `id, taken_at, reason, cash_usd::text, positions_usd::text, equity_usd::text,

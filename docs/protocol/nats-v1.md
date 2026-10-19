@@ -10,7 +10,7 @@
 
 ## Wallets and strategies
 
-Each `executiond` trades one wallet and a fixed list of strategies, set by `EXECUTION_ALLOWED_STRATEGIES`. Every instance on a shared NATS server receives every command, and acts only on those whose `strategy` is on its list. A strategy name is matched exactly, including case. An instance configured with `*` acts on every strategy and reports its allowed strategies as `["*"]`.
+Each `executiond` trades one wallet and a fixed list of strategies, set by `EXECUTION_ALLOWED_STRATEGIES`. Every instance on a shared NATS server receives every command, and acts only on those whose `strategy` starts with one of the name prefixes on its list. Prefixes match case-sensitively, so `LockInDS` allows `LockInDSUp` and `LockInDSDown`, and an exact name allows itself. No entry on one list is a prefix of another. An instance configured with `*` acts on every strategy and reports its allowed strategies as `["*"]`.
 
 A command for any other strategy is dropped without a result, an order event, or a log line. It belongs to another wallet, and a failure result would read as that wallet refusing the order. A command for a strategy that no instance allows therefore gets no answer at all: the strategy only sees a timeout.
 
@@ -25,7 +25,7 @@ Everything `executiond` publishes names the wallet it came from:
 | `strategy` | The `strategy` of the request that created the order. On open results, close results, and order events. |
 | `wallet_address` | The address that holds the funds: `POLYMARKET_MAKER_ADDRESS` (the proxy wallet) when set, otherwise the signer. |
 | `signer_address` | The EOA that signs the orders. Equal to `wallet_address` when no proxy wallet is used. |
-| `allowed_strategies` | The strategies the instance trades. On query replies only. |
+| `allowed_strategies` | The strategy name prefixes the instance trades: it trades every strategy that starts with one of them. Compare by prefix, not equality. On query replies only. |
 
 `wallet_address` and `signer_address` are on open results, close results, order events, position features, and both query replies. Attribute a result by `wallet_address` together with `unique_tag`: once one strategy runs on several wallets, `unique_tag` alone no longer identifies a lane.
 

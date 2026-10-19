@@ -143,6 +143,21 @@ func TestConfigFromEnvReadsAllowedStrategies(t *testing.T) {
 	}
 }
 
+func TestConfigFromEnvStrategyDrawdownPrefixes(t *testing.T) {
+	withEnv(t, map[string]string{
+		"EXECUTION_ALLOWED_STRATEGIES":    "LockIn,FairDelta",
+		"EXECUTION_STRATEGY_MAX_DRAWDOWN": "LockInDS:$80,LockInUS:$40,FairDelta:10%",
+		"EXECUTION_DRAWDOWN_START":        "2026-09-28",
+	})
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if len(cfg.StrategyMaxDrawdown) != 3 || cfg.StrategyMaxDrawdown["LockInDS"] != equity.DollarLimit(80) || cfg.StrategyMaxDrawdown["FairDelta"] != equity.FractionLimit(0.1) {
+		t.Fatalf("limits %+v", cfg.StrategyMaxDrawdown)
+	}
+}
+
 func TestConfigFromEnvStrategyDrawdownLimits(t *testing.T) {
 	withEnv(t, map[string]string{
 		"EXECUTION_ALLOWED_STRATEGIES":    "late-gap,momentum,ns:v2",
@@ -161,6 +176,8 @@ func TestConfigFromEnvStrategyDrawdownLimits(t *testing.T) {
 		"no start":    {"EXECUTION_DRAWDOWN_START": ""},
 		"not allowed": {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "Late-Gap:10%"},
 		"duplicate":   {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10%,late-gap:$20"},
+		"overlap":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10%,late:$20"},
+		"wider":       {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late:$20"},
 		"no limit":    {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap"},
 		"no name":     {"EXECUTION_STRATEGY_MAX_DRAWDOWN": ":10%"},
 		"bare":        {"EXECUTION_STRATEGY_MAX_DRAWDOWN": "late-gap:10"},
