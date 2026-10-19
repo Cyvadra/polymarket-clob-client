@@ -121,6 +121,7 @@ The published position is an execution view, not a settlement or redemption engi
 | repository root | The CLOB API client (`clobclient`) used by `executiond`. |
 | `cmd/executiond` | Composition root of the execution service. |
 | `cmd/executiontest` | Real-money NATS black-box lifecycle test. |
+| `cmd/takerholdtest` | Real-money probe: can a held taker order be canceled during the exchange's taker delay? Loads keys from env. |
 | `cmd/copy-trading`, `pkg/copytrading` | Standalone copy trader; see [Copy trading](#copy-trading). |
 | `internal/execution/protocol` | Go wire types private to `executiond`. The external protocol is [docs/protocol/nats-v1.md](docs/protocol/nats-v1.md). |
 | `pkg/accountfeed`, `pkg/executor`, `pkg/reconciler`, `pkg/store` | Service implementation packages, kept modular and testable. |

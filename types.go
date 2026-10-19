@@ -120,6 +120,23 @@ type OrderBook struct {
 	NegRisk      bool        `json:"neg_risk"`
 }
 
+// CancelResult is the exchange's answer to a cancel: the order IDs it
+// canceled, and the ones it refused keyed to the reason.
+type CancelResult struct {
+	Canceled    []string          `json:"canceled"`
+	NotCanceled map[string]string `json:"not_canceled"`
+}
+
+// Has reports whether orderID is among the canceled orders.
+func (r CancelResult) Has(orderID string) bool {
+	for _, id := range r.Canceled {
+		if strings.EqualFold(id, orderID) {
+			return true
+		}
+	}
+	return false
+}
+
 type BalanceAllowance struct {
 	Balance   string `json:"balance"`
 	Allowance string `json:"allowance"`

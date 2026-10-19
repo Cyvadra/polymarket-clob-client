@@ -177,3 +177,47 @@ func TestWarmMarketMetadataReportsFailures(t *testing.T) {
 		t.Fatal("expected an error for an empty token")
 	}
 }
+
+// CancelOrderResult surfaces the exchange's refusal reason and sends a
+// refused or failed cancel once: the caller paces its own retries.
+func TestCancelOrderResultReportsRefusalWithoutRetry(t *testing.T) {
+	var calls int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if r.Method != http.MethodDelete || r.URL.Path != "/order" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		switch n {
+		case 1:
+			_, _ = w.Write([]byte(`{"canceled":[],"not_canceled":{"0xabc":"order is pending"}}`))
+		case 2:
+			_, _ = w.Write([]byte(`{"canceled":["0xABC"],"not_canceled":{}}`))
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	refused, err := client.CancelOrderResult(context.Background(), "0xabc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused.Has("0xabc") || refused.NotCanceled["0xabc"] != "order is pending" {
+		t.Fatalf("unexpected refusal %+v", refused)
+	}
+	canceled, err := client.CancelOrderResult(context.Background(), "0xabc")
+	if err != nil || !canceled.Has("0xabc") {
+		t.Fatalf("expected cancel, got %+v %v", canceled, err)
+	}
+	if _, err := client.CancelOrderResult(context.Background(), "0xabc"); err == nil {
+		t.Fatal("expected error for 503")
+	}
+	if calls != 3 {
+		t.Fatalf("expected 3 requests (no retry), got %d", calls)
+	}
+}

@@ -75,6 +75,9 @@ type Request struct {
 	Trace bool
 	// SkipRateLimit sends the request without waiting for a limiter token.
 	SkipRateLimit bool
+	// NoRetry sends the request once even when its method is retried by
+	// default, for callers that pace their own retries.
+	NoRetry bool
 }
 
 func (c *Client) Do(ctx context.Context, spec Request, out any) error {
@@ -105,7 +108,7 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 		requestPath += "?" + requestURL.RawQuery
 	}
 	attempts := 1
-	if spec.Retryable || defaultRetryable(spec.Method, spec.Path) {
+	if !spec.NoRetry && (spec.Retryable || defaultRetryable(spec.Method, spec.Path)) {
 		attempts = c.attempts
 	}
 	var last error

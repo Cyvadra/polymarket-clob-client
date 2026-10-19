@@ -305,6 +305,22 @@ func (c *Client) clobMarket(ctx context.Context, conditionID string) (*Market, e
 	return market, nil
 }
 
+// TakerDelayEnabled reports whether conditionID holds marketable orders in
+// the exchange's taker-delay window before matching (/clob-markets "itode",
+// omitted when false). Such an order cannot be canceled while held.
+func (c *Client) TakerDelayEnabled(ctx context.Context, conditionID string) (bool, error) {
+	if conditionID == "" {
+		return false, fmt.Errorf("condition ID is required")
+	}
+	var out struct {
+		TakerDelay bool `json:"itode"`
+	}
+	if err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/clob-markets/" + url.PathEscape(conditionID)}, &out); err != nil {
+		return false, err
+	}
+	return out.TakerDelay, nil
+}
+
 // Markets pages GET /markets.
 //
 // Deprecated: the route is no longer in Polymarket's CLOB spec (2026-10-16);

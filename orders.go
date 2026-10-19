@@ -212,6 +212,22 @@ func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
 	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/order", Body: map[string]string{"orderID": orderID}, Headers: c.l2Headers}, &out)
 }
 
+// CancelOrderResult cancels orderID once, with no retry or rate-limit wait,
+// and returns the exchange's answer: an order it refused is listed in
+// NotCanceled with the reason. Callers that probe timing pace their own
+// retries.
+func (c *Client) CancelOrderResult(ctx context.Context, orderID string) (*CancelResult, error) {
+	if orderID == "" {
+		return nil, fmt.Errorf("order ID is required")
+	}
+	var out CancelResult
+	err := c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/order", Body: map[string]string{"orderID": orderID}, Headers: c.l2Headers, Trace: true, SkipRateLimit: true, NoRetry: true}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) CancelOrders(ctx context.Context, orderIDs []string) error {
 	if len(orderIDs) == 0 {
 		return fmt.Errorf("at least one order ID is required")

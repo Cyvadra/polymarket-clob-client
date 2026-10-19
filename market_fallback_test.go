@@ -38,3 +38,28 @@ func TestMarketFallsBackToCLOBMarkets(t *testing.T) {
 		t.Fatalf("fallback market=%+v err=%v", market, err)
 	}
 }
+
+// TakerDelayEnabled reads /clob-markets "itode", which is omitted when false.
+func TestTakerDelayEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/clob-markets/held":
+			_, _ = w.Write([]byte(`{"c":"held","itode":true}`))
+		case "/clob-markets/plain":
+			_, _ = w.Write([]byte(`{"c":"plain"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := New(Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]bool{"held": true, "plain": false} {
+		got, err := client.TakerDelayEnabled(context.Background(), id)
+		if err != nil || got != want {
+			t.Fatalf("%s: got %v %v, want %v", id, got, err, want)
+		}
+	}
+}
