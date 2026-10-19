@@ -37,6 +37,11 @@ type fakeStore struct {
 	// available/reserved accounting a close is sized against.
 	reservations map[string]store.ReservationRecord
 	released     []string
+
+	// streamObservedAt, when set, models the user stream moving the order
+	// to LIVE at that time before the submission response lands: the
+	// SUBMIT_ACKNOWLEDGED transition then conflicts.
+	streamObservedAt time.Time
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
@@ -97,6 +102,11 @@ func (s *fakeStore) PersistSignedOrder(_ context.Context, record store.SignedOrd
 	return nil
 }
 func (s *fakeStore) TransitionOrder(_ context.Context, order store.SignedOrderRecord, event statemachine.Event, matchedShares, exchangeOrderID, _ string) (store.SignedOrderRecord, error) {
+	if event == statemachine.EventSubmitAcknowledged && !s.streamObservedAt.IsZero() {
+		order.State, order.Revision, order.ExchangeOrderID, order.UpdatedAt = statemachine.StateLive, order.Revision+1, exchangeOrderID, s.streamObservedAt
+		s.order = order
+		return store.SignedOrderRecord{}, store.ErrConflict
+	}
 	transition, _, err := statemachine.Apply(order.State, event)
 	if err != nil {
 		return store.SignedOrderRecord{}, err

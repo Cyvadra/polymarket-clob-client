@@ -279,9 +279,11 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	}
 	// An open the market has already moved away from is refused before it is
 	// signed: once it reaches the book it may fill at once, and no cancel can
-	// take that back.
+	// take that back. The planner prices from the quote; the drift check
+	// reads the book when it has one (driftQuote).
 	drift, _ := tactics.ParseDrift(intent)
-	if mid, breached := tactics.DriftBreach(intent, drift, request.Quote, request.HasQuote, request.Now); breached {
+	quote, hasQuote := e.driftQuote(intent, request.Now)
+	if mid, breached := tactics.DriftBreach(intent, drift, quote, hasQuote, request.Now); breached {
 		return plannedChild{}, reject(protocol.ReasonSignalDrift, "mid %s moved more than %s against the signal %s before submission",
 			decimal.FormatPrice(mid), intent.MaxSignalDrift, intent.SignalPrice)
 	}
@@ -373,17 +375,30 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 	if updated.ExchangeOrderID != "" && response.OrderID != updated.ExchangeOrderID {
 		return e.markSubmitUnknown(ctx, updated, intent, "submission returned unexpected exchange order ID")
 	}
+	ackAt := e.now().UTC()
 	live, err := e.store.TransitionOrder(ctx, updated, statemachine.EventSubmitAcknowledged, "0", response.OrderID, "submit acknowledged")
-	if err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return e.resolveSubmitObservation(ctx, intent, child, response.OrderID)
+	switch {
+	case err == nil:
+		e.publishTransition(live, intent, "submit acknowledged")
+		e.settleFromResponse(ctx, intent, child, live, response)
+	case errors.Is(err, store.ErrConflict):
+		// The user stream saw the order live before the response landed and
+		// moved it on. The exchange acknowledged it then, not now: the rest
+		// window runs from that observation.
+		observedAt, err := e.resolveSubmitObservation(ctx, intent, child, response.OrderID)
+		if err != nil {
+			return err
 		}
+		if !observedAt.IsZero() && observedAt.Before(ackAt) {
+			ackAt = observedAt
+		}
+	default:
 		return fmt.Errorf("mark order live: %w", err)
 	}
-	e.publishTransition(live, intent, "submit acknowledged")
-	e.settleFromResponse(ctx, intent, child, live, response)
+	// Watched on either path: an order the stream acknowledged first used to
+	// skip this and rest until expires_at.
 	if createdAt, ok := ctx.Value(intentCreatedAtKey{}).(time.Time); ok {
-		e.watchOrder(intent, child.Sequence, createdAt, e.now().UTC())
+		e.watchOrder(intent, child.Sequence, createdAt, ackAt)
 	}
 	return nil
 }
@@ -464,16 +479,18 @@ func (e *Executor) reportError(err error) {
 // (the account user stream) already advanced the order past SUBMITTING before
 // the REST submission response returned. That observer already emits terminal
 // open results, so this path only verifies the concurrent observation matches
-// the exchange order we submitted and does not publish a second result.
-func (e *Executor) resolveSubmitObservation(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild, exchangeOrderID string) error {
+// the exchange order we submitted and does not publish a second result. It
+// returns when the observer moved the order, the earliest the exchange is
+// known to have acknowledged it.
+func (e *Executor) resolveSubmitObservation(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild, exchangeOrderID string) (observedAt time.Time, err error) {
 	current, err := e.store.OrderByIntent(ctx, intent.IntentID, child.Sequence)
 	if err != nil {
-		return fmt.Errorf("load concurrently observed order: %w", err)
+		return time.Time{}, fmt.Errorf("load concurrently observed order: %w", err)
 	}
 	if current.ExchangeOrderID != exchangeOrderID {
-		return fmt.Errorf("mark order live: %w", store.ErrConflict)
+		return time.Time{}, fmt.Errorf("mark order live: %w", store.ErrConflict)
 	}
-	return nil
+	return current.UpdatedAt.UTC(), nil
 }
 
 // isOrderRejected reports whether the exchange definitively refused the order.

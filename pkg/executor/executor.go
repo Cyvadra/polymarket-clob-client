@@ -48,9 +48,12 @@ type repository interface {
 }
 
 type Executor struct {
-	store   repository
-	clob    CLOB
-	quotes  QuoteProvider
+	store  repository
+	clob   CLOB
+	quotes QuoteProvider
+	// books is the top of each market's maintained order book, from
+	// pmm.market.levels, when the collector publishes it; nil otherwise.
+	books   QuoteProvider
 	now     func() time.Time
 	onError func(error)
 	publish protocol.ExecutionEventPublisher
@@ -117,6 +120,15 @@ func (e *Executor) SetOpenGate(gate OpenGate) {
 
 func (e *Executor) SetQuoteProvider(provider QuoteProvider) {
 	e.quotes = provider
+}
+
+// SetBookProvider gives the executor the top of each market's maintained
+// order book (pmm.market.levels). pmm.market.quotes moves on book frames and
+// on prints alike, and a print away from the book moves its mid without the
+// book having moved; the drift check reads this book first when it is fresh,
+// so an entry is not refused for a print the book never saw.
+func (e *Executor) SetBookProvider(provider QuoteProvider) {
+	e.books = provider
 }
 
 func (e *Executor) Init(context.Context) error { return nil }

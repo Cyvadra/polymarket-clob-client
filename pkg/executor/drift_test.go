@@ -378,3 +378,85 @@ func (s *fillOnReadStore) OrderByIntent(ctx context.Context, intentID string, ch
 	s.fakeStore.order.State = statemachine.StateFilled
 	return order, err
 }
+
+// An order the user stream reports live before the submission response lands
+// is still watched, and its rest window runs from that observation, not from
+// expires_at: 28 of 37 FairDelta cancels on 2026-10-18 rested the whole
+// 1.3s to expires_at for want of this.
+func TestSendOrderWatchesAnOrderTheStreamAcknowledgedFirst(t *testing.T) {
+	storer := restingDriftOpen()
+	storer.intent.MaxSignalDrift = ""
+	created := storer.intent.CreatedAt
+	observed := created.Add(120 * time.Millisecond)
+	now := created.Add(400 * time.Millisecond)
+	storer.streamObservedAt = observed
+	storer.order = store.SignedOrderRecord{IntentID: "open-1", ChildSequence: store.StrategyChildSequence, State: statemachine.StateSigned, Revision: 1, MatchedShares: "0", RequestedShares: "20"}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-open", Status: "live"}}
+	exec, err := New(storer, client, func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetEventPublisher(&recordingPublisher{})
+	intent := mapping.ExecutionIntent(storer.intent)
+	intent.Policy.RestAfterAckMillis = 350
+	intent.ExpiresAt = created.Add(2 * time.Second)
+	ctx := context.WithValue(context.Background(), intentCreatedAtKey{}, created)
+	child := plannedChild{Sequence: store.StrategyChildSequence, Shares: "20", Price: "0.53", TimeInForce: protocol.TimeInForceGTC}
+	if err := exec.submitOrder(ctx, intent, clobclient.SignedOrderV2{OrderID: "order-open"}, child, 1); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	watched, ok := exec.watched[orderKey{"open-1", store.StrategyChildSequence}]
+	if !ok {
+		t.Fatal("expected the order watched after the stream's acknowledgement")
+	}
+	if want := observed.Add(350 * time.Millisecond); !watched.deadline.Equal(want) {
+		t.Fatalf("deadline %v, want the rest window from the stream's observation %v", watched.deadline, want)
+	}
+}
+
+// The drift check reads the maintained book before the quote stream: a print
+// away from the book moves the quote's mid, and refused FairDelta entries on
+// 2026-10-18 at a mid of 0.58 against a book of 0.72/0.73. A stale book
+// hands back to the quote.
+func TestDriftReadsTheBookBeforeTheQuote(t *testing.T) {
+	storer := restingDriftOpen()
+	storer.intent.SignalPrice = "0.725"
+	client := &fakeCLOB{}
+	now := time.Now().UTC()
+	clock := func() time.Time { return now }
+	exec := watchingExecutor(t, storer, client, freshQuote(0.57, 0.59), clock)
+	book := freshQuote(0.72, 0.73)
+	exec.SetBookProvider(book)
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "" {
+		t.Fatal("a print off the book must not cancel an open the book never moved from")
+	}
+	now = now.Add(3 * time.Second)
+	exec.SetQuoteProvider(freshQuote(0.57, 0.59))
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("watch pass: %v", err)
+	}
+	if client.canceledOrderID != "order-open" {
+		t.Fatal("with the book stale, the fresh quote decides")
+	}
+}
+
+// The pre-submission check reads the same book.
+func TestExecuteOpenSubmitsWhenOnlyAPrintMovedAgainstIt(t *testing.T) {
+	storer := &fakeStore{inserted: true}
+	client := &fakeCLOB{response: &clobclient.OrderResponse{Success: true, OrderID: "order-1"}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.SetQuoteProvider(freshQuote(0.40, 0.42))
+	exec.SetBookProvider(freshQuote(0.49, 0.51))
+	if err := exec.ExecuteOpen(context.Background(), driftOpenRequest()); err != nil {
+		t.Fatalf("execute open: %v", err)
+	}
+	if client.submissions != 1 {
+		t.Fatalf("expected the open submitted on the book's mid, submissions=%d", client.submissions)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor/tactics"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -80,6 +81,23 @@ func (e *Executor) watchOrder(intent protocol.ExecutionIntent, childSequence int
 	}
 }
 
+// driftQuote is the market the drift check judges an open against: the
+// maintained book's top (SetBookProvider) while it is fresh under the intent's
+// quote_max_age_ms, otherwise the quote stream. The backtest venue reads the
+// same way (depth when it holds the book, the quote otherwise), so a live
+// cancel and a replayed one see one mid.
+func (e *Executor) driftQuote(intent protocol.ExecutionIntent, now time.Time) (marketquotes.Snapshot, bool) {
+	if e.books != nil {
+		if book, ok := e.books.Get(intent.ConditionID); ok && tactics.FreshForDrift(intent, book, now) {
+			return book, true
+		}
+	}
+	if e.quotes == nil {
+		return marketquotes.Snapshot{}, false
+	}
+	return e.quotes.Get(intent.ConditionID)
+}
+
 func (e *Executor) isWatched(key orderKey) bool {
 	e.watchMu.Lock()
 	defer e.watchMu.Unlock()
@@ -112,8 +130,8 @@ func (e *Executor) checkWatched(ctx context.Context) error {
 		}
 		expired := !watched.deadline.IsZero() && !watched.deadline.After(now)
 		drifted := false
-		if !expired && watched.cancelFrom.IsZero() && watched.drift.Bounded() && e.quotes != nil {
-			quote, hasQuote := e.quotes.Get(watched.intent.ConditionID)
+		if !expired && watched.cancelFrom.IsZero() && watched.drift.Bounded() {
+			quote, hasQuote := e.driftQuote(watched.intent, now)
 			_, drifted = tactics.DriftBreach(watched.intent, watched.drift, quote, hasQuote, now)
 		}
 		if expired || drifted || !watched.cancelFrom.IsZero() {

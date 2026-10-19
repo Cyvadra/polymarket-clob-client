@@ -141,6 +141,8 @@ func run() error {
 	quotes := marketquotes.New()
 	execution.SetQuoteProvider(quotes)
 	quotes.OnNewMarket(metadataWarmer(ctx, clob))
+	books := marketquotes.New()
+	execution.SetBookProvider(books)
 	fills, err := accountfeed.NewFillConsumer(store, time.Now)
 	if err != nil {
 		return err
@@ -180,6 +182,9 @@ func run() error {
 		return err
 	}
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {
+		return err
+	}
+	if err := nats.SubscribeLevels(bus, books); err != nil {
 		return err
 	}
 	closeWork, err := nats.SubscribeClose(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError)

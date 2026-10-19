@@ -40,6 +40,7 @@ The versioned field rules, examples, delivery semantics, and compatibility rules
 | `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | Request a position close. |
 | `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | Terminal success or failure of a close request. |
 | `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Latest quote snapshot for the advanced execution styles. |
+| `pmm.market.levels` | market data -> executiond | pmm `messaging.MarketLevels` | Top of the maintained book, read by the drift check before the quote; sent only with `clob.levels: publish` on the collector. |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order lifecycle transitions. |
 | `position.features.<condition_id>.<token_id>` | executiond -> strategy | `PositionFeature` | Latest durable position snapshot. |
 | `strategy.execution.position.query` | strategy -> executiond (request/reply) | `PositionQueryRequest` | Query current positions; the reply goes to the request's reply subject. |

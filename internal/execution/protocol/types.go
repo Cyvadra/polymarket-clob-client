@@ -23,6 +23,7 @@ const (
 	SubjectExecutionCloseResult           = "execution.close.result"
 	SubjectExecutionOrderEvent            = "execution.order.event"
 	SubjectMarketQuotes                   = "pmm.market.quotes"
+	SubjectMarketLevels                   = "pmm.market.levels"
 	SubjectPositionFeaturesPrefix         = "position.features"
 	SubjectStrategyExecutionPositionQuery = "strategy.execution.position.query"
 	SubjectStrategyExecutionBalanceQuery  = "strategy.execution.balance.query"

@@ -66,11 +66,8 @@ func DriftBreach(intent protocol.ExecutionIntent, drift Drift, quote marketquote
 	if !drift.Bounded() {
 		return 0, false
 	}
-	if intent.Policy.QuoteMaxAgeMillis <= 0 {
-		intent.Policy.QuoteMaxAgeMillis = DefaultDriftQuoteMaxAge.Milliseconds()
-	}
-	side, ok := freshQuoteForToken(Request{Intent: intent, Quote: quote, HasQuote: hasQuote, Now: now})
-	if !ok || side.Bid <= 0 || side.Ask <= 0 {
+	side, ok := driftSide(intent, quote, hasQuote, now)
+	if !ok {
 		return 0, false
 	}
 	mid := (side.Bid + side.Ask) / 2
@@ -79,4 +76,23 @@ func DriftBreach(intent protocol.ExecutionIntent, drift Drift, quote marketquote
 		return mid, mid-drift.Signal > drift.Max+epsilon
 	}
 	return mid, drift.Signal-mid > drift.Max+epsilon
+}
+
+// FreshForDrift reports whether quote carries a two-sided price for the
+// intent's token young enough for the drift check: the intent's
+// quote_max_age_ms, or DefaultDriftQuoteMaxAge.
+func FreshForDrift(intent protocol.ExecutionIntent, quote marketquotes.Snapshot, now time.Time) bool {
+	_, ok := driftSide(intent, quote, true, now)
+	return ok
+}
+
+func driftSide(intent protocol.ExecutionIntent, quote marketquotes.Snapshot, hasQuote bool, now time.Time) (marketquotes.Quote, bool) {
+	if intent.Policy.QuoteMaxAgeMillis <= 0 {
+		intent.Policy.QuoteMaxAgeMillis = DefaultDriftQuoteMaxAge.Milliseconds()
+	}
+	side, ok := freshQuoteForToken(Request{Intent: intent, Quote: quote, HasQuote: hasQuote, Now: now})
+	if !ok || side.Bid <= 0 || side.Ask <= 0 {
+		return marketquotes.Quote{}, false
+	}
+	return side, true
 }
