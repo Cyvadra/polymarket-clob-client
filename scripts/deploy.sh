@@ -47,6 +47,10 @@ STAGE_DIR=
 KEY_FILE="$PRIVATE_DIR/private-key.json"
 PASSPHRASE_FILE="$PRIVATE_DIR/private-key.pass"
 USE_KEY_FILE=0
+# Per-strategy settings, shipped when the env file selects
+# EXECUTION_STRATEGIES_FILE.
+STRATEGIES_FILE="$PRIVATE_DIR/strategies.json"
+USE_STRATEGIES_FILE=0
 # Every binary shipped in a release. Only the ones whose sha256 differs from
 # the host's current release are uploaded; the rest are linked over from it.
 BINARIES=(executiond executiontest polykey pnlreport takerholdtest)
@@ -116,11 +120,19 @@ require_private_bundle() {
 	fi
 	grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=[^[:space:]]+' "$env_file" || \
 		fail "$env_file must set EXECUTION_POSTGRES_URL"
-	# executiond refuses to start without the strategies its wallet trades.
-	# An optional quote may wrap the value, but "" or '' is still empty.
-	local strategies_pattern="^[[:space:]]*EXECUTION_ALLOWED_STRATEGIES=[[:space:]]*[\"']?[[:space:]]*[^,[:space:]\"']"
-	grep -Eq "$strategies_pattern" "$env_file" || \
-		fail "$env_file must set EXECUTION_ALLOWED_STRATEGIES to the strategies this wallet trades"
+	# executiond refuses to start without the strategies its wallet trades,
+	# listed in the strategy file or the env file.
+	if grep -Eq '^[[:space:]]*EXECUTION_STRATEGIES_FILE=[^[:space:]]+' "$env_file"; then
+		USE_STRATEGIES_FILE=1
+		require_strategies_path "$env_file"
+	else
+		[[ ! -f $STRATEGIES_FILE ]] || \
+			fail "$STRATEGIES_FILE exists but $env_file does not set EXECUTION_STRATEGIES_FILE=$CONFIG_ROOT/strategies.json"
+		# An optional quote may wrap the value, but "" or '' is still empty.
+		local strategies_pattern="^[[:space:]]*EXECUTION_ALLOWED_STRATEGIES=[[:space:]]*[\"']?[[:space:]]*[^,[:space:]\"']"
+		grep -Eq "$strategies_pattern" "$env_file" || \
+			fail "$env_file must set EXECUTION_STRATEGIES_FILE or EXECUTION_ALLOWED_STRATEGIES to the strategies this wallet trades"
+	fi
 	if grep -Eq '^[[:space:]]*EXECUTION_POSTGRES_URL=postgres://user:password@127\.0\.0\.1:5432/execution' "$env_file"; then
 		fail "$env_file still uses the placeholder EXECUTION_POSTGRES_URL; point it at the real database"
 	fi
@@ -134,8 +146,26 @@ require_private_bundle() {
 		# shellcheck disable=SC1090
 		source "$env_file"
 		set +a
+		# The env file names the strategy file where it will be installed.
+		if (( USE_STRATEGIES_FILE )); then
+			export EXECUTION_STRATEGIES_FILE="$STRATEGIES_FILE"
+		fi
 		go run ./cmd/executiond -check-config
 	) || fail "executiond rejects $env_file (see the error above)"
+}
+
+# require_strategies_path checks that the env file names the strategy file
+# where install_bundle puts it, and that the file is there to ship.
+require_strategies_path() {
+	local env_file=$1 expected="$CONFIG_ROOT/strategies.json" actual
+	actual=$(env_value "$env_file" EXECUTION_STRATEGIES_FILE)
+	[[ $actual == "$expected" ]] || \
+		fail "$env_file sets EXECUTION_STRATEGIES_FILE=$actual, but deploy.sh installs the strategy file at $expected; use $expected"
+	[[ -f $STRATEGIES_FILE ]] || fail "$env_file sets EXECUTION_STRATEGIES_FILE, but $STRATEGIES_FILE is missing"
+}
+
+env_value() {
+	(set +u; set -a; source "$1" >/dev/null 2>&1; printf '%s' "${!2:-}")
 }
 
 # require_key_paths checks that the daemon will look for the keystore where
@@ -231,6 +261,9 @@ upload_and_activate() {
 	if (( USE_KEY_FILE )); then
 		key_material=("$KEY_FILE" "$PASSPHRASE_FILE")
 	fi
+	if (( USE_STRATEGIES_FILE )); then
+		key_material+=("$STRATEGIES_FILE")
+	fi
 	local bundle=()
 	if (( ${#CHANGED[@]} )); then
 		bundle=("$STAGE_DIR/executiond-$RELEASE_ID.tar.gz" "$STAGE_DIR/executiond-$RELEASE_ID.tar.gz.sha256")
@@ -238,7 +271,7 @@ upload_and_activate() {
 	scp ${bundle[@]+"${bundle[@]}"} "$STAGE_DIR/binaries.sha256" \
 		"$PRIVATE_DIR/executiond.env" ${key_material[@]+"${key_material[@]}"} \
 		"$TARGET@$HOST:$remote_stage/"
-	ssh "$TARGET@$HOST" "BINARIES='${BINARIES[*]}' RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_NAME='$APP_NAME' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' bash -s" <<'REMOTE'
+	ssh "$TARGET@$HOST" "BINARIES='${BINARIES[*]}' RELEASE_ID='$RELEASE_ID' REMOTE_STAGE='$remote_stage' PM2_BIN='$PM2_BIN' APP_NAME='$APP_NAME' APP_USER='$APP_USER' APP_GROUP='$APP_GROUP' INSTALL_ROOT='$INSTALL_ROOT' CONFIG_ROOT='$CONFIG_ROOT' DATA_ROOT='$DATA_ROOT' USE_KEY_FILE='$USE_KEY_FILE' USE_STRATEGIES_FILE='$USE_STRATEGIES_FILE' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 
 release_dir="$INSTALL_ROOT/releases/$RELEASE_ID"
@@ -284,7 +317,7 @@ rollback() {
 	local status=$?
 	trap - ERR
 	(( activation_started )) || exit "$status"
-	for secret in executiond.env private-key.json private-key.pass; do
+	for secret in executiond.env private-key.json private-key.pass strategies.json; do
 		if [[ -f $REMOTE_STAGE/previous/$secret ]]; then
 			install $(secret_owner "$secret") -m 0600 "$REMOTE_STAGE/previous/$secret" "$CONFIG_ROOT/$secret"
 		else
@@ -380,7 +413,7 @@ if [[ -L $current_link ]]; then
 	previous_release=$(readlink -f "$current_link")
 fi
 install -d -m 0700 "$REMOTE_STAGE/previous"
-for secret in executiond.env private-key.json private-key.pass; do
+for secret in executiond.env private-key.json private-key.pass strategies.json; do
 	if [[ -f $CONFIG_ROOT/$secret ]]; then
 		install -m 0600 "$CONFIG_ROOT/$secret" "$REMOTE_STAGE/previous/$secret"
 	fi
@@ -412,6 +445,12 @@ if (( USE_KEY_FILE )); then
 	install -o "$APP_USER" -g "$APP_GROUP" -m 0600 "$REMOTE_STAGE/private-key.pass" "$CONFIG_ROOT/private-key.pass"
 else
 	rm -f "$CONFIG_ROOT/private-key.json" "$CONFIG_ROOT/private-key.pass"
+fi
+# The daemon reads the strategy file itself, after dropping to $APP_USER.
+if (( USE_STRATEGIES_FILE )); then
+	install $(secret_owner strategies.json) -m 0600 "$REMOTE_STAGE/strategies.json" "$CONFIG_ROOT/strategies.json"
+else
+	rm -f "$CONFIG_ROOT/strategies.json"
 fi
 ln -sfn "$release_dir" "$current_link.new"
 mv -Tf "$current_link.new" "$current_link"

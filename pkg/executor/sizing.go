@@ -30,7 +30,10 @@ func (e *Executor) sizeEntry(ctx context.Context, req protocol.ExecutionOpenRequ
 	if e.sizer == nil {
 		return nil, invalid("equity sizing is not enabled")
 	}
-	entry, err := e.sizer.Size(ctx, req.TargetEquityFraction)
+	// The multiplier scales the fraction, not the dollar target, so the
+	// sizer's fraction cap and free-cash hold see the entry actually placed.
+	fraction := scaleSize(req.TargetEquityFraction, e.sizeMultiplier(req.Strategy), fractionDigits)
+	entry, err := e.sizer.Size(ctx, fraction)
 	switch {
 	case errors.Is(err, equity.ErrInvalidFraction):
 		return nil, rejection{code: protocol.ReasonInvalidIntent, reason: err.Error(), cause: err}
@@ -40,7 +43,7 @@ func (e *Executor) sizeEntry(ctx context.Context, req protocol.ExecutionOpenRequ
 		return nil, rejection{code: protocol.ReasonExecutionFailed, reason: "size entry from equity: " + err.Error(), cause: err}
 	}
 	intent.TargetUSD = entry.TargetUSD
-	intent.TargetEquityFraction = req.TargetEquityFraction
+	intent.TargetEquityFraction = fraction
 	intent.SizedEquityUSD = strconv.FormatFloat(entry.EquityUSD, 'f', 6, 64)
 	return entry.Release, nil
 }

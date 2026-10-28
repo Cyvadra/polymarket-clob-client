@@ -47,6 +47,7 @@ type config struct {
 	MaxDrawdown                equity.DrawdownLimit
 	StrategyMaxDrawdown        map[string]equity.DrawdownLimit // by strategy name prefix
 	StrategyDefaultMaxDrawdown equity.DrawdownLimit
+	SizeMultipliers            map[string]string // by strategy name prefix; absent means 1
 	DrawdownStart              time.Time
 	EquityFlowThresholdUSD     float64
 	SizeAfterLossOnly          bool
@@ -317,6 +318,10 @@ func run() error {
 		sizer.SetLossAnchor(anchor)
 	}
 	execution.SetEntrySizer(sizer)
+	execution.SetSizeMultipliers(cfg.SizeMultipliers)
+	for prefix, multiplier := range cfg.SizeMultipliers {
+		log.Printf("strategy %s opens at %sx the size it asks for", prefix, multiplier)
+	}
 	modules := []namedModule{
 		{name: "nats", module: bus},
 		{name: "executor", module: execution},
@@ -456,13 +461,44 @@ func configFromEnv() (config, error) {
 		KeepWarmInterval:       durationEnv("EXECUTION_KEEPWARM_INTERVAL", 15*time.Second),
 		ShutdownGracePeriod:    durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
-	allowed, err := nats.ParseAllowlist(os.Getenv("EXECUTION_ALLOWED_STRATEGIES"))
-	if err != nil {
-		return config{}, fmt.Errorf("EXECUTION_ALLOWED_STRATEGIES must list the strategies this wallet trades, comma-separated: %w", err)
+	if path := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGIES_FILE")); path != "" {
+		for _, name := range strategyEnvVars {
+			if strings.TrimSpace(os.Getenv(name)) != "" {
+				return config{}, fmt.Errorf("EXECUTION_STRATEGIES_FILE replaces %s; set one or the other", name)
+			}
+		}
+		bare, err := loadStrategyFile(path, &cfg)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_STRATEGIES_FILE: %w", err)
+		}
+		deprecated = append(deprecated, bare...)
+	} else {
+		allowed, err := nats.ParseAllowlist(os.Getenv("EXECUTION_ALLOWED_STRATEGIES"))
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_ALLOWED_STRATEGIES must list the strategies this wallet trades, comma-separated: %w", err)
+		}
+		cfg.AllowedStrategies = allowed
+		if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_MAX_DRAWDOWN")); value != "" {
+			limits, bare, err := parseStrategyLimits(value, allowed)
+			if err != nil {
+				return config{}, fmt.Errorf("EXECUTION_STRATEGY_MAX_DRAWDOWN: %w", err)
+			}
+			cfg.StrategyMaxDrawdown = limits
+			deprecated = append(deprecated, bare...)
+		}
+		if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN")); value != "" {
+			limit, bare, err := parseDrawdownLimit(value)
+			if err != nil {
+				return config{}, fmt.Errorf("EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN: %w", err)
+			}
+			if bare {
+				deprecated = append(deprecated, value)
+			}
+			cfg.StrategyDefaultMaxDrawdown = limit
+		}
 	}
-	cfg.AllowedStrategies = allowed
-	if allowed.Wildcard() {
-		log.Printf("EXECUTION_ALLOWED_STRATEGIES is %q: this wallet acts on every strategy on the bus, so any other executiond on this NATS server repeats its trades", nats.Wildcard)
+	if cfg.AllowedStrategies.Wildcard() {
+		log.Printf("the strategy allowlist is %q: this wallet acts on every strategy on the bus, so any other executiond on this NATS server repeats its trades", nats.Wildcard)
 	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
 		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
@@ -483,24 +519,6 @@ func configFromEnv() (config, error) {
 			deprecated = append(deprecated, value)
 		}
 		cfg.MaxDrawdown = limit
-	}
-	if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_MAX_DRAWDOWN")); value != "" {
-		limits, bare, err := parseStrategyLimits(value, allowed)
-		if err != nil {
-			return config{}, fmt.Errorf("EXECUTION_STRATEGY_MAX_DRAWDOWN: %w", err)
-		}
-		cfg.StrategyMaxDrawdown = limits
-		deprecated = append(deprecated, bare...)
-	}
-	if value := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN")); value != "" {
-		limit, bare, err := parseDrawdownLimit(value)
-		if err != nil {
-			return config{}, fmt.Errorf("EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN: %w", err)
-		}
-		if bare {
-			deprecated = append(deprecated, value)
-		}
-		cfg.StrategyDefaultMaxDrawdown = limit
 	}
 	if cfg.drawdownLimited() {
 		start, err := parseStart(os.Getenv("EXECUTION_DRAWDOWN_START"))

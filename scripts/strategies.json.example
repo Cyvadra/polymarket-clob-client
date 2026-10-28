@@ -1,0 +1,7 @@
+{
+  "default_max_drawdown": "20%",
+  "strategies": {
+    "late-gap": {"max_drawdown": "$200"},
+    "momentum": {"max_drawdown": "10%", "size_multiplier": 0.5}
+  }
+}

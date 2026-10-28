@@ -24,7 +24,8 @@ const Wildcard = "*"
 // an explicit "*". A wildcard wallet repeats the trades of every other wallet
 // on the bus, so "*" must stand alone. Nor may one entry be a prefix of
 // another: the longer would do nothing, and a list written when names
-// matched exactly would silently widen.
+// matched exactly would silently widen. Nor may both sides of an Up/Down
+// pair be listed: the pair is one strategy, listed by its shared prefix.
 func NewAllowlist(names []string) (*Allowlist, error) {
 	list := &Allowlist{allowed: make(map[string]struct{}, len(names))}
 	for _, name := range names {
@@ -52,6 +53,15 @@ func NewAllowlist(names []string) (*Allowlist, error) {
 			if strings.HasPrefix(name, other) || strings.HasPrefix(other, name) {
 				return nil, fmt.Errorf("allowed strategies %q and %q overlap: each entry is a name prefix, so the longer one adds nothing", other, name)
 			}
+		}
+	}
+	for _, name := range list.names {
+		base, ok := strings.CutSuffix(name, "Up")
+		if !ok || base == "" {
+			continue
+		}
+		if _, paired := list.allowed[base+"Down"]; paired {
+			return nil, fmt.Errorf("allowed strategies %q and %q are one Up/Down pair; list their prefix %q instead", name, base+"Down", base)
 		}
 	}
 	return list, nil

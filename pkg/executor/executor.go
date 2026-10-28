@@ -59,6 +59,8 @@ type Executor struct {
 	publish protocol.ExecutionEventPublisher
 	sizer   EntrySizer
 	gate    OpenGate
+	// multipliers scale opens by strategy name prefix; see SetSizeMultipliers.
+	multipliers map[string]string
 	// onSubmit sees how long each order spent between its request arriving
 	// and its POST starting: sizing, locking, persistence and signing.
 	onSubmit func(intent protocol.ExecutionIntent, prePost time.Duration)

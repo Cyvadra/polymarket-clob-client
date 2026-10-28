@@ -106,7 +106,8 @@ them produces orders the exchange rejects.
 | Variable | Required | Description |
 | --- | --- | --- |
 | `EXECUTION_NATS_URL` | No | Core NATS server URL; defaults to `nats://127.0.0.1:4222`. |
-| `EXECUTION_ALLOWED_STRATEGIES` | Yes | Comma-separated strategy name prefixes this wallet trades, for example `late-gap,momentum` or `LockInDS,FairDelta`. Each entry allows every strategy whose name starts with it, so `LockInDS` allows `LockInDSUp` and `LockInDSDown`, and an exact name allows itself. Entries may not nest: `LockIn,LockInDS` is refused, since the longer entry would add nothing. `executiond` refuses to start without it. Requests for any other strategy are ignored silently, so several instances can share one NATS server; see [Several wallets on one NATS server](#several-wallets-on-one-nats-server). Prefixes match case-sensitively. A lone `*` allows every strategy; it cannot be combined with names, and identity replies list it as `["*"]`. A wildcard instance acts on every request on the bus, so use it only for a wallet alone on its NATS server, or one meant to trade alongside every other. |
+| `EXECUTION_STRATEGIES_FILE` | This or `EXECUTION_ALLOWED_STRATEGIES` | Path to a JSON file of per-strategy settings, which replaces `EXECUTION_ALLOWED_STRATEGIES`, `EXECUTION_STRATEGY_MAX_DRAWDOWN` and `EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN`; setting it alongside any of them is refused. See [Strategy file](#strategy-file). |
+| `EXECUTION_ALLOWED_STRATEGIES` | Without `EXECUTION_STRATEGIES_FILE` | Comma-separated strategy name prefixes this wallet trades, for example `late-gap,momentum` or `LockInDS,FairDelta`. Each entry allows every strategy whose name starts with it, so `LockInDS` allows `LockInDSUp` and `LockInDSDown`, and an exact name allows itself. Entries may not nest: `LockIn,LockInDS` is refused, since the longer entry would add nothing. Nor may both sides of an Up/Down pair be listed: `CalmFavSimpUp,CalmFavSimpDown` is refused in favour of their prefix `CalmFavSimp`. `executiond` refuses to start without it. Requests for any other strategy are ignored silently, so several instances can share one NATS server; see [Several wallets on one NATS server](#several-wallets-on-one-nats-server). Prefixes match case-sensitively. A lone `*` allows every strategy; it cannot be combined with names, and identity replies list it as `["*"]`. A wildcard instance acts on every request on the bus, so use it only for a wallet alone on its NATS server, or one meant to trade alongside every other. |
 | `EXECUTION_POSTGRES_URL` | No | PostgreSQL connection URL; defaults to `postgres://user:password@127.0.0.1:5432/execution?sslmode=disable`. The default is a placeholder and must be replaced outside local development. Without `pool_max_conns` and `pool_min_conns` in the URL, the pool holds up to 16 connections and keeps 4 open, so an order never waits for a new connection. |
 | `EXECUTION_MAX_EQUITY_FRACTION` | No | Largest `target_equity_fraction` an open request may carry, in (0, 1]; defaults to `0.25`. Larger fractions are rejected with `INVALID_INTENT`. It catches unit mistakes (`3` meant as 3%), and is not a risk limit. |
 | `EXECUTION_SIZE_AFTER_LOSS_ONLY` | No | `true` sizes `target_equity_fraction` opens from the equity recorded after the latest settled loss instead of live equity, so entry size changes only after a loss. Defaults to `false`. See [Loss-anchored sizing](#loss-anchored-sizing). |
@@ -117,6 +118,31 @@ them produces orders the exchange rejects.
 | `EXECUTION_EQUITY_FLOW_THRESHOLD_USD` | No | The smallest unexplained cash change between equity snapshots that counts as a deposit or withdrawal; defaults to `1`. Smaller residuals, such as rounding or rebates, stay in the trading return. |
 | `EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD` | No | Cap on the total notional of active BUY reservations, checked inside the reservation transaction. Unset means no cap; over-cap buys are rejected with `EXPOSURE_LIMIT`. |
 | `POLYMARKET_PROXY_URL` | No | Absolute `http`, `https`, or `socks5` URL for outbound CLOB traffic. Unset means a direct connection. |
+
+### Strategy file
+
+`EXECUTION_STRATEGIES_FILE` holds the strategies this wallet trades, each keyed by name prefix with its own settings. [`scripts/strategies.json.example`](../scripts/strategies.json.example) is a template:
+
+```json
+{
+  "default_max_drawdown": "20%",
+  "strategies": {
+    "LockInDS":        {"max_drawdown": "$80"},
+    "SpotVolPrecap5m": {"max_drawdown": "$80", "size_multiplier": 2.5},
+    "CalmFavSimp":     {"max_drawdown": "$60"}
+  }
+}
+```
+
+- The keys of `strategies` are the allowlist, under the same rules as `EXECUTION_ALLOWED_STRATEGIES`. They are prefixes that may not overlap, both sides of an Up/Down pair may not be listed, and `*` must stand alone.
+- `max_drawdown` is that group's limit, as in `EXECUTION_STRATEGY_MAX_DRAWDOWN`. `default_max_drawdown` is `EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN`.
+- `size_multiplier` scales every open of the group and defaults to 1.
+  - Dollar opens get `target_usd` × the multiplier, floored to $0.000001.
+  - Equity-sized opens get `target_equity_fraction` × the multiplier. The scaled fraction is what is checked against `EXECUTION_MAX_EQUITY_FRACTION` and recorded on the intent.
+  - So `2.5` opens 2.5 times the size the strategy asked for, and `0.5` opens half.
+- Unknown fields are refused, so a misspelt setting fails at startup instead of being ignored.
+- `EXECUTION_DRAWDOWN_START` is still required whenever a limit is set.
+- `deploy.sh` ships `scripts/private/<host>/strategies.json` and installs it at `/etc/executiond/strategies.json`, which is the path the env file must name.
 
 ### Several wallets on one NATS server
 

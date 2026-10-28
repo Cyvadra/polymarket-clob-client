@@ -59,7 +59,7 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		TokenID:            req.TokenID,
 		Outcome:            req.Outcome,
 		Side:               req.Side,
-		TargetUSD:          req.TargetUSD,
+		TargetUSD:          scaleSize(req.TargetUSD, e.sizeMultiplier(req.Strategy), usdDigits),
 		LimitPrice:         req.LimitPrice,
 		TimeInForce:        req.TimeInForce,
 		PostOnly:           req.PostOnly,

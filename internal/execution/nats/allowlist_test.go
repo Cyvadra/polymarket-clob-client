@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,18 @@ func TestParseAllowlistRejectsNestedEntries(t *testing.T) {
 	for _, value := range []string{"momentum,momentum-v2", "LockInDS,FairDelta,LockIn"} {
 		if _, err := ParseAllowlist(value); err == nil {
 			t.Fatalf("expected %q to be rejected", value)
+		}
+	}
+}
+
+func TestParseAllowlistRejectsUpDownPairs(t *testing.T) {
+	_, err := ParseAllowlist("LockInDS,CalmFavSimpUp,CalmFavSimpDown")
+	if err == nil || !strings.Contains(err.Error(), `"CalmFavSimp"`) {
+		t.Fatalf("expected the pair to be rejected in favour of its prefix, got %v", err)
+	}
+	for _, value := range []string{"CalmFavSimp", "FollowUp", "FollowUp,LeadDown", "Up,Down"} {
+		if _, err := ParseAllowlist(value); err != nil {
+			t.Fatalf("expected %q to be accepted: %v", value, err)
 		}
 	}
 }
