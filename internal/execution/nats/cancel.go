@@ -34,7 +34,11 @@ type LaneHolder interface {
 // on the bus and is dropped silently, as an open is, unless the executor
 // reports this wallet still holds the lane: a strategy taken off the list
 // must still be able to close what it opened here.
-func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, allowed *Allowlist, onError func(error)) (Drainer, error) {
+//
+// opens, when non-nil, is the open dispatcher: a CANCEL_OPEN first withdraws
+// the opens still queued on its lane, which have no order yet for the
+// executor to cancel.
+func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor, allowed *Allowlist, opens OpenQueue, onError func(error)) (Drainer, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -42,6 +46,7 @@ func SubscribeClose(ctx context.Context, bus Subscriber, execution CloseExecutor
 		return nil, fmt.Errorf("NATS subscriber, close executor, and strategy allowlist are required")
 	}
 	dispatcher := newCloseDispatcher(ctx, execution, allowed, onError)
+	dispatcher.opens = opens
 	if err := bus.Subscribe(protocol.SubjectStrategyExecutionClose, dispatcher.handle); err != nil {
 		return nil, err
 	}
@@ -58,6 +63,7 @@ type closeDispatcher struct {
 	ctx     context.Context
 	exec    CloseExecutor
 	allowed *Allowlist
+	opens   OpenQueue
 	onError func(error)
 }
 
@@ -75,6 +81,13 @@ func (d *closeDispatcher) handle(_ context.Context, payload []byte) error {
 	if _, ok := d.exec.(LaneHolder); !ok && !d.allowed.Allows(request.Strategy) {
 		return nil
 	}
+	// Withdraw the lane's queued opens here, on the delivery goroutine and
+	// before the cancel is queued, so no open that arrived ahead of the
+	// cancel can be posted after it has run. Opens for strategies outside
+	// the allowlist were never queued, so nothing is dropped for them.
+	if request.Mode == protocol.ExecutionCloseModeCancelOpen && d.opens != nil {
+		d.opens.DropLane(closeLaneKey(request))
+	}
 	d.enqueue(request)
 	return nil
 }
@@ -86,10 +99,10 @@ func (d *closeDispatcher) enqueue(req protocol.ExecutionCloseRequest) {
 // closeLaneKey groups closes the same way the executor's lane lock does, so
 // the dispatcher serializes exactly the closes that would contend on it.
 func closeLaneKey(req protocol.ExecutionCloseRequest) string {
-	return req.Strategy + "\x00" + req.UniqueTag + "\x00" + req.ConditionID + "\x00" + req.AssetID
+	return laneKey(req.Strategy, req.UniqueTag, req.ConditionID, req.AssetID)
 }
 
-func (d *closeDispatcher) execute(next protocol.ExecutionCloseRequest) {
+func (d *closeDispatcher) execute(next protocol.ExecutionCloseRequest, _ func() bool) {
 	// The lane lookup runs here, off the NATS delivery goroutine, since
 	// every close for every other wallet on the bus reaches this check.
 	if !d.allowed.Allows(next.Strategy) {

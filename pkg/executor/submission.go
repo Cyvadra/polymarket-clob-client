@@ -130,6 +130,16 @@ func (e *Executor) persistAndSubmit(ctx context.Context, intent protocol.Executi
 	return e.prepareAndSubmit(context.WithValue(ctx, intentCreatedAtKey{}, createdAt), intent)
 }
 
+// DropOpen reports an open that was withdrawn before it was worked: a
+// CANCEL_OPEN on its lane arrived while it still waited its turn, so no order
+// was ever signed for it.
+func (e *Executor) DropOpen(req protocol.ExecutionOpenRequest, reason string) {
+	e.publishOpenResult(protocol.ExecutionIntent{
+		RequestID: req.RequestID, UniqueTag: req.UniqueTag, Strategy: req.Strategy,
+		ConditionID: req.ConditionID, TokenID: req.TokenID, Outcome: req.Outcome, Side: req.Side,
+	}, protocol.ResultFailed, protocol.ReasonCanceled, reason, "", "")
+}
+
 func (e *Executor) publishOpenRejection(intent protocol.ExecutionIntent, err error) {
 	status, code, reason := reasonFor(err)
 	e.publishOpenResult(intent, status, code, reason, "", "")
@@ -356,8 +366,21 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 // exchange answered.
 func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, updated store.SignedOrderRecord) error {
 	e.publishTransition(updated, intent, "submit requested")
+	// Register the POST so a CANCEL_OPEN arriving before its answer can fire
+	// cancels at it; once the answer is recorded, honour such a cancel.
+	post := e.inflight.start(signed.OrderID)
+	defer func() {
+		e.inflight.finish(signed.OrderID, post)
+		e.finishInflightCancel(ctx, intent, child.Sequence, post)
+	}()
+	// A CANCEL_OPEN taken while this order was being signed and persisted
+	// could not find it; cancel it now as though found in flight.
+	if gate, ok := ctx.Value(postGateKey{}).(func() bool); ok && gate() && signed.OrderID != "" {
+		e.wantInflightCancel(context.WithoutCancel(ctx), intent.Policy, intent.IntentID, child.Sequence, signed.OrderID, post)
+	}
 	// Measure pre-post latency now but report it after the POST, so the
-	// hook's logging never delays the order.
+	// hook's logging never delays the order. Deferred after the cancel
+	// follow-up so that runs after the hook, not before it.
 	if received, ok := ctx.Value(receivedAtKey{}).(time.Time); ok && e.onSubmit != nil {
 		prePost := time.Since(received)
 		defer e.onSubmit(intent, prePost)

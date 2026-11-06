@@ -2,6 +2,7 @@ package clobclient
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -79,12 +80,12 @@ type SignedOrderV2 struct {
 }
 
 type OrderResponse struct {
-	Success            bool     `json:"success"`
-	ErrorMsg           string   `json:"errorMsg"`
-	OrderID            string   `json:"orderID"`
-	Status             string   `json:"status"`
-	TakingAmount       string   `json:"takingAmount"`
-	MakingAmount       string   `json:"makingAmount"`
+	Success      bool   `json:"success"`
+	ErrorMsg     string `json:"errorMsg"`
+	OrderID      string `json:"orderID"`
+	Status       string `json:"status"`
+	TakingAmount string `json:"takingAmount"`
+	MakingAmount string `json:"makingAmount"`
 	// TransactionsHashes is empty for a FAK/FOK match since 2026-07-24, when
 	// the CLOB moved to an async commit pipeline and began returning
 	// TradeIDs instead; poll /data/trades by trade ID for the settlement.
@@ -131,6 +132,39 @@ type CancelResult struct {
 func (r CancelResult) Has(orderID string) bool {
 	for _, id := range r.Canceled {
 		if strings.EqualFold(id, orderID) {
+			return true
+		}
+	}
+	return false
+}
+
+// Refused reports whether the exchange listed orderID under not_canceled, and
+// the reason it gave.
+func (r CancelResult) Refused(orderID string) (string, bool) {
+	for id, reason := range r.NotCanceled {
+		if strings.EqualFold(id, orderID) {
+			return reason, true
+		}
+	}
+	return "", false
+}
+
+// CancelRefusedError is a cancel the exchange answered but did not carry out.
+type CancelRefusedError struct {
+	OrderID string
+	Reason  string
+}
+
+func (e *CancelRefusedError) Error() string {
+	return fmt.Sprintf("cancel of order %s refused: %s", e.OrderID, e.Reason)
+}
+
+// OrderGone reports whether the refusal says the order has already ended
+// (filled, cancelled, or unknown to the book), so there is nothing to cancel.
+func (e *CancelRefusedError) OrderGone() bool {
+	reason := strings.ToLower(e.Reason)
+	for _, marker := range []string{"not found", "can't be found", "cannot be found", "already canceled", "already cancelled", "matched"} {
+		if strings.Contains(reason, marker) {
 			return true
 		}
 	}

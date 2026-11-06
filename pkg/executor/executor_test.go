@@ -253,6 +253,7 @@ type fakeCLOB struct {
 	minOrderSizeErr error
 	// minOrderSizeCalls counts lookups, each a round trip on the real client.
 	minOrderSizeCalls int
+	cancelResultIDs   []string
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }
@@ -277,6 +278,10 @@ func (c *fakeCLOB) SubmitSignedOrder(_ context.Context, _ clobclient.SignedOrder
 		}
 	}
 	return c.response, c.submitErr
+}
+func (c *fakeCLOB) CancelOrderResult(_ context.Context, orderID string) (*clobclient.CancelResult, error) {
+	c.cancelResultIDs = append(c.cancelResultIDs, orderID)
+	return &clobclient.CancelResult{NotCanceled: map[string]string{orderID: "order not found"}}, nil
 }
 func (c *fakeCLOB) CancelOrder(_ context.Context, orderID string) error {
 	c.canceledOrderID = orderID

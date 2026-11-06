@@ -204,12 +204,21 @@ func minimumShares(book *OrderBook) (float64, error) {
 	return value, nil
 }
 
+// CancelOrder cancels orderID. The exchange answers a refused cancel with a
+// 200 that lists the order under not_canceled; that is returned as a
+// *CancelRefusedError rather than read as success.
 func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
 	if orderID == "" {
 		return fmt.Errorf("order ID is required")
 	}
-	var out any
-	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/order", Body: map[string]string{"orderID": orderID}, Headers: c.l2Headers}, &out)
+	var out CancelResult
+	if err := c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/order", Body: map[string]string{"orderID": orderID}, Headers: c.l2Headers}, &out); err != nil {
+		return err
+	}
+	if reason, refused := out.Refused(orderID); refused {
+		return &CancelRefusedError{OrderID: orderID, Reason: reason}
+	}
+	return nil
 }
 
 // CancelOrderResult cancels orderID once, with no retry or rate-limit wait,

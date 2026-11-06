@@ -188,7 +188,7 @@ func run() error {
 	if err := nats.SubscribeLevels(bus, books); err != nil {
 		return err
 	}
-	closeWork, err := nats.SubscribeClose(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError)
+	closeWork, err := nats.SubscribeClose(ctx, bus, execution, cfg.AllowedStrategies, openWork, onHandlerError)
 	if err != nil {
 		return err
 	}

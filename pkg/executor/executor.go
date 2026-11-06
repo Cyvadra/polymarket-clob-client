@@ -20,6 +20,10 @@ type CLOB interface {
 	CreateOrder(context.Context, clobclient.UserOrder) (clobclient.SignedOrderV2, error)
 	SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error)
 	CancelOrder(context.Context, string) error
+	// CancelOrderResult cancels once, without retry or rate-limit wait, and
+	// returns the exchange's answer; it fires cancels at an order whose POST
+	// is still in flight.
+	CancelOrderResult(context.Context, string) (*clobclient.CancelResult, error)
 	TickSize(context.Context, string) (float64, error)
 	MinOrderSize(context.Context, string) (float64, error)
 }
@@ -81,6 +85,10 @@ type Executor struct {
 	// its deadline or drift bound, checked every watchInterval (watch.go).
 	watchMu sync.Mutex
 	watched map[orderKey]*watchedOrder
+
+	// inflight holds the orders whose POST is awaiting its answer, so a
+	// CANCEL_OPEN can reach them before the exchange replies (inflight.go).
+	inflight inflightPosts
 }
 
 // orderKey names one child order of an intent.
@@ -300,6 +308,11 @@ func (e *Executor) cancelOpenOrder(ctx context.Context, policy protocol.Executio
 	cancelCtx, cancel := context.WithTimeout(ctx, cancelTimeout(policy))
 	err := e.clob.CancelOrder(cancelCtx, order.ExchangeOrderID)
 	cancel()
+	if cancelGone(err) {
+		// Already filled or cancelled on the exchange: the user stream or
+		// the reconciler records which.
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("cancel order %s: %w", order.ExchangeOrderID, err)
 	}

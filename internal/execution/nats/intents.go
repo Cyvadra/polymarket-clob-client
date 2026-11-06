@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 )
 
@@ -42,7 +43,7 @@ type OpenExecutor interface {
 // carries on with ctx's values but not its cancellation, so an order is not
 // abandoned between persisting and its POST; shutdown waits for it through
 // the returned Drainer.
-func SubscribeOpen(ctx context.Context, bus Subscriber, execution OpenExecutor, allowed *Allowlist, onError func(error)) (Drainer, error) {
+func SubscribeOpen(ctx context.Context, bus Subscriber, execution OpenExecutor, allowed *Allowlist, onError func(error)) (OpenWork, error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("context is required")
 	}
@@ -87,7 +88,43 @@ func (d *openDispatcher) handle(_ context.Context, payload []byte) error {
 
 // openLaneKey names the position an open adds to, as closeLaneKey does.
 func openLaneKey(req protocol.ExecutionOpenRequest) string {
-	return req.Strategy + "\x00" + req.UniqueTag + "\x00" + req.ConditionID + "\x00" + req.TokenID
+	return laneKey(req.Strategy, req.UniqueTag, req.ConditionID, req.TokenID)
+}
+
+// OpenDropper is implemented by an OpenExecutor that reports an open
+// withdrawn before it was worked.
+type OpenDropper interface {
+	DropOpen(req protocol.ExecutionOpenRequest, reason string)
+}
+
+// OpenWork is the open dispatcher SubscribeOpen returns: shutdown drains it,
+// and SubscribeClose withdraws queued opens from it.
+type OpenWork interface {
+	Drainer
+	OpenQueue
+}
+
+// OpenQueue is the open dispatcher as a CANCEL_OPEN sees it: the opens still
+// waiting on a lane can be withdrawn before they are worked.
+type OpenQueue interface {
+	DropLane(key string) int
+}
+
+// droppedOpenReason is the result reason of an open a CANCEL_OPEN withdrew
+// before it was worked.
+const droppedOpenReason = "canceled before submission"
+
+// DropLane withdraws the opens still waiting on a lane, reporting each as
+// canceled, and returns how many it withdrew. The open already running, if
+// any, is not withdrawn: its order is cancelled through the executor.
+func (d *openDispatcher) DropLane(key string) int {
+	dropped := d.drop(key)
+	if dropper, ok := d.exec.(OpenDropper); ok {
+		for _, req := range dropped {
+			dropper.DropOpen(req, droppedOpenReason)
+		}
+	}
+	return len(dropped)
 }
 
 // stopped drops an open that has not started once shutdown has begun: it
@@ -102,8 +139,9 @@ func (d *openDispatcher) stopped(req protocol.ExecutionOpenRequest) bool {
 	return true
 }
 
-func (d *openDispatcher) execute(req protocol.ExecutionOpenRequest) {
-	if err := d.exec.ExecuteOpen(context.WithoutCancel(d.ctx), req); err != nil && d.onError != nil {
+func (d *openDispatcher) execute(req protocol.ExecutionOpenRequest, posting func() bool) {
+	ctx := executor.WithPostGate(context.WithoutCancel(d.ctx), posting)
+	if err := d.exec.ExecuteOpen(ctx, req); err != nil && d.onError != nil {
 		d.onError(fmt.Errorf("handle NATS subject %s: %w", protocol.SubjectStrategyExecutionOpen, err))
 	}
 }

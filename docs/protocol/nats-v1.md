@@ -122,6 +122,11 @@ Close requests also require `unique_tag` so the execution daemon can target the 
 
 `CANCEL_OPEN` withdraws the lane's working entry and does nothing else: it sells nothing, writes no close intent, and leaves a resting close alone, because that exit is still wanted. It needs no `limit_price`. A lane whose entry has already filled or is already gone has nothing to cancel, and the request is a no-op rather than a failure — the sender emits one per order without knowing whether the exchange still holds it.
 
+A `CANCEL_OPEN` reaches the entry wherever it is:
+- **Still queued** behind another open on the lane: it is withdrawn without being posted, and its open result is `FAILED` with `reason_code` `CANCELED` and reason `canceled before submission`.
+- **POST in flight**: cancels go out by the order ID computed at signing, at once and every 25ms, until the POST is answered or one is accepted. If the answer leaves the order resting, it is then cancelled the ordinary way.
+- **Resting**: it is cancelled as before.
+
 ## Results
 
 Open and close results identify the affected position (`unique_tag` + `condition_id` + `token_id` / `asset_id` + `side`), and carry `strategy`, `wallet_address`, and `signer_address` to say which strategy asked and which wallet traded (see [Wallets and strategies](#wallets-and-strategies)). They use `status: "SUCCEEDED"` or `"FAILED"` plus optional `reason_code`, `reason`, `filled_shares`, and `average_price` fields. `filled_shares` and `average_price`, when present, are JSON numbers rather than decimal strings.

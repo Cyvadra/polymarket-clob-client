@@ -95,7 +95,10 @@ func (fakeCLOB) CreateOrder(context.Context, clobclient.UserOrder) (clobclient.S
 func (fakeCLOB) SubmitSignedOrder(context.Context, clobclient.SignedOrderV2, clobclient.OrderType, bool) (*clobclient.OrderResponse, error) {
 	return &clobclient.OrderResponse{OrderID: "order-1"}, nil
 }
-func (fakeCLOB) CancelOrder(context.Context, string) error             { return nil }
+func (fakeCLOB) CancelOrder(context.Context, string) error { return nil }
+func (fakeCLOB) CancelOrderResult(context.Context, string) (*clobclient.CancelResult, error) {
+	return &clobclient.CancelResult{}, nil
+}
 func (fakeCLOB) TickSize(context.Context, string) (float64, error)     { return 0.01, nil }
 func (fakeCLOB) MinOrderSize(context.Context, string) (float64, error) { return 0, nil }
 

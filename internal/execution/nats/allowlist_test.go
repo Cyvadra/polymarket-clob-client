@@ -124,7 +124,7 @@ func TestSubscribersRequireAnAllowlist(t *testing.T) {
 	if _, err := SubscribeOpen(context.Background(), &fakeSubscriber{}, execution, nil, nil); err == nil {
 		t.Fatal("expected open subscription without an allowlist to fail")
 	}
-	if _, err := SubscribeClose(context.Background(), &fakeSubscriber{}, &fakeCloseExecutor{}, nil, nil); err == nil {
+	if _, err := SubscribeClose(context.Background(), &fakeSubscriber{}, &fakeCloseExecutor{}, nil, nil, nil); err == nil {
 		t.Fatal("expected close subscription without an allowlist to fail")
 	}
 }

@@ -152,7 +152,18 @@ func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.Execut
 		if candidate.intent.Kind == store.IntentClose {
 			continue
 		}
-		if err := e.cancelOpenOrder(ctx, mapping.ExecutionIntent(candidate.intent).Policy, candidate.order, cancelRequested); err != nil {
+		policy := mapping.ExecutionIntent(candidate.intent).Policy
+		switch candidate.order.State {
+		case statemachine.StateSubmitting, statemachine.StateSubmitUnknown:
+			// The POST may still be in flight, and the order can fill
+			// while it is: cancel by the order ID computed at signing
+			// rather than wait for the exchange's answer.
+			if err := e.cancelSubmittingOrder(ctx, policy, candidate.order); err != nil {
+				cancelErr = errors.Join(cancelErr, err)
+			}
+			continue
+		}
+		if err := e.cancelOpenOrder(ctx, policy, candidate.order, cancelRequested); err != nil {
 			cancelErr = errors.Join(cancelErr, err)
 		}
 	}

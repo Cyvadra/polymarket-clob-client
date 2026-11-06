@@ -2,6 +2,7 @@ package clobclient
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -219,5 +220,25 @@ func TestCancelOrderResultReportsRefusalWithoutRetry(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Fatalf("expected 3 requests (no retry), got %d", calls)
+	}
+}
+
+func TestCancelOrderReturnsRefusal(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"canceled":[],"not_canceled":{"0xABC":"order can't be found - already canceled or matched"}}`))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	err := client.CancelOrder(context.Background(), "0xabc")
+	var refused *CancelRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("expected a refusal, got %v", err)
+	}
+	if !refused.OrderGone() {
+		t.Fatalf("refusal %q should read as the order already gone", refused.Reason)
+	}
+	if (&CancelRefusedError{Reason: "order is pending"}).OrderGone() {
+		t.Fatal("a pending order is not gone")
 	}
 }
