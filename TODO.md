@@ -37,7 +37,14 @@
 - **Impact:** while stalled, no other order's deadline or drift is checked; a
   child can rest about 1s past its deadline.
 
-- [x] Deploy it to `executiond-london`; check for the overrun warning and the cancel p90.
+- [x] Deploy and check the overrun warning and the cancel p90. Verified on
+  `executiond` (aws-london-light's wallet; `executiond-london` ran no
+  ladders) from the Quote* lanes, 13:51-17:25 UTC: no overrun warning; batched
+  cancel latency n=138 p50 84ms, p90 181ms, max 271ms (was 66/533/1444ms);
+  cancels went out in batches of 3 (34), 2 (15), 1 (6).
+- [x] Two instances on one host: each needs its own `EXECUTION_METRICS_ADDR`
+  (`executiond` 9108, `executiond-london` 9109). A bind clash no longer exits
+  the daemon, and `deploy.sh` refuses a clashing port (2807b7c).
 - [x] Batch `/orders` place and cancel: one call per ladder (≤15 orders),
   404/405 falls back to single calls. Probed live 2026-11-09
   (`cmd/batchprobe`): a refused order in a batch answers `success=true` with
@@ -45,9 +52,21 @@
 - [x] Prometheus `/metrics` on `EXECUTION_METRICS_ADDR` (default
   `127.0.0.1:9108`; pmm uses 9090-9096/9099): `executiond_cancel_seconds`,
   `executiond_loop_pass_seconds`, `executiond_order_http_*`, prepost, keep-warm.
-- [ ] Ladder POST ttfb rises about +100ms per child (186, 288, 393ms). Check for per-account throttling or a proxy queue; concurrent cancels might worsen it.
+- [x] Ladder POST ttfb rose about +100ms per child (186, 288, 393ms) when
+  children were separate POSTs. Gone with batching: 51 `POST /orders` on
+  2026-11-09, ttfb flat across batch sizes (2 orders about 40-300ms, 3 orders
+  about 40-420ms; single `POST /order` p50 131ms, p90 245ms). No 404/405
+  fallbacks.
+- [ ] Slow first quote placement: 5 batch POSTs took 1.0-2.3s ttfb (14:28:01,
+  15:28:53, 15:39:15, 16:13:59, 16:43:30 UTC), each the first placement of a
+  new quote lane, on a reused connection (no connect or TLS time), so the
+  delay is on the exchange's side. It costs 1-2s of FIFO queue position on a
+  lane's first quote. Check whether it tracks the first order per market or
+  token (exchange-side lookup) and whether a pre-warm call could absorb it.
 
 ## Reposting (2026-11-09)
 
 - [ ] Check that 25 ms reposts are not throttled (order POSTs skip the client's
-  rate limiter); see the POST ttfb item above.
+  rate limiter). Not exercised yet: no 429s on 2026-11-09, but only 3
+  post-only crosses and about 51 quote re-statements in 3.5h. Check together
+  with the requote-rate item under "Quote ladders" once FairDeltaQuote runs.
