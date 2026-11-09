@@ -631,8 +631,9 @@ func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrd
 // isPostOnlyCross reports whether the exchange refused an order only because
 // a post-only order would have matched: a definite rejection that a repost
 // may succeed after the book moves. The CLOB gives no structured code, only
-// text, believed to read "invalid post-only order: order crosses book". That
-// wording has not been confirmed against a live rejection: the match is a
+// text. Confirmed live on 2026-11-08 (cmd/postonlyprobe): HTTP 400 with body
+// {"error":"invalid post-only order: order crosses book"}, so the reason reads
+// `HTTP 400 for POST /order: {...}`. The match is deliberately looser: a
 // post-only refusal that says cross or marketable. Any other refusal is final,
 // so an unrecognised wording fails the level instead of retrying it forever.
 func isPostOnlyCross(reason string) bool {

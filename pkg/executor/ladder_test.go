@@ -807,13 +807,15 @@ func TestCloseStopsRunningLadders(t *testing.T) {
 
 func TestIsPostOnlyCross(t *testing.T) {
 	for reason, want := range map[string]bool{
-		"invalid post-only order: order crosses book":  true,
-		"INVALID_POST_ONLY_ORDER: order would cross":   true,
-		"post only order is marketable":                true,
-		"not enough balance / allowance":               false,
-		"order crosses book":                           false, // not post-only: say nothing about retrying
-		"invalid post-only order: price off tick grid": false,
-		"the maker address is not allowed (post only)": false,
+		"invalid post-only order: order crosses book": true,
+		// Observed live 2026-11-08 (cmd/postonlyprobe): HTTP 400, not success=false.
+		`HTTP 400 for POST /order: {"error":"invalid post-only order: order crosses book"}`: true,
+		"INVALID_POST_ONLY_ORDER: order would cross":                                        true,
+		"post only order is marketable":                                                     true,
+		"not enough balance / allowance":                                                    false,
+		"order crosses book":                                                                false, // not post-only: say nothing about retrying
+		"invalid post-only order: price off tick grid":                                      false,
+		"the maker address is not allowed (post only)":                                      false,
 		"": false,
 	} {
 		if got := isPostOnlyCross(reason); got != want {
