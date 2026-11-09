@@ -345,6 +345,28 @@ func TestQuoteParkedLevelThatLeavesWantIsCancelledLocally(t *testing.T) {
 	}
 }
 
+func TestQuoteParkedLevelCancelledOutsideTheLaneStopsWorking(t *testing.T) {
+	// The lane scan of a close can cancel a parked level locally, behind the
+	// lane: no account-feed event follows, so the next repost's conflict is
+	// the lane's only sign that the level ended.
+	h := newQuoteHarness(t)
+	h.clob.forever(0.52)
+	h.apply(t, quoteRequest(1, "0.52"))
+	lane := h.lane()
+	lane.mu.Lock()
+	intent := lane.intent
+	lane.mu.Unlock()
+	eventually(t, "the parked level is cancelled", func() bool {
+		order := h.orderAt(t, 52)
+		if order.State == statemachine.StateRetryPending {
+			_ = h.exec.cancelParkedOrder(context.Background(), intent, order, "lane scan")
+		}
+		order, err := h.store.OrderByIntent(context.Background(), order.IntentID, order.ChildSequence)
+		return err == nil && order.State == statemachine.StateCanceled
+	})
+	eventually(t, "the cancelled level stops working", func() bool { return len(h.working()) == 0 })
+}
+
 func TestQuoteForceCloseWithdrawsLevels(t *testing.T) {
 	h := newQuoteHarness(t)
 	h.apply(t, quoteRequest(1, "0.52", "0.51"))

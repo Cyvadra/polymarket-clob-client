@@ -163,7 +163,7 @@ func (e *CancelRefusedError) Error() string {
 // (filled, cancelled, or unknown to the book), so there is nothing to cancel.
 func (e *CancelRefusedError) OrderGone() bool {
 	reason := strings.ToLower(e.Reason)
-	for _, marker := range []string{"not found", "can't be found", "cannot be found", "already canceled", "already cancelled", "matched"} {
+	for _, marker := range []string{"not found", "can't be found", "cannot be found", "already canceled", "already cancelled"} {
 		if strings.Contains(reason, marker) {
 			return true
 		}

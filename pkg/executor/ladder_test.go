@@ -28,6 +28,8 @@ type memStore struct {
 	// buyBudget, when positive, is how many BUY reservations succeed before
 	// the rest are refused for the exposure limit.
 	buyBudget int
+	// onPhase, when set, runs after each ladder phase move, outside mu.
+	onPhase func(id string, to store.LadderPhase)
 }
 
 func (s *memStore) Reserve(ctx context.Context, record store.ReservationRecord) error {
@@ -232,6 +234,11 @@ func (s *memStore) MoveLadderPhase(_ context.Context, id string, to store.Ladder
 		return false, nil
 	}
 	s.phases[id] = to
+	if hook := s.onPhase; hook != nil {
+		s.mu.Unlock()
+		hook(id, to)
+		s.mu.Lock()
+	}
 	return true, nil
 }
 
@@ -1020,6 +1027,31 @@ func TestCancelTakenBeforeAnyLevelWasSavedStopsTheLadder(t *testing.T) {
 	}
 	if results := h.sink.published(); len(results) != 1 || results[0].ReasonCode != protocol.ReasonCanceled {
 		t.Fatalf("results=%+v, want one CANCELED result", results)
+	}
+}
+
+func TestLadderStoppedBeforeAnyLevelWasReservedIsRejected(t *testing.T) {
+	// The stop lands between PLACING and the first reservation: nothing is
+	// placed or parked, and the open must still get its one result.
+	h := newLadderHarness(t)
+	h.store.onPhase = func(id string, to store.LadderPhase) {
+		if to == store.LadderPlacing {
+			// stop's cancel without its wait: the run is the caller.
+			h.exec.ladders.mu.Lock()
+			run := h.exec.ladders.runs[id]
+			h.exec.ladders.mu.Unlock()
+			run.cancel()
+		}
+	}
+	// Execute's error is what ExecuteOpen publishes as the rejection.
+	if err := h.exec.Execute(context.Background(), ladderIntent("i")); err == nil {
+		t.Fatal("a ladder stopped before placement returned no error, so no result is published")
+	}
+	if got := h.clob.totalPosts(); got != 0 {
+		t.Fatalf("%d posts from a ladder stopped before placement", got)
+	}
+	if results := h.sink.published(); len(results) != 0 {
+		t.Fatalf("results=%+v, want none from the ladder itself", results)
 	}
 }
 

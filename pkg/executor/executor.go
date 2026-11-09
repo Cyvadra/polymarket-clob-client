@@ -371,15 +371,17 @@ func (e *Executor) cancelOpenOrder(ctx context.Context, policy protocol.Executio
 		order = updated
 	}
 	err := e.cancelExchangeOrder(ctx, order.ExchangeOrderID, cancelTimeout(policy))
+	reason = "cancellation accepted"
 	if cancelGone(err) {
 		// Already filled or cancelled on the exchange: the user stream or
-		// the reconciler records which.
-		return nil
+		// the reconciler records which. CANCEL_PENDING still takes it off
+		// the watcher, which would otherwise keep re-sending the cancel.
+		err, reason = nil, "cancel refused: order already ended"
 	}
 	if err != nil {
 		return fmt.Errorf("cancel order %s: %w", order.ExchangeOrderID, err)
 	}
-	if _, err := e.store.TransitionOrder(ctx, order, statemachine.EventCancelAccepted, order.MatchedShares, order.ExchangeOrderID, "cancellation accepted"); err != nil && err != store.ErrConflict {
+	if _, err := e.store.TransitionOrder(ctx, order, statemachine.EventCancelAccepted, order.MatchedShares, order.ExchangeOrderID, reason); err != nil && err != store.ErrConflict {
 		return fmt.Errorf("mark order %s cancellation pending: %w", order.ExchangeOrderID, err)
 	}
 	return nil

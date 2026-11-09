@@ -227,6 +227,11 @@ func (e *Executor) placeLadder(ctx context.Context, intent protocol.ExecutionInt
 	e.moveLadderPhaseRetrying(postCtx, intent.IntentID, next, store.LadderPlacing, store.LadderStopping)
 	if next == store.LadderPublished {
 		run.finish()
+		if placeErr == nil {
+			// Stopped before the first level was reserved: still a result
+			// the strategy is owed.
+			placeErr = fmt.Errorf("multi-level intent %s stopped before any level was placed", intent.IntentID)
+		}
 		return placeErr
 	}
 	if placeErr != nil {
@@ -474,7 +479,12 @@ func (e *Executor) repostLevel(ctx context.Context, intent protocol.ExecutionInt
 	submitting, err := e.store.ResignRetryOrder(ctx, order, signed.payload, signed.hash, signed.salt, signed.order.OrderID, "retry post-only cross")
 	switch {
 	case errors.Is(err, store.ErrConflict):
-		// Something else moved the order: it is no longer parked.
+		// Something else moved the order: it is no longer parked. The fresh
+		// row tells the caller whether it ended (a local cancel sends no
+		// account-feed event to say so).
+		if fresh, err := e.store.OrderByIntent(ctx, order.IntentID, order.ChildSequence); err == nil {
+			order = fresh
+		}
 		return order, repostSettled, nil
 	case err != nil:
 		return order, repostLater, fmt.Errorf("re-sign parked order: %w", err)

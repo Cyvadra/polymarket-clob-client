@@ -95,6 +95,8 @@ type quoteLane struct {
 type pendingQuote struct {
 	req  protocol.ExecutionQuoteRequest
 	want []int
+	// receivedAt times the request's pre-post latency from its arrival.
+	receivedAt time.Time
 }
 
 // quoteRegistry holds the lanes this process knows.
@@ -303,12 +305,12 @@ func (e *Executor) ApplyQuote(ctx context.Context, req protocol.ExecutionQuoteRe
 		lane.mu.Unlock()
 		return nil
 	}
-	lane.pending = &pendingQuote{req: req, want: want}
+	lane.pending = &pendingQuote{req: req, want: want, receivedAt: received}
 	start := !lane.draining
 	lane.draining = true
 	lane.mu.Unlock()
 	if start {
-		base := context.WithValue(context.WithoutCancel(ctx), receivedAtKey{}, received)
+		base := context.WithoutCancel(ctx)
 		if !e.quoteLanes.goRun(func() { e.drainQuote(base, lane) }) {
 			lane.mu.Lock()
 			lane.draining = false
@@ -342,12 +344,11 @@ func (e *Executor) drainQuote(ctx context.Context, lane *quoteLane) {
 			return
 		}
 		lane.mu.Unlock()
-		if err := e.applyQuote(ctx, lane, next.req, next.want); err != nil {
+		applyCtx := context.WithValue(ctx, receivedAtKey{}, next.receivedAt)
+		if err := e.applyQuote(applyCtx, lane, next.req, next.want); err != nil {
 			e.reportError(fmt.Errorf("quote %s seq %d for %s: %w", next.req.RequestID, next.req.Seq, next.req.UniqueTag, err))
 		}
 		lane.ops.Unlock()
-		// The next request is timed from when it arrived, not from this one.
-		ctx = context.WithValue(ctx, receivedAtKey{}, time.Now())
 	}
 }
 
@@ -857,6 +858,12 @@ func (e *Executor) repostQuoteLevels(ctx context.Context, lane *quoteLane, inten
 		case r.outcome == repostParkedAgain:
 			r.level.order = r.order
 			failures[r.level.sequence] = 0
+		case r.outcome == repostSettled && r.err == nil && statemachine.IsTerminal(r.order.State):
+			// Ended elsewhere (cancelled by the lane scan, say): no longer working.
+			if lane.levels[r.level.cents] == r.level {
+				delete(lane.levels, r.level.cents)
+			}
+			settled++
 		case r.outcome == repostSettled && (r.err == nil || errors.As(r.err, &unresolved)):
 			// Resting, filled, or unknown and left to the reconciler.
 			r.level.parked = false
