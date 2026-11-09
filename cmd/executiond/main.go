@@ -480,7 +480,6 @@ func configFromEnv() (config, error) {
 	cfg := config{
 		NATSURL:                env("EXECUTION_NATS_URL", "nats://127.0.0.1:4222"),
 		PostgresURL:            env("EXECUTION_POSTGRES_URL", "postgres://user:password@127.0.0.1:5432/execution?sslmode=disable"),
-		MaxOpenBuyNotionalUSD:  strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD")),
 		FeatureInterval:        durationEnv("EXECUTION_POSITION_FEATURE_INTERVAL", 500*time.Millisecond),
 		ReconcileInterval:      durationEnv("EXECUTION_RECONCILE_INTERVAL", 30*time.Second),
 		SettlementInterval:     durationEnv("EXECUTION_SETTLEMENT_SWEEP_INTERVAL", time.Minute),
@@ -497,7 +496,9 @@ func configFromEnv() (config, error) {
 		MetricsAddr:            metricsAddrEnv(),
 		ShutdownGracePeriod:    durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
-	if path := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGIES_FILE")); path != "" {
+	path := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGIES_FILE"))
+	fromFile := path != ""
+	if fromFile {
 		for _, name := range strategyEnvVars {
 			if strings.TrimSpace(os.Getenv(name)) != "" {
 				return config{}, fmt.Errorf("EXECUTION_STRATEGIES_FILE replaces %s; set one or the other", name)
@@ -509,6 +510,24 @@ func configFromEnv() (config, error) {
 		}
 		deprecated = append(deprecated, bare...)
 	} else {
+		cfg.MaxOpenBuyNotionalUSD = strings.TrimSpace(os.Getenv("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD"))
+		if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_DRAWDOWN")); value != "" {
+			limit, bare, err := parseDrawdownLimit(value)
+			if err != nil {
+				return config{}, fmt.Errorf("EXECUTION_MAX_DRAWDOWN: %w", err)
+			}
+			if bare {
+				deprecated = append(deprecated, value)
+			}
+			cfg.MaxDrawdown = limit
+		}
+		if value := strings.TrimSpace(os.Getenv("EXECUTION_EQUITY_FLOW_THRESHOLD_USD")); value != "" {
+			threshold, err := strconv.ParseFloat(value, 64)
+			if err != nil || threshold < 0 {
+				return config{}, fmt.Errorf("EXECUTION_EQUITY_FLOW_THRESHOLD_USD must be a non-negative number")
+			}
+			cfg.EquityFlowThresholdUSD = threshold
+		}
 		allowed, err := nats.ParseAllowlist(os.Getenv("EXECUTION_ALLOWED_STRATEGIES"))
 		if err != nil {
 			return config{}, fmt.Errorf("EXECUTION_ALLOWED_STRATEGIES must list the strategies this wallet trades, comma-separated: %w", err)
@@ -537,7 +556,7 @@ func configFromEnv() (config, error) {
 		log.Printf("the strategy allowlist is %q: this wallet acts on every strategy on the bus, so any other executiond on this NATS server repeats its trades", nats.Wildcard)
 	}
 	if cfg.MaxOpenBuyNotionalUSD != "" && !decimal.Positive(cfg.MaxOpenBuyNotionalUSD) {
-		return config{}, fmt.Errorf("EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD must be a positive decimal")
+		return config{}, fmt.Errorf("the max open buy notional must be a positive decimal")
 	}
 	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_EQUITY_FRACTION")); value != "" {
 		fraction, err := strconv.ParseFloat(value, 64)
@@ -553,36 +572,24 @@ func configFromEnv() (config, error) {
 		}
 		cfg.MaxLadderLevels = levels
 	}
-	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_DRAWDOWN")); value != "" {
-		limit, bare, err := parseDrawdownLimit(value)
-		if err != nil {
-			return config{}, fmt.Errorf("EXECUTION_MAX_DRAWDOWN: %w", err)
+	if cfg.drawdownLimited() && cfg.DrawdownStart.IsZero() {
+		if fromFile {
+			return config{}, fmt.Errorf("EXECUTION_STRATEGIES_FILE: drawdown_start is required with a drawdown limit")
 		}
-		if bare {
-			deprecated = append(deprecated, value)
-		}
-		cfg.MaxDrawdown = limit
-	}
-	if cfg.drawdownLimited() {
 		start, err := parseStart(os.Getenv("EXECUTION_DRAWDOWN_START"))
 		if err != nil {
 			return config{}, fmt.Errorf("EXECUTION_DRAWDOWN_START: %w", err)
 		}
 		cfg.DrawdownStart = start
 	}
-	if value := strings.TrimSpace(os.Getenv("EXECUTION_EQUITY_FLOW_THRESHOLD_USD")); value != "" {
-		threshold, err := strconv.ParseFloat(value, 64)
-		if err != nil || threshold < 0 {
-			return config{}, fmt.Errorf("EXECUTION_EQUITY_FLOW_THRESHOLD_USD must be a non-negative number")
+	if !fromFile {
+		if value := strings.TrimSpace(os.Getenv("EXECUTION_SIZE_AFTER_LOSS_ONLY")); value != "" {
+			enabled, err := strconv.ParseBool(value)
+			if err != nil {
+				return config{}, fmt.Errorf("EXECUTION_SIZE_AFTER_LOSS_ONLY must be true or false")
+			}
+			cfg.SizeAfterLossOnly = enabled
 		}
-		cfg.EquityFlowThresholdUSD = threshold
-	}
-	if value := strings.TrimSpace(os.Getenv("EXECUTION_SIZE_AFTER_LOSS_ONLY")); value != "" {
-		enabled, err := strconv.ParseBool(value)
-		if err != nil {
-			return config{}, fmt.Errorf("EXECUTION_SIZE_AFTER_LOSS_ONLY must be true or false")
-		}
-		cfg.SizeAfterLossOnly = enabled
 	}
 	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.KeepWarmInterval < 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")

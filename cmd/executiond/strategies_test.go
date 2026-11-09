@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 )
@@ -19,12 +20,13 @@ func withStrategyFile(t *testing.T, body string) {
 	withEnv(t, map[string]string{
 		"EXECUTION_STRATEGIES_FILE":    path,
 		"EXECUTION_ALLOWED_STRATEGIES": "",
-		"EXECUTION_DRAWDOWN_START":     "2026-10-19T06:30:00Z",
+		"EXECUTION_DRAWDOWN_START":     "",
 	})
 }
 
 func TestConfigFromEnvReadsStrategyFile(t *testing.T) {
 	withStrategyFile(t, `{
+		"drawdown_start": "2026-10-19T06:30:00Z",
 		"default_max_drawdown": "20%",
 		"strategies": {
 			"LockInDS":        {"max_drawdown": "$80"},
@@ -98,5 +100,40 @@ func TestConfigFromEnvRejectsUpDownPairInEnv(t *testing.T) {
 	withEnv(t, map[string]string{"EXECUTION_ALLOWED_STRATEGIES": "LockInDS,CalmFavSimpUp,CalmFavSimpDown"})
 	if _, err := configFromEnv(); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func TestConfigFromEnvReadsStrategyFileUSDSettings(t *testing.T) {
+	withStrategyFile(t, `{
+		"max_open_buy_notional_usd": 5000.5,
+		"max_drawdown": "$50",
+		"equity_flow_threshold_usd": 2,
+		"drawdown_start": "2026-10-19",
+		"size_after_loss_only": true,
+		"strategies": {"LockInDS": {}}
+	}`)
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if cfg.MaxOpenBuyNotionalUSD != "5000.5" || cfg.MaxDrawdown != equity.DollarLimit(50) || cfg.EquityFlowThresholdUSD != 2 ||
+		!cfg.SizeAfterLossOnly || !cfg.DrawdownStart.Equal(time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("cfg=%+v", cfg)
+	}
+}
+
+func TestConfigFromEnvRejectsBadStrategyFileUSDSettings(t *testing.T) {
+	for _, body := range []string{
+		`{"max_open_buy_notional_usd": 0, "strategies": {"A": {}}}`,
+		`{"max_drawdown": "abc", "strategies": {"A": {}}}`,
+		`{"equity_flow_threshold_usd": -1, "strategies": {"A": {}}}`,
+		`{"max_drawdown": "10%", "strategies": {"A": {}}}`,
+		`{"max_drawdown": "10%", "drawdown_start": "yesterday", "strategies": {"A": {}}}`,
+		`{"size_after_loss_only": "yes", "strategies": {"A": {}}}`,
+	} {
+		withStrategyFile(t, body)
+		if _, err := configFromEnv(); err == nil {
+			t.Fatalf("expected an error for %s", body)
+		}
 	}
 }

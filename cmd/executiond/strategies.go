@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
@@ -17,8 +18,13 @@ import (
 // strategyFile is the JSON EXECUTION_STRATEGIES_FILE names: the strategies
 // this wallet trades, keyed by name prefix, each with its own settings.
 type strategyFile struct {
-	DefaultMaxDrawdown string                      `json:"default_max_drawdown"`
-	Strategies         map[string]strategySettings `json:"strategies"`
+	MaxOpenBuyNotionalUSD  json.Number                 `json:"max_open_buy_notional_usd"`
+	MaxDrawdown            string                      `json:"max_drawdown"`
+	EquityFlowThresholdUSD json.Number                 `json:"equity_flow_threshold_usd"`
+	DefaultMaxDrawdown     string                      `json:"default_max_drawdown"`
+	DrawdownStart          string                      `json:"drawdown_start"`
+	SizeAfterLossOnly      *bool                       `json:"size_after_loss_only"`
+	Strategies             map[string]strategySettings `json:"strategies"`
 }
 
 type strategySettings struct {
@@ -28,7 +34,7 @@ type strategySettings struct {
 
 // strategyEnvVars are the per-strategy settings the file replaces; setting
 // both would leave two sources to disagree.
-var strategyEnvVars = []string{"EXECUTION_ALLOWED_STRATEGIES", "EXECUTION_STRATEGY_MAX_DRAWDOWN", "EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN"}
+var strategyEnvVars = []string{"EXECUTION_MAX_OPEN_BUY_NOTIONAL_USD", "EXECUTION_MAX_DRAWDOWN", "EXECUTION_EQUITY_FLOW_THRESHOLD_USD", "EXECUTION_DRAWDOWN_START", "EXECUTION_SIZE_AFTER_LOSS_ONLY", "EXECUTION_ALLOWED_STRATEGIES", "EXECUTION_STRATEGY_MAX_DRAWDOWN", "EXECUTION_STRATEGY_DEFAULT_MAX_DRAWDOWN"}
 
 // loadStrategyFile reads the strategy file into cfg. Its keys are the
 // allowlist, so they follow the allowlist's rules: prefixes that do not
@@ -49,6 +55,40 @@ func loadStrategyFile(path string, cfg *config) ([]string, error) {
 	if _, err := decoder.Token(); err != io.EOF {
 		return nil, fmt.Errorf("parse %s: trailing data after the JSON object", path)
 	}
+	var bares []string
+	if value := file.MaxOpenBuyNotionalUSD.String(); value != "" {
+		if !decimal.Positive(value) {
+			return nil, fmt.Errorf("max_open_buy_notional_usd %s must be a positive number", value)
+		}
+		cfg.MaxOpenBuyNotionalUSD = value
+	}
+	if value := strings.TrimSpace(file.MaxDrawdown); value != "" {
+		limit, bare, err := parseDrawdownLimit(value)
+		if err != nil {
+			return nil, fmt.Errorf("max_drawdown: %w", err)
+		}
+		if bare {
+			bares = append(bares, value)
+		}
+		cfg.MaxDrawdown = limit
+	}
+	if value := file.EquityFlowThresholdUSD.String(); value != "" {
+		threshold, err := strconv.ParseFloat(value, 64)
+		if err != nil || threshold < 0 {
+			return nil, fmt.Errorf("equity_flow_threshold_usd %s must be a non-negative number", value)
+		}
+		cfg.EquityFlowThresholdUSD = threshold
+	}
+	if value := strings.TrimSpace(file.DrawdownStart); value != "" {
+		start, err := parseStart(value)
+		if err != nil {
+			return nil, fmt.Errorf("drawdown_start: %w", err)
+		}
+		cfg.DrawdownStart = start
+	}
+	if file.SizeAfterLossOnly != nil {
+		cfg.SizeAfterLossOnly = *file.SizeAfterLossOnly
+	}
 	names := make([]string, 0, len(file.Strategies))
 	for name := range file.Strategies {
 		if name != strings.TrimSpace(name) || name == "" {
@@ -62,7 +102,6 @@ func loadStrategyFile(path string, cfg *config) ([]string, error) {
 		return nil, fmt.Errorf("strategies: %w", err)
 	}
 	cfg.AllowedStrategies = allowed
-	var bares []string
 	for _, name := range names {
 		settings := file.Strategies[name]
 		if value := strings.TrimSpace(settings.MaxDrawdown); value != "" {

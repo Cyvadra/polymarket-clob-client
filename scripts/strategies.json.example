@@ -1,4 +1,9 @@
 {
+  "max_open_buy_notional_usd": 5000,
+  "max_drawdown": "15%",
+  "equity_flow_threshold_usd": 1,
+  "drawdown_start": "2026-10-19T06:30:00Z",
+  "size_after_loss_only": false,
   "default_max_drawdown": "20%",
   "strategies": {
     "late-gap": {"max_drawdown": "$200"},
