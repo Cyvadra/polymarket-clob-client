@@ -43,6 +43,8 @@ Every instance answers `strategy.execution.position.query` and `strategy.executi
 | `execution.open.result` | executiond -> strategy | `ExecutionOpenResult` | Success or failure for an open request. |
 | `strategy.execution.close` | strategy -> executiond | `ExecutionCloseRequest` | Close current position using limit-close or force-close mode, or withdraw a working entry with cancel-open mode. |
 | `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | Success or failure for a close request. |
+| `strategy.execution.quote` | strategy -> executiond | `ExecutionQuoteRequest` | State which cents a quote lane wants a post-only buy resting at. |
+| `execution.quote.result` | executiond -> strategy | `ExecutionQuoteResult` | The first fill that ended a quote lane; nothing else is published for a quote. |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition. |
 | `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Cached quote snapshot for tactics. |
 | `pmm.market.levels` | market data -> executiond | pmm `messaging.MarketLevels` | Top of each market's maintained book, when the collector publishes it (`clob.levels: publish`); read by the drift check before the quote. |
@@ -106,6 +108,109 @@ A lane in a market that has resolved is emptied by executiond once its shares ar
 **Restarts and lost publishes.** A restarted executiond resumes retrying parked levels until the deadline, and moves a ladder whose placement the old process did not finish out of `PLACING`. Every second it also publishes the result of any ladder whose levels have all ended and whose result is still owed, whether the process died before publishing or the publish failed, so each ladder reports exactly once.
 
 The ladder's lifecycle is stored in `order_intents.ladder_phase` (`PLACING`, `ACTIVE`, `STOPPING`, `PUBLISHED`), not in `status`: the status follows every child order's state and would overwrite a marker.
+
+## Quote ladders
+
+A quote lane is a strategy making a market. It keeps telling executiond which whole cents it wants a post-only GTC buy resting at, and executiond keeps the lane's orders to match. A level that is still wanted is left alone, so it keeps its place in the exchange's FIFO queue. Both subjects are allowed under `EXECUTION_ALLOWED_STRATEGIES`, as opens are; a quote for another wallet's strategy is dropped silently.
+
+The **lane** is `unique_tag` + `condition_id` + `token_id`, and every rule below applies per lane.
+
+### ExecutionQuoteRequest
+
+```json
+{
+  "schema_version": "execution.v1",
+  "request_id": "e1a2-1234",
+  "unique_tag": "QuoteVUp:btc-updown-5m-1762650000",
+  "strategy": "QuoteVUp",
+  "event_slug": "btc-updown-5m-1762650000",
+  "condition_id": "0xabc...",
+  "token_id": "1234...",
+  "outcome": "Up",
+  "side": "BUY",
+  "seq": 1762650123456789000,
+  "levels": ["0.52", "0.51", "0.50"],
+  "target_usd": "5.00",
+  "post_only": true,
+  "expires_at": "2026-11-09T01:02:06Z",
+  "signal_price": "0.5350",
+  "max_signal_drift": "0.0300",
+  "feature_seq": 812345,
+  "feature_completed_at": "2026-11-09T01:02:03Z",
+  "created_at": "2026-11-09T01:02:03.120Z",
+  "trigger": "tick",
+  "tick_visible_at": "2026-11-09T01:02:03.100Z"
+}
+```
+
+| Field | Rules |
+| --- | --- |
+| `side`, `post_only` | Always `BUY` and `true`. Every level is a post-only GTC buy. |
+| `seq` | A positive int64; pmm stamps it from its clock in nanoseconds. A request applies only if its `seq` is above the last one applied on the lane. Any other request is dropped silently, so a late, duplicated or reordered message is harmless. |
+| `levels` | Whole-cent prices, highest first and distinct, at most `EXECUTION_MAX_LADDER_LEVELS`. **May be empty**, meaning nothing should rest. A price that is not a whole cent in `(0, 1)` makes the whole request invalid: it is dropped and the previous state is kept. |
+| `target_usd` / `target_equity_fraction` | Exactly one when `levels` is non-empty. It is the size of **each** level (flat, as for `MULTI_LEVEL_LIMIT`). The size multiplier applies. |
+| `expires_at` | Required: the lane's deadline. |
+| `signal_price`, `max_signal_drift` | Optional and set together; the bound has the same meaning as on an open and applies to every level. |
+| `request_id` | Opaque. It is stored on the levels a request posts, and the result echoes the one whose level filled. |
+| provenance | `feature_seq`, `feature_completed_at` and `created_at` are stored on the lane's intent for audit. |
+
+An invalid request publishes nothing; executiond only logs it.
+
+### What a request does
+
+1. A lane that is **done** (see below) refuses every request, including an empty one.
+2. A request whose `seq` is not above the last one applied is dropped.
+3. The request's levels (`want`) are diffed by price against the lane's working levels (`have`):
+   - **In both:** the order is left alone, with no cancel, re-post or amend, and the lane's deadline moves to the new `expires_at`. A level parked for a cross retry stays parked.
+   - **In `have` only:** cancelled. Resting levels go out in one batch `/orders` cancel, and parked ones are cancelled locally.
+   - **In `want` only:** posted with the reservation, sizing and minimum-size rules of a `MULTI_LEVEL_LIMIT` level, all new levels in one batch `/orders` post. A level refused because it would cross parks and is reposted every 25 ms (backing off while it keeps crossing) until it rests, fills, leaves `want`, or the lane's deadline or drift bound passes. A level refused for any other reason is not kept, so a later request tries it again.
+   - **Empty `want`:** every working level is cancelled at once. The lane is not done, and a later request may quote again.
+4. **Deadline.** Once `expires_at` passes with no newer request, every working level is cancelled. This is the safety net for a strategy that stopped. It ends nothing: a later request quotes again.
+5. **Drift.** The bound is checked before a request posts and on every deadline pass (every 50 ms). A breach cancels every level, or posts none. The lane continues.
+
+Each lane applies its requests one at a time, and one lane's exchange calls never hold up another's. A request that arrives while the lane is still posting or cancelling waits, and only the newest waiting request is applied.
+
+### The first fill ends the quote
+
+When any level reports a fill, partial or whole, through the order stream, the trade stream, reconciliation or a submission that matched on arrival:
+
+1. The lane is marked done at once, before any exchange call.
+2. Every other working level, and the unfilled rest of the filled one, is cancelled in one batch call, and retries stop.
+3. One `ExecutionQuoteResult` is published without waiting for the cancels. More fills that land before the cancels reach the strategy through `position.features.*`.
+4. The position is booked as for an open. The whole quote is one lot in `open_lots`, because every level is a child of the lane's one intent.
+
+A done lane stays done; it is never reopened. `FORCE_CLOSE` or `CANCEL_OPEN` on a quote lane cancels every working level without ending the lane. pmm never sends `CANCEL_OPEN` for a quote lane.
+
+### ExecutionQuoteResult
+
+```json
+{
+  "schema_version": "execution.v1",
+  "request_id": "e1a2-1234",
+  "unique_tag": "QuoteVUp:btc-updown-5m-1762650000",
+  "strategy": "QuoteVUp",
+  "wallet_address": "0x...",
+  "condition_id": "0xabc...",
+  "token_id": "1234...",
+  "outcome": "Up",
+  "side": "BUY",
+  "status": "FILLED",
+  "price": "0.51",
+  "filled_shares": 9.8,
+  "average_price": 0.51,
+  "occurred_at": "2026-11-09T01:02:04.310Z"
+}
+```
+
+- `status` is always `FILLED`. An emptied, expired, drifted or refused quote publishes nothing.
+- `price` is the filled level. `filled_shares` and `average_price` are what was known when the result was published, and need not be final.
+- One result is published per lane per wallet. The owed result is stored before it is published and marked sent only after, so a crash in between can repeat it after the restart but never lose it. A consumer should count a lane's first `FILLED` once. Until the fill's trade has landed, `average_price` is the level's price: a post-only buy fills as the maker, at its own price.
+
+With several wallets, every allowed instance applies a quote for its own wallet. A fill in wallet A makes A done while B's levels keep working. pmm answers the first `FILLED` with an empty quote at a higher `seq`: B cancels its levels, and A drops the request because it is done.
+
+### Restarts
+
+Stored per lane in `quote_lanes`: the last `seq`, the deadline, `done`, and whether the result is owed. The working levels are child orders of the lane's `QUOTE` intent, and `quote_levels` keeps the request that posted each one. A restarted executiond adopts resting levels and keeps applying the deadline, and the strategy re-states the quote within a second. Until it does, no drift bound applies, because the stored one is the lane's first request's. If two open orders are found at one price, the older is cancelled. A level whose fill arrived while the process was down still ends the quote, and an owed result is published once.
 
 ## ExecutionOpenRequest
 

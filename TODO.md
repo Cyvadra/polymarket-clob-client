@@ -2,10 +2,29 @@
 
 ## Quote ladders for pmm (requested 2026-11-09)
 
-- [ ] Implement `strategy.execution.quote` / `execution.quote.result`: the
-  spec and its checklist are in
-  [docs/protocol/quote-ladder.md](docs/protocol/quote-ladder.md). pmm's
-  FairDeltaQuote lanes stay disabled until it ships.
+- [x] Implement `strategy.execution.quote` / `execution.quote.result`. The
+  contract is in [nats-v1.md](docs/protocol/nats-v1.md#quote-ladders) and the
+  code in `pkg/executor/quote.go`. Unit tests cover: a kept level makes no
+  exchange call, a stale seq is dropped, empty quotes and deadlines cancel
+  without setting done, the first fill makes one result and one batch cancel,
+  a parked level is reposted, force close, and restart adoption with an owed
+  result.
+- [ ] Run the Postgres store tests (`go test -tags postgres
+  ./pkg/store/postgres/ -run Quote`, with `EXECUTION_TEST_POSTGRES_URL`) and
+  apply migration `000012_quote_lanes.sql`.
+- [ ] Live checks before pmm enables FairDeltaQuote (pmm `NOTICE.md`):
+  - On `executiond-london`, publish two quotes that share a level. In
+    `order_events`, check that no `CANCEL_REQUESTED` and no new child appear
+    at the shared price.
+  - Check that the post-only cross wording (39c6357) also holds for a level
+    posted through the batch `/orders` call (per-order `errorMsg`).
+  - Check `executiond_quote_fill_to_cancel_seconds` after the first real
+    fills. It bounds how often a sweep fills two levels.
+  - The requote rate: about 60 level cancels per quoted market in pmm's
+    replay of 2026-11-01. Compare `executiond_quote_levels_total` with the
+    exchange's limits and `executiond_loop_pass_overruns_total`.
+  - Restart with levels resting. They should be adopted, the deadline should
+    still apply, and an owed result should be published once.
 
 ## Deadline pass stalls on serial ladder cancels (found 2026-11-09, aws-london-light)
 
@@ -18,7 +37,7 @@
 - **Impact:** while stalled, no other order's deadline or drift is checked; a
   child can rest about 1s past its deadline.
 
-- [ ] Deploy it to `executiond-london`; check for the overrun warning and the cancel p90.
+- [x] Deploy it to `executiond-london`; check for the overrun warning and the cancel p90.
 - [x] Batch `/orders` place and cancel: one call per ladder (≤15 orders),
   404/405 falls back to single calls. Probed live 2026-11-09
   (`cmd/batchprobe`): a refused order in a batch answers `success=true` with
