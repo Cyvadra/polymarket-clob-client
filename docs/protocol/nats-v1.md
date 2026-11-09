@@ -85,9 +85,31 @@ A lane in a market that has resolved is emptied by executiond once its shares ar
 
 `open_lots` is how many separate open requests make up the position the lane holds now: one lot per intent, however many child orders or partial fills it took, counting only fills since the position was last empty. It is meaningful only when `has_position` is true: an empty position has zero lots, which the wire omits, and an executiond that predates the field omits it too — so a consumer that needs it must treat an absent value on an open position as "unknown" rather than as zero lots. The size cannot stand in for it: several lots pool into one `position_size`, so a strategy that bounds how many times a lane may buy has no other way to recover that count after a restart.
 
+## Multi-level limit buys
+
+`policy.style: MULTI_LEVEL_LIMIT` turns one OPEN into a ladder: a post-only GTC buy at every cent from `bottom_price` to `limit_price`, both inclusive. The request must be a BUY with `time_in_force: GTC` and `post_only: true`. `bottom_price` and `limit_price` must be whole cents with `0 < bottom_price <= limit_price < 1`, and `scaling_mode` must be `flat`, the only mode. `post_only_cross_retry` is not needed and is ignored for this style; the retry below always applies.
+
+**Sizing.** `flat` gives every level the complete `target_usd`; the target is not divided among levels. A ladder of N levels reserves up to N times the target, and its position can reach N times the size of a single order. Equity-fraction sizing resolves the fraction once and gives every level the result; its free-cash check covers one level, and the store's open-buy exposure limit is what bounds the rest. The size multiplier applies once, before the levels are made.
+
+**Levels.** A level whose size falls under the market's minimum order size is left out, and the ladder is refused (`BELOW_MIN_ORDER_SIZE`) only when no level is left. The market's tick size must divide one cent, else the ladder is refused (`UNPLANNABLE`). A ladder may span at most `EXECUTION_MAX_LADDER_LEVELS` levels, 20 by default (`INVALID_INTENT` beyond that). Levels are posted highest price first, so if exposure runs out the levels nearest the market are the ones placed. Child sequence 1 is the lowest price and stays so across restarts. Each level reserves and fails on its own; the ladder fails as a whole only when no level was placed.
+
+**Retries.** A post-only order the exchange refuses because it would cross the book was never accepted. That level parks as `RETRY_PENDING`, keeping its reservation, and executiond reposts it every 25 ms with a fresh signature, until it rests, fills, is refused for another reason, or the ladder ends. Any other refusal ends that level for good. The cross is recognised from the exchange's message, which is believed to read `invalid post-only order: order crosses book`; a ladder whose levels all fail with another wording shows that text in its result.
+
+**Ending.** A ladder ends on the first of:
+
+- `CANCEL_OPEN` for its lane, or a `FORCE_CLOSE`. Retries stop before any order is cancelled, resting levels are cancelled on the exchange and parked levels locally.
+- Its deadline: `expires_at`, or `complete_within_ms` after the request. pmm sets `expires_at`, so this is the fallback when its `CANCEL_OPEN` is lost.
+- `max_signal_drift` breached, which applies to every level.
+
+**Result.** One `execution.open.result` is published after the last level has ended. It succeeds when anything filled, with `filled_shares` summed over levels and `average_price` weighted by shares. With nothing filled it fails, with the reason of the level nearest `limit_price`, or `SIGNAL_DRIFT` or `EXPIRED` when drift or the deadline ended the ladder. Fills reach the strategy as they happen through `position.features.*`, not through the result. The ladder counts as one lot in `open_lots`.
+
+**Restarts and lost publishes.** A restarted executiond resumes retrying parked levels until the deadline, and moves a ladder whose placement the old process did not finish out of `PLACING`. Every second it also publishes the result of any ladder whose levels have all ended and whose result is still owed, whether the process died before publishing or the publish failed, so each ladder reports exactly once.
+
+The ladder's lifecycle is stored in `order_intents.ladder_phase` (`PLACING`, `ACTIVE`, `STOPPING`, `PUBLISHED`), not in `status`: the status follows every child order's state and would overwrite a marker.
+
 ## ExecutionOpenRequest
 
-Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `target_usd` sizes the open request, or `target_equity_fraction` sizes it from wallet equity (see Equity-fraction sizing). A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
+Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `bottom_price` and `scaling_mode` are required for, and only meaningful with, `policy.style: MULTI_LEVEL_LIMIT`. `target_usd` sizes the open request, or `target_equity_fraction` sizes it from wallet equity (see Equity-fraction sizing). A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
 
 `policy.rest_after_ack_ms` (optional, GTC only) lets an open rest that long after the exchange acknowledged it, so a slow submission does not use up its window. `expires_at` still caps it, counted from the decision, and so does `complete_within_ms`. An order adopted after a restart has no ack time and keeps the cap. A window on a FAK, a FOK or a `TAKER_AGGRESSIVE` open is rejected with `INVALID_INTENT`.
 

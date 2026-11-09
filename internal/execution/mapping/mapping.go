@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -28,7 +29,7 @@ func IntentRecord(intent protocol.ExecutionIntent, now time.Time) store.OrderInt
 	return store.OrderIntentRecord{
 		IntentID: intent.IntentID, RequestID: intent.RequestID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, MarketID: intent.MarketID,
 		Kind: store.IntentKind(intent.Kind), EventSlug: intent.EventSlug, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
-		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, TargetEquityFraction: intent.TargetEquityFraction, SizedEquityUSD: intent.SizedEquityUSD, LimitPrice: intent.LimitPrice, TimeInForce: store.TimeInForce(intent.TimeInForce),
+		Side: store.Side(intent.Side), TargetUSD: intent.TargetUSD, TargetEquityFraction: intent.TargetEquityFraction, SizedEquityUSD: intent.SizedEquityUSD, LimitPrice: intent.LimitPrice, BottomPrice: intent.BottomPrice, ScalingMode: intent.ScalingMode, TimeInForce: store.TimeInForce(intent.TimeInForce),
 		PostOnly: intent.PostOnly, FeatureSeq: intent.FeatureSeq, FeatureCompletedAt: intent.FeatureCompletedAt, ExpiresAt: intent.ExpiresAt,
 		SignalPrice: intent.SignalPrice, MaxSignalDrift: intent.MaxSignalDrift,
 		Status: statemachine.StateIntentReceived, Policy: policy, CreatedAt: now, UpdatedAt: now,
@@ -45,7 +46,7 @@ func ExecutionIntent(record store.OrderIntentRecord) protocol.ExecutionIntent {
 		SchemaVersion: protocol.SchemaVersionV1, IntentID: record.IntentID, RequestID: record.RequestID, UniqueTag: record.UniqueTag, Strategy: record.Strategy,
 		Kind: protocol.IntentKind(record.Kind), MarketID: record.MarketID, EventSlug: record.EventSlug,
 		ConditionID: record.ConditionID, TokenID: record.TokenID, Outcome: record.Outcome, Side: protocol.Side(record.Side),
-		TargetUSD: record.TargetUSD, LimitPrice: record.LimitPrice, TimeInForce: protocol.TimeInForce(record.TimeInForce),
+		TargetUSD: record.TargetUSD, LimitPrice: record.LimitPrice, BottomPrice: record.BottomPrice, ScalingMode: record.ScalingMode, TimeInForce: protocol.TimeInForce(record.TimeInForce),
 		PostOnly: record.PostOnly, FeatureSeq: record.FeatureSeq, FeatureCompletedAt: record.FeatureCompletedAt,
 		ExpiresAt: record.ExpiresAt, SignalPrice: record.SignalPrice, MaxSignalDrift: record.MaxSignalDrift, Policy: policy,
 	}
@@ -133,6 +134,70 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
 		FilledShares: filledShares, AveragePrice: resultPrice(averagePrice, filledShares), OccurredAt: occurredAt,
 	}, true
+}
+
+// LadderChild is one child order of a multi-level intent with the
+// fill-weighted price of its matches, empty when the caller has none.
+type LadderChild struct {
+	Order        store.SignedOrderRecord
+	AveragePrice string
+}
+
+// AggregateOpenResult folds the children of a multi-level OPEN intent into the
+// one result the strategy receives. Every child must be terminal. The result
+// succeeds when anything filled, with the shares summed and the price weighted
+// by shares. When nothing filled it fails with the reason of the child closest
+// to the limit price (the highest sequence), the level the strategy most
+// wanted, subject to the same drift and deadline markers a single order obeys.
+func AggregateOpenResult(intent store.OrderIntentRecord, children []LadderChild, reason string, occurredAt time.Time) (protocol.ExecutionOpenResult, error) {
+	if intent.Kind != store.IntentOpen {
+		return protocol.ExecutionOpenResult{}, fmt.Errorf("intent %s is not an open", intent.IntentID)
+	}
+	if len(children) == 0 {
+		return protocol.ExecutionOpenResult{}, fmt.Errorf("intent %s has no child orders to aggregate", intent.IntentID)
+	}
+	shares, notional := new(big.Rat), new(big.Rat)
+	var lead *LadderChild
+	for i := range children {
+		child := &children[i]
+		if _, _, ok := terminalStatus(child.Order.State, child.Order.MatchedShares); !ok {
+			return protocol.ExecutionOpenResult{}, fmt.Errorf("child %d of intent %s is %s, not terminal", child.Order.ChildSequence, intent.IntentID, child.Order.State)
+		}
+		if lead == nil || child.Order.ChildSequence > lead.Order.ChildSequence {
+			lead = child
+		}
+		matched, ok := decimal.Rat(child.Order.MatchedShares)
+		if !ok || matched.Sign() < 0 {
+			return protocol.ExecutionOpenResult{}, fmt.Errorf("child %d of intent %s has invalid matched shares %q", child.Order.ChildSequence, intent.IntentID, child.Order.MatchedShares)
+		}
+		if matched.Sign() == 0 {
+			continue
+		}
+		price, ok := decimal.Rat(child.AveragePrice)
+		if !ok || price.Sign() <= 0 {
+			// The fill ledger has not priced this child: the limit it rested
+			// at bounds what a post-only fill could have cost.
+			if price, ok = decimal.Rat(child.Order.Price); !ok {
+				return protocol.ExecutionOpenResult{}, fmt.Errorf("child %d of intent %s has no usable price", child.Order.ChildSequence, intent.IntentID)
+			}
+		}
+		shares.Add(shares, matched)
+		notional.Add(notional, new(big.Rat).Mul(matched, price))
+	}
+	result := protocol.ExecutionOpenResult{
+		RequestID: intent.RequestID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
+		Side: protocol.Side(intent.Side), Reason: reason, OccurredAt: occurredAt,
+	}
+	if shares.Sign() > 0 {
+		result.Status = protocol.ResultSucceeded
+		result.FilledShares, _ = shares.Float64()
+		average, _ := new(big.Rat).Quo(notional, shares).Float64()
+		result.AveragePrice = average
+		return result, nil
+	}
+	status, code, _ := terminalStatus(lead.Order.State, lead.Order.MatchedShares)
+	result.Status, result.ReasonCode = status, unfilledReason(status, code, lead.Order.State, intent.Status)
+	return result, nil
 }
 
 // resultPrice converts an average fill price for a result. A result with no

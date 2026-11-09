@@ -58,7 +58,14 @@ const (
 	ExecutionStyleLimit           ExecutionStyle = "LIMIT"
 	ExecutionStyleMakerPostOnly   ExecutionStyle = "MAKER_POST_ONLY"
 	ExecutionStyleTakerAggressive ExecutionStyle = "TAKER_AGGRESSIVE"
+	// ExecutionStyleMultiLevelLimit posts a post-only GTC buy at every cent of
+	// bottom_price..limit_price; see docs/protocol/nats-v1.md.
+	ExecutionStyleMultiLevelLimit ExecutionStyle = "MULTI_LEVEL_LIMIT"
 )
+
+// ScalingModeFlat sizes every level of a multi-level intent at the full
+// target_usd. It is the only scaling mode.
+const ScalingModeFlat = "flat"
 
 type ExecutionPolicy struct {
 	CompleteWithinMillis int64 `json:"complete_within_ms,omitempty"`
@@ -103,6 +110,8 @@ type ExecutionIntent struct {
 	TargetEquityFraction string      `json:"target_equity_fraction,omitempty"`
 	SizedEquityUSD       string      `json:"sized_equity_usd,omitempty"`
 	LimitPrice           string      `json:"limit_price"`
+	BottomPrice          string      `json:"bottom_price,omitempty"`
+	ScalingMode          string      `json:"scaling_mode,omitempty"`
 	TimeInForce          TimeInForce `json:"time_in_force"`
 	PostOnly             bool        `json:"post_only"`
 	FeatureSeq           int64       `json:"feature_seq,omitempty"`
@@ -139,6 +148,8 @@ type ExecutionOpenRequest struct {
 	// (0.03 = 3%) instead of TargetUSD. Exactly one of the two must be set.
 	TargetEquityFraction string      `json:"target_equity_fraction,omitempty"`
 	LimitPrice           string      `json:"limit_price"`
+	BottomPrice          string      `json:"bottom_price,omitempty"`
+	ScalingMode          string      `json:"scaling_mode,omitempty"`
 	TimeInForce          TimeInForce `json:"time_in_force"`
 	PostOnly             bool        `json:"post_only"`
 	FeatureSeq           int64       `json:"feature_seq,omitempty"`
