@@ -360,8 +360,17 @@ fi
 env_value() {
 	(set +u; set -a; source "$1" >/dev/null 2>&1; printf '%s' "${!2:-}")
 }
+# metrics_port prints the port EXECUTION_METRICS_ADDR binds: unset is the
+# daemon's default 127.0.0.1:9108, set but empty disables the endpoint (no
+# output). Only the port is compared: 127.0.0.1:9108 and :9108 still clash.
+metrics_port() {
+	(set +u; set -a; source "$1" >/dev/null 2>&1
+		if [[ ${EXECUTION_METRICS_ADDR+set} ]]; then addr=${EXECUTION_METRICS_ADDR//[[:space:]]/}; else addr=127.0.0.1:9108; fi
+		[[ -n $addr ]] && printf '%s' "${addr##*:}")
+}
 new_maker=$(env_value "$REMOTE_STAGE/executiond.env" POLYMARKET_MAKER_ADDRESS)
 new_db=$(env_value "$REMOTE_STAGE/executiond.env" EXECUTION_POSTGRES_URL)
+new_metrics=$(metrics_port "$REMOTE_STAGE/executiond.env")
 for other_env in /etc/executiond*/executiond.env; do
 	[[ -f $other_env && $other_env != "$CONFIG_ROOT/executiond.env" ]] || continue
 	other_maker=$(env_value "$other_env" POLYMARKET_MAKER_ADDRESS)
@@ -371,6 +380,12 @@ for other_env in /etc/executiond*/executiond.env; do
 	fi
 	if [[ $new_db == "$(env_value "$other_env" EXECUTION_POSTGRES_URL)" ]]; then
 		echo "[$APP_NAME] ERROR: $other_env already uses the same EXECUTION_POSTGRES_URL" >&2
+		exit 1
+	fi
+	# executiond would still trade, but with metrics disabled; refuse instead
+	# of shipping an instance nobody can scrape.
+	if [[ -n $new_metrics && $new_metrics == "$(metrics_port "$other_env")" ]]; then
+		echo "[$APP_NAME] ERROR: $other_env already serves metrics on port $new_metrics (unset EXECUTION_METRICS_ADDR means 127.0.0.1:9108); set a distinct EXECUTION_METRICS_ADDR in this instance's executiond.env" >&2
 		exit 1
 	fi
 done

@@ -141,8 +141,11 @@ func run() error {
 		return err
 	}
 	stats := newMetrics()
+	// Metrics are for the operator, never a reason not to trade: when several
+	// instances share a host and one forgets its own EXECUTION_METRICS_ADDR,
+	// the bind clash must not crash-loop it. It keeps trading unscraped.
 	if err := serveMetrics(ctx, cfg.MetricsAddr, stats); err != nil {
-		return fmt.Errorf("serve metrics on %s: %w", cfg.MetricsAddr, err)
+		log.Printf("execution lifecycle error: metrics disabled, serve on %s: %v (set a distinct EXECUTION_METRICS_ADDR per instance)", cfg.MetricsAddr, err)
 	}
 	clob.SetRequestTraceHook(func(t transport.Timing) {
 		logOrderTiming(t)
