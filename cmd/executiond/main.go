@@ -18,6 +18,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/nats"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
@@ -54,7 +55,10 @@ type config struct {
 	SizeAfterLossOnly          bool
 	ConnectTimeout             time.Duration
 	KeepWarmInterval           time.Duration
-	ShutdownGracePeriod        time.Duration
+	// MetricsAddr serves Prometheus /metrics; empty disables it. pmm on the
+	// same host uses 9090-9096 and 9099, so the default sits apart.
+	MetricsAddr         string
+	ShutdownGracePeriod time.Duration
 }
 
 // maxLadderLevelsCeiling is the most levels a ladder can have at all: one for
@@ -136,14 +140,26 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	clob.SetRequestTraceHook(logOrderTiming)
-	warmExchangeConnections(ctx, clob, cfg.KeepWarmInterval)
+	stats := newMetrics()
+	if err := serveMetrics(ctx, cfg.MetricsAddr, stats); err != nil {
+		return fmt.Errorf("serve metrics on %s: %w", cfg.MetricsAddr, err)
+	}
+	clob.SetRequestTraceHook(func(t transport.Timing) {
+		logOrderTiming(t)
+		stats.observeOrderHTTP(t)
+	})
+	warmExchangeConnections(ctx, clob, cfg.KeepWarmInterval, stats.observeKeepWarm)
 
 	execution, err := executor.New(store, clob, time.Now)
 	if err != nil {
 		return err
 	}
-	execution.SetSubmitLatencyHook(logPrePost)
+	execution.SetSubmitLatencyHook(func(intent protocol.ExecutionIntent, prePost time.Duration) {
+		logPrePost(intent, prePost)
+		stats.observePrePost(intent, prePost)
+	})
+	execution.SetCancelLatencyHook(stats.observeCancel)
+	execution.SetPassLatencyHook(stats.observePass)
 	quotes := marketquotes.New()
 	execution.SetQuoteProvider(quotes)
 	quotes.OnNewMarket(metadataWarmer(ctx, clob))
@@ -466,6 +482,7 @@ func configFromEnv() (config, error) {
 		EquityFlowThresholdUSD: equity.DefaultFlowThresholdUSD,
 		ConnectTimeout:         durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		KeepWarmInterval:       durationEnv("EXECUTION_KEEPWARM_INTERVAL", 15*time.Second),
+		MetricsAddr:            metricsAddrEnv(),
 		ShutdownGracePeriod:    durationEnv("EXECUTION_SHUTDOWN_GRACE_PERIOD", 10*time.Second),
 	}
 	if path := strings.TrimSpace(os.Getenv("EXECUTION_STRATEGIES_FILE")); path != "" {
@@ -668,6 +685,15 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// metricsAddrEnv reads EXECUTION_METRICS_ADDR: unset means 127.0.0.1:9108,
+// set but empty disables the endpoint.
+func metricsAddrEnv() string {
+	if value, ok := os.LookupEnv("EXECUTION_METRICS_ADDR"); ok {
+		return strings.TrimSpace(value)
+	}
+	return "127.0.0.1:9108"
 }
 
 func durationEnv(name string, fallback time.Duration) time.Duration {

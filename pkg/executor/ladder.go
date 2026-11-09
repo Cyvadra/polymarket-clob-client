@@ -51,8 +51,6 @@ const (
 	// DefaultMaxLadderLevels bounds the levels of one intent unless
 	// SetMaxLadderLevels says otherwise: each level reserves target_usd.
 	DefaultMaxLadderLevels = 20
-	// ladderConcurrency bounds the posts of one ladder in flight at once.
-	ladderConcurrency = 8
 	// maxRepostFailures is how many consecutive errors before a signing or
 	// store failure retires a parked level instead of retrying it.
 	maxRepostFailures = 5
@@ -272,12 +270,13 @@ func postGateDropped(ctx context.Context) bool {
 	return ok && gate()
 }
 
-// postLevels posts the planned levels concurrently, ladderConcurrency at a
-// time, and reports the parked ones and how many were placed. A level that
-// fails on its own does not stop the others; only when none was placed is the
-// first failure the ladder's. Each level is reserved here, one at a time in
-// plan order (highest price first), before its post starts: when exposure
-// runs out part way, the levels nearest the market are the ones placed.
+// postLevels reserves the planned levels, then posts them together: one
+// batch call per clobclient.MaxBatchOrders levels, each level keeping its own
+// sign, persist and result path. It reports the parked levels and how many
+// were placed. A level that fails on its own does not stop the others; only
+// when none was placed is the first failure the ladder's. Levels are reserved
+// one at a time in plan order (highest price first), so when exposure runs
+// out part way, the levels nearest the market are the ones placed.
 func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.ExecutionIntent, children []plannedChild) (map[int]store.SignedOrderRecord, int, error) {
 	var (
 		mu       sync.Mutex
@@ -293,25 +292,25 @@ func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.Executi
 			e.reportError(fmt.Errorf("multi-level intent %s level %d: %w", intent.IntentID, sequence, err))
 		}
 	}
-	slots := make(chan struct{}, ladderConcurrency)
+	var reserved []plannedChild
 	for _, child := range children {
 		if stop.Err() != nil {
 			break
 		}
-		// Wait for a slot before reserving, so a reservation is never held
-		// by a level still queued behind the posts in flight.
-		slots <- struct{}{}
 		if err := e.reserveChild(ctx, intent, child, reservationID(intent.IntentID, child.Sequence)); err != nil {
-			<-slots
-			mu.Lock()
 			fail(child.Sequence, err)
-			mu.Unlock()
 			continue
 		}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			err := e.placeReservedChild(ctx, intent, child)
+		reserved = append(reserved, child)
+	}
+	members := e.newPlaceMembers(len(reserved))
+	for i, child := range reserved {
+		member := members[i]
+		wg.Go(func() {
+			// A level that fails before its post leaves the batch, so the
+			// others are not held waiting for it.
+			defer member.leave()
+			err := e.placeReservedChild(context.WithValue(ctx, placeMemberKey{}, member), intent, child)
 			var wait *parkedError
 			var unresolved unresolvedSubmission
 			mu.Lock()
@@ -326,7 +325,7 @@ func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.Executi
 			default:
 				fail(child.Sequence, err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return parked, placed, firstErr
@@ -416,20 +415,24 @@ func (e *Executor) repostParked(stop, ctx context.Context, intent protocol.Execu
 		err      error
 	}
 	results := make(chan result, len(parked))
-	slots := make(chan struct{}, ladderConcurrency)
 	var wg sync.WaitGroup
+	members := e.newPlaceMembers(len(parked))
+	i := 0
 	for sequence, order := range parked {
+		member := members[i]
+		i++
 		if stop.Err() != nil {
-			break
+			member.leave()
+			continue
 		}
-		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			// Each repost is timed from now, not from the request.
-			next, outcome, err := e.repostLevel(context.WithValue(ctx, receivedAtKey{}, time.Now()), intent, order)
+		wg.Go(func() {
+			defer member.leave()
+			// Each repost is timed from now, not from the request, and
+			// goes out in one batch with the other parked levels.
+			ctx := context.WithValue(context.WithValue(ctx, receivedAtKey{}, time.Now()), placeMemberKey{}, member)
+			next, outcome, err := e.repostLevel(ctx, intent, order)
 			results <- result{sequence, next, outcome, err}
-		}()
+		})
 	}
 	wg.Wait()
 	close(results)
@@ -558,11 +561,12 @@ func (e *Executor) cancelLadderChild(ctx context.Context, intent store.OrderInte
 	return e.cancelOpenOrder(ctx, wire.Policy, fresh, cancelRequested)
 }
 
-// cancelLadderLevels cancels the levels of one stopped ladder concurrently,
-// ladderConcurrency at a time and the highest price first: one at a time, the
-// last of 20 resting levels would wait out 19 cancel round trips, and the
-// levels nearest the market are the ones most likely to fill meanwhile. Each
-// call touches only its own row, so the cancels are independent.
+// cancelLadderLevels cancels the levels of one stopped ladder together: the
+// resting ones in one batch cancel per clobclient.MaxBatchOrders, the parked
+// and in-flight ones locally or by their own path. One at a time, the last of
+// 20 resting levels would wait out 19 cancel round trips, and the levels
+// nearest the market are the ones most likely to fill meanwhile. Each level
+// touches only its own row, so the cancels are independent.
 func (e *Executor) cancelLadderLevels(ctx context.Context, intent store.OrderIntentRecord, orders []store.SignedOrderRecord) error {
 	orders = slices.Clone(orders)
 	slices.SortFunc(orders, func(a, b store.SignedOrderRecord) int { return b.ChildSequence - a.ChildSequence })
@@ -571,18 +575,18 @@ func (e *Executor) cancelLadderLevels(ctx context.Context, intent store.OrderInt
 		errs error
 		wg   sync.WaitGroup
 	)
-	slots := make(chan struct{}, ladderConcurrency)
-	for _, order := range orders {
-		slots <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			if err := e.cancelLadderChild(ctx, intent, order); err != nil {
+	members := e.newCancelMembers(len(orders))
+	for i, order := range orders {
+		member := members[i]
+		wg.Go(func() {
+			// A level with nothing to cancel on the exchange leaves.
+			defer member.leave()
+			if err := e.cancelLadderChild(context.WithValue(ctx, cancelMemberKey{}, member), intent, order); err != nil {
 				mu.Lock()
 				errs = errors.Join(errs, err)
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return errs

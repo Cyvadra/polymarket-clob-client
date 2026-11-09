@@ -427,7 +427,7 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 		prePost := time.Since(received)
 		defer e.onSubmit(intent, prePost)
 	}
-	response, submitErr := e.clob.SubmitSignedOrder(ctx, signed, child.TimeInForce, child.PostOnly)
+	response, submitErr := e.submit(ctx, signed, child)
 	if submitErr != nil {
 		if isOrderRejected(submitErr) {
 			return e.markSubmitRejected(ctx, updated, intent, submitErr)

@@ -20,11 +20,6 @@ import (
 // cannot wait a whole second past either.
 const watchInterval = 50 * time.Millisecond
 
-// maxConcurrentCancels bounds the cancels one watcher pass has in flight. The
-// orders due in a pass are usually the levels of one ladder, a handful; the
-// bound only keeps a mass expiry from opening a connection per order.
-const maxConcurrentCancels = 8
-
 // cancelRetryWindow is how long the watcher keeps re-sending a cancel the
 // exchange refuses, once per watchInterval. Polymarket's order endpoints
 // allow well over 200 requests a second, so sixty cancels in three seconds is
@@ -150,27 +145,27 @@ func (e *Executor) checkWatched(ctx context.Context) error {
 	// Each cancel is an exchange round trip, 66ms at the median and over
 	// 500ms at p90 (2026-11-09, aws-london-light). Sent one after another, the
 	// three levels of a ladder held this pass for 1.0 to 1.4s, during which no
-	// other order's deadline or drift was checked. They are independent
-	// orders, so they go out together; the pass still waits for all of them,
-	// so passes never overlap and an order is never cancelled twice at once.
+	// other order's deadline or drift was checked. The due orders go out as
+	// one batch cancel (per clobclient.MaxBatchOrders); each still walks its
+	// own state. The pass waits for all of them, so passes never overlap and
+	// an order is never cancelled twice at once.
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
 		errs error
-		slot = make(chan struct{}, maxConcurrentCancels)
 	)
-	for _, d := range pending {
-		slot <- struct{}{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() { <-slot }()
-			if err := e.cancelWatched(ctx, d.key, d.watched, d.drifted, now); err != nil {
+	members := e.newCancelMembers(len(pending))
+	for i, d := range pending {
+		member := members[i]
+		wg.Go(func() {
+			// An order that needs no exchange cancel leaves the batch.
+			defer member.leave()
+			if err := e.cancelWatched(context.WithValue(ctx, cancelMemberKey{}, member), d.key, d.watched, d.drifted, now); err != nil {
 				mu.Lock()
 				errs = errors.Join(errs, err)
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return errs

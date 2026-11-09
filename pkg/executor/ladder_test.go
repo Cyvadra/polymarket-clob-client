@@ -265,6 +265,11 @@ type ladderCLOB struct {
 	cross   map[float64]int // remaining crosses; negative never rests
 	reject  map[float64]error
 	cancels []string
+	// batchPosts and batchCancels are the size of each batch call.
+	batchPosts   []int
+	batchCancels []int
+	// noBatch answers the batch endpoints 404, as an exchange without them.
+	noBatch bool
 }
 
 func newLadderCLOB() *ladderCLOB {

@@ -25,6 +25,12 @@ type CLOB interface {
 	// returns the exchange's answer; it fires cancels at an order whose POST
 	// is still in flight.
 	CancelOrderResult(context.Context, string) (*clobclient.CancelResult, error)
+	// SubmitSignedOrders posts several signed orders in one call; the
+	// responses line up with the orders.
+	SubmitSignedOrders(context.Context, []clobclient.BatchOrder) ([]clobclient.OrderResponse, error)
+	// CancelOrdersResult cancels several orders in one call and returns the
+	// exchange's answer for each.
+	CancelOrdersResult(context.Context, []string) (*clobclient.CancelResult, error)
 	TickSize(context.Context, string) (float64, error)
 	MinOrderSize(context.Context, string) (float64, error)
 }
@@ -72,6 +78,15 @@ type Executor struct {
 	// onSubmit sees how long each order spent between its request arriving
 	// and its POST starting: sizing, locking, persistence and signing.
 	onSubmit func(intent protocol.ExecutionIntent, prePost time.Duration)
+	// onCancel sees each exchange cancel call: how many orders it carried,
+	// how long it took and how it ended (see SetCancelLatencyHook).
+	onCancel func(orders int, took time.Duration, err error)
+	// onPass sees every pass of a background loop (see SetPassLatencyHook).
+	onPass func(loop string, took time.Duration, overrun bool)
+	// batchPlaceOff and batchCancelOff are set once the exchange refuses a
+	// batch endpoint as unknown; from then on orders go one call each.
+	batchPlaceOff  atomic.Bool
+	batchCancelOff atomic.Bool
 
 	// laneRevisions holds each lane's position revision as of the previous
 	// maintenance pass, so the pass can tell a position that is still filling
@@ -213,6 +228,9 @@ func (e *Executor) loop(ctx context.Context, name string, interval time.Duration
 			started := e.now()
 			err := pass(ctx)
 			elapsed := e.now().Sub(started)
+			if e.onPass != nil {
+				e.onPass(name, elapsed, elapsed >= threshold)
+			}
 			// A pass failing the same way every tick (the database down) is
 			// reported once per errorRepeatInterval, not once per tick.
 			if err != nil && (err.Error() != lastErr || started.Sub(lastErrAt) >= errorRepeatInterval) {
@@ -270,6 +288,19 @@ func (e *Executor) SetSubmitLatencyHook(hook func(intent protocol.ExecutionInten
 	e.onSubmit = hook
 }
 
+// SetCancelLatencyHook reports every exchange cancel call: the orders it
+// carried (more than one for a batch), how long it took, and its error. Set
+// it before the executor runs.
+func (e *Executor) SetCancelLatencyHook(hook func(orders int, took time.Duration, err error)) {
+	e.onCancel = hook
+}
+
+// SetPassLatencyHook reports the duration of every background loop pass by
+// loop name ("deadline", ...), and whether it overran. Set it before Run.
+func (e *Executor) SetPassLatencyHook(hook func(loop string, took time.Duration, overrun bool)) {
+	e.onPass = hook
+}
+
 type receivedAtKey struct{}
 
 // intentCreatedAtKey carries the created_at an intent was stored with to
@@ -323,9 +354,7 @@ func (e *Executor) cancelOpenOrder(ctx context.Context, policy protocol.Executio
 		}
 		order = updated
 	}
-	cancelCtx, cancel := context.WithTimeout(ctx, cancelTimeout(policy))
-	err := e.clob.CancelOrder(cancelCtx, order.ExchangeOrderID)
-	cancel()
+	err := e.cancelExchangeOrder(ctx, order.ExchangeOrderID, cancelTimeout(policy))
 	if cancelGone(err) {
 		// Already filled or cancelled on the exchange: the user stream or
 		// the reconciler records which.

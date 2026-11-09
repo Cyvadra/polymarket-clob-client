@@ -2,9 +2,11 @@ package clobclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -240,5 +242,86 @@ func TestCancelOrderReturnsRefusal(t *testing.T) {
 	}
 	if (&CancelRefusedError{Reason: "order is pending"}).OrderGone() {
 		t.Fatal("a pending order is not gone")
+	}
+}
+
+func TestSubmitSignedOrdersPostsOneBatchAndMapsEachAnswer(t *testing.T) {
+	var body []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/orders" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("POLY_SIGNATURE") == "" {
+			t.Fatal("missing L2 signature")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`[{"success":true,"orderID":"0x1","status":"live"},{"success":true,"orderID":"","errorMsg":"invalid post-only order: order crosses book"}]`))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	signed := SignedOrderV2{TokenID: "123", Signature: "0xsig"}
+
+	out, err := client.SubmitSignedOrders(context.Background(), []BatchOrder{{Signed: signed, PostOnly: true}, {Signed: signed, OrderType: OrderTypeGTC, PostOnly: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 2 || body[0]["owner"] != "key" || body[0]["orderType"] != "GTC" || body[1]["postOnly"] != true {
+		t.Fatalf("unexpected payload %+v", body)
+	}
+	if BatchOrderError(out[0]) != nil || out[0].OrderID != "0x1" {
+		t.Fatalf("first order should be accepted: %+v", out[0])
+	}
+	var rejected *OrderRejectedError
+	if !errors.As(BatchOrderError(out[1]), &rejected) || !strings.Contains(rejected.Message, "crosses book") {
+		t.Fatalf("second order should be rejected: %+v", out[1])
+	}
+	if BatchOrderError(OrderResponse{Success: false}) == nil {
+		t.Fatal("success=false must read as a rejection")
+	}
+}
+
+func TestSubmitSignedOrdersRejectsMismatchedAnswerAndOversizedBatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"success":true,"orderID":"0x1"}]`))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	signed := SignedOrderV2{TokenID: "123", Signature: "0xsig"}
+	if _, err := client.SubmitSignedOrders(context.Background(), []BatchOrder{{Signed: signed}, {Signed: signed}}); err == nil {
+		t.Fatal("expected an error for 1 answer to 2 orders")
+	}
+	if _, err := client.SubmitSignedOrders(context.Background(), make([]BatchOrder, MaxBatchOrders+1)); err == nil {
+		t.Fatal("expected an error for an oversized batch")
+	}
+}
+
+func TestCancelOrdersResultSendsIDListAndReadsRefusals(t *testing.T) {
+	var ids []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/orders" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"canceled":["0xA"],"not_canceled":{"0xb":"order can't be found - already canceled or matched"}}`))
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+
+	out, err := client.CancelOrdersResult(context.Background(), []string{"0xa", "0xb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != "0xa" {
+		t.Fatalf("unexpected body %v", ids)
+	}
+	if !out.Has("0xa") {
+		t.Fatal("0xa should be canceled")
+	}
+	if reason, refused := out.Refused("0xB"); !refused || !(&CancelRefusedError{Reason: reason}).OrderGone() {
+		t.Fatalf("0xb should be refused as gone, got %q", reason)
 	}
 }

@@ -289,6 +289,10 @@ type fakeCLOB struct {
 	// minOrderSizeCalls counts lookups, each a round trip on the real client.
 	minOrderSizeCalls int
 	cancelResultIDs   []string
+	// batchSubmits counts batch posts; batchCancels is the size of each
+	// batch cancel.
+	batchSubmits int
+	batchCancels []int
 }
 
 func (c *fakeCLOB) TickSize(context.Context, string) (float64, error) { return 0.01, nil }

@@ -710,13 +710,22 @@ func (s *multiStore) TransitionOrder(_ context.Context, order store.SignedOrderR
 	return order, nil
 }
 
-// slowCancelCLOB takes a fixed time per cancel and records how many were in
-// flight at once.
+// slowCancelCLOB takes a fixed time per cancel call, single or batch, and
+// records how many were in flight at once and the size of each batch.
 type slowCancelCLOB struct {
 	*fakeCLOB
 	delay         time.Duration
 	mu            sync.Mutex
 	inflight, max int
+	batches       []int
+}
+
+func (c *slowCancelCLOB) CancelOrdersResult(ctx context.Context, ids []string) (*clobclient.CancelResult, error) {
+	c.mu.Lock()
+	c.batches = append(c.batches, len(ids))
+	c.mu.Unlock()
+	time.Sleep(c.delay)
+	return &clobclient.CancelResult{Canceled: ids}, nil
 }
 
 func (c *slowCancelCLOB) CancelOrder(context.Context, string) error {
@@ -731,10 +740,10 @@ func (c *slowCancelCLOB) CancelOrder(context.Context, string) error {
 	return nil
 }
 
-// The levels of an expired ladder are cancelled together, so a pass costs one
-// exchange round trip rather than one per level. In series, three 1.4s-class
-// cancels held the deadline pass for over a second (2026-11-09).
-func TestCheckWatchedCancelsDueOrdersConcurrently(t *testing.T) {
+// The levels of an expired ladder are cancelled in one batch call, so a pass
+// costs one exchange round trip rather than one per level. In series, three
+// 1.4s-class cancels held the deadline pass for over a second (2026-11-09).
+func TestCheckWatchedCancelsDueOrdersInOneBatch(t *testing.T) {
 	const levels = 3
 	now := time.Now().UTC()
 	storer := &multiStore{fakeStore: &fakeStore{inserted: true}, orders: map[int]store.SignedOrderRecord{}}
@@ -743,6 +752,12 @@ func TestCheckWatchedCancelsDueOrdersConcurrently(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new executor: %v", err)
 	}
+	var hooked []int
+	exec.SetCancelLatencyHook(func(orders int, _ time.Duration, err error) {
+		if err == nil {
+			hooked = append(hooked, orders)
+		}
+	})
 	for child := 1; child <= levels; child++ {
 		storer.orders[child] = store.SignedOrderRecord{
 			IntentID: "ladder-1", ChildSequence: child, ExchangeOrderID: fmt.Sprintf("order-%d", child),
@@ -758,12 +773,15 @@ func TestCheckWatchedCancelsDueOrdersConcurrently(t *testing.T) {
 	if took := time.Since(started); took >= 2*client.delay {
 		t.Fatalf("pass took %s for %d cancels of %s: they ran in series", took, levels, client.delay)
 	}
-	if client.max != levels {
-		t.Fatalf("expected %d cancels in flight together, saw %d", levels, client.max)
+	if len(client.batches) != 1 || client.batches[0] != levels || client.max != 0 {
+		t.Fatalf("expected one batch cancel of %d and no single cancels, saw batches %v and %d single", levels, client.batches, client.max)
 	}
 	for child, order := range storer.orders {
 		if order.State == statemachine.StateLive {
 			t.Fatalf("child %d never moved off LIVE", child)
 		}
+	}
+	if len(hooked) != 1 || hooked[0] != levels {
+		t.Fatalf("cancel hook saw %v, want one call of %d orders", hooked, levels)
 	}
 }

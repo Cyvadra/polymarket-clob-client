@@ -37,7 +37,7 @@ func logPrePost(intent protocol.ExecutionIntent, prePost time.Duration) {
 // is subscribed, so the first signal already rides a warm connection, then
 // keeps them warm in the background. interval 0 disables the loop but still
 // does the initial warm-up.
-func warmExchangeConnections(ctx context.Context, clob *clobclient.Client, interval time.Duration) {
+func warmExchangeConnections(ctx context.Context, clob *clobclient.Client, interval time.Duration, observe func(orders, reads time.Duration, err error)) {
 	warmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	orders, reads, err := clob.Warm(warmCtx)
 	cancel()
@@ -50,7 +50,10 @@ func warmExchangeConnections(ctx context.Context, clob *clobclient.Client, inter
 		return
 	}
 	summary := &pingSummary{since: time.Now()}
-	go clob.KeepWarm(ctx, interval, summary.observe)
+	go clob.KeepWarm(ctx, interval, func(orders, reads time.Duration, err error) {
+		summary.observe(orders, reads, err)
+		observe(orders, reads, err)
+	})
 }
 
 // keepWarmSummaryEvery is how often pingSummary logs its rollup.

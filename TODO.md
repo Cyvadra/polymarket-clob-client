@@ -1,5 +1,12 @@
 # TODO
 
+## Quote ladders for pmm (requested 2026-11-09)
+
+- [ ] Implement `strategy.execution.quote` / `execution.quote.result`: the
+  spec and its checklist are in
+  [docs/protocol/quote-ladder.md](docs/protocol/quote-ladder.md). pmm's
+  FairDeltaQuote lanes stay disabled until it ships.
+
 ## Deadline pass stalls on serial ladder cancels (found 2026-11-09, aws-london-light)
 
 - **Symptom:** `deadline pass took 1.0-1.4s, over 500ms for a 50ms interval`
@@ -12,8 +19,13 @@
   child can rest about 1s past its deadline.
 
 - [ ] Deploy it to `executiond-london`; check for the overrun warning and the cancel p90.
-- [ ] Explore Polymarket's batch `/orders` cancel: one call per ladder.
-- [ ] Add per-cancel and per-pass latency metrics.
+- [x] Batch `/orders` place and cancel: one call per ladder (≤15 orders),
+  404/405 falls back to single calls. Probed live 2026-11-09
+  (`cmd/batchprobe`): a refused order in a batch answers `success=true` with
+  only `errorMsg` set, so `BatchOrderError` reads any `errorMsg` as a refusal.
+- [x] Prometheus `/metrics` on `EXECUTION_METRICS_ADDR` (default
+  `127.0.0.1:9108`; pmm uses 9090-9096/9099): `executiond_cancel_seconds`,
+  `executiond_loop_pass_seconds`, `executiond_order_http_*`, prepost, keep-warm.
 - [ ] Ladder POST ttfb rises about +100ms per child (186, 288, 393ms). Check for per-account throttling or a proxy queue; concurrent cancels might worsen it.
 
 ## Reposting (2026-11-09)

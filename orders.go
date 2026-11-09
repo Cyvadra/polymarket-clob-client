@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -237,11 +238,96 @@ func (c *Client) CancelOrderResult(ctx context.Context, orderID string) (*Cancel
 	return &out, nil
 }
 
+// CancelOrders cancels orderIDs in one call. Refusals are not reported; use
+// CancelOrdersResult to read them.
 func (c *Client) CancelOrders(ctx context.Context, orderIDs []string) error {
+	_, err := c.CancelOrdersResult(ctx, orderIDs)
+	return err
+}
+
+// MaxBatchOrders is the most orders one batch place or cancel may carry.
+const MaxBatchOrders = 15
+
+// CancelOrdersResult cancels orderIDs in one DELETE /orders call and returns
+// the exchange's answer: canceled IDs, and refused ones keyed to the reason.
+// An ID in neither list was not acted on.
+func (c *Client) CancelOrdersResult(ctx context.Context, orderIDs []string) (*CancelResult, error) {
 	if len(orderIDs) == 0 {
-		return fmt.Errorf("at least one order ID is required")
+		return nil, fmt.Errorf("at least one order ID is required")
 	}
-	return c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/cancel-orders", Body: map[string][]string{"orderIDs": orderIDs}, Headers: c.l2Headers}, nil)
+	if len(orderIDs) > MaxBatchOrders {
+		return nil, fmt.Errorf("batch cancel of %d orders exceeds the limit of %d", len(orderIDs), MaxBatchOrders)
+	}
+	if slices.Contains(orderIDs, "") {
+		return nil, fmt.Errorf("order ID is required")
+	}
+	var out CancelResult
+	if err := c.orders.Do(ctx, transport.Request{Method: http.MethodDelete, Path: "/orders", Body: orderIDs, Headers: c.l2Headers, Trace: true}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// BatchOrder is one signed order of a batch submission.
+type BatchOrder struct {
+	Signed    SignedOrderV2
+	OrderType OrderType
+	PostOnly  bool
+}
+
+// SubmitSignedOrders posts up to MaxBatchOrders signed orders in one
+// POST /orders call. The call error covers the whole batch; otherwise the
+// responses line up with orders, and a response with Success false is that
+// order's rejection (see BatchOrderError).
+func (c *Client) SubmitSignedOrders(ctx context.Context, orders []BatchOrder) ([]OrderResponse, error) {
+	if c.cfg.Credentials == nil {
+		return nil, fmt.Errorf("API credentials are required to submit orders")
+	}
+	if len(orders) == 0 {
+		return nil, fmt.Errorf("at least one order is required")
+	}
+	if len(orders) > MaxBatchOrders {
+		return nil, fmt.Errorf("batch of %d orders exceeds the limit of %d", len(orders), MaxBatchOrders)
+	}
+	type entry struct {
+		DeferExec bool          `json:"deferExec"`
+		Order     SignedOrderV2 `json:"order"`
+		Owner     string        `json:"owner"`
+		OrderType OrderType     `json:"orderType"`
+		PostOnly  bool          `json:"postOnly"`
+	}
+	payload := make([]entry, len(orders))
+	for i, order := range orders {
+		if order.Signed.TokenID == "" || order.Signed.Signature == "" {
+			return nil, fmt.Errorf("batch order %d: signed order token ID and signature are required", i)
+		}
+		orderType := order.OrderType
+		if orderType == "" {
+			orderType = OrderTypeGTC
+		}
+		payload[i] = entry{Order: order.Signed, Owner: c.cfg.Credentials.APIKey, OrderType: orderType, PostOnly: order.PostOnly}
+	}
+	var out []OrderResponse
+	if err := c.orders.Do(ctx, transport.Request{Method: http.MethodPost, Path: "/orders", Body: payload, Headers: c.l2Headers, Retryable: false, Trace: true, SkipRateLimit: true}, &out); err != nil {
+		return nil, err
+	}
+	if len(out) != len(orders) {
+		return out, fmt.Errorf("batch of %d orders answered with %d responses", len(orders), len(out))
+	}
+	return out, nil
+}
+
+// BatchOrderError is the per-order error of a batch response: nil when the
+// order was accepted, an *OrderRejectedError when it was refused. A refusal
+// in a batch can still carry success=true: confirmed live on 2026-11-09
+// (cmd/batchprobe), a crossing post-only order came back as
+// {"success":true,"orderID":"","errorMsg":"invalid post-only order: order
+// crosses book"}. So any errorMsg is a refusal, whatever success says.
+func BatchOrderError(response OrderResponse) error {
+	if !response.Success || response.ErrorMsg != "" {
+		return &OrderRejectedError{Message: response.ErrorMsg}
+	}
+	return nil
 }
 
 func (c *Client) CancelAll(ctx context.Context) error {
