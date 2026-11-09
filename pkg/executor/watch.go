@@ -246,7 +246,7 @@ func (e *Executor) adoptOpenOrders(ctx context.Context, orders []store.SignedOrd
 		if order.ExchangeOrderID == "" || (order.State != statemachine.StateLive && order.State != statemachine.StatePartiallyFilled && order.State != statemachine.StateCancelRequested) {
 			continue
 		}
-		if e.isWatched(orderKey{order.IntentID, order.ChildSequence}) {
+		if e.isWatched(orderKey{order.IntentID, order.ChildSequence}) || e.isQuoteOrder(order.IntentID) {
 			continue
 		}
 		intent, err := e.store.Intent(ctx, order.IntentID)

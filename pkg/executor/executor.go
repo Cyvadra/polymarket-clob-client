@@ -49,6 +49,9 @@ type repository interface {
 	// LadderStore carries a multi-level intent's phase, children and re-signed
 	// retries.
 	store.LadderStore
+	// QuoteStore carries each quote lane's seq, deadline, done flag and owed
+	// result.
+	store.QuoteStore
 	// LanePosition reads one lane's position row; found is false when the
 	// wallet has none. Every close checks its lane, and a close for another
 	// wallet's strategy checks it to learn the lane is not held here, so it
@@ -116,6 +119,10 @@ type Executor struct {
 	// laddersAdopted is set once the pass after a restart has covered every
 	// open order of a ladder this process is not running.
 	laddersAdopted atomic.Bool
+
+	// quoteLanes are the quote lanes this process knows (quote.go).
+	quoteLanes   quoteRegistry
+	quoteMetrics QuoteMetrics
 }
 
 // orderKey names one child order of an intent.
@@ -184,7 +191,11 @@ func (e *Executor) Run(ctx context.Context) error {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		e.loop(ctx, "deadline", watchInterval, e.checkWatched)
+		e.loop(ctx, "deadline", watchInterval, func(ctx context.Context) error {
+			// Quote lanes only start their cancels here; they never hold the pass.
+			e.checkQuotes(ctx)
+			return e.checkWatched(ctx)
+		})
 	}()
 	go func() {
 		defer wg.Done()
@@ -256,7 +267,10 @@ func (e *Executor) recoverOpenOrders(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load open orders for recovery: %w", err)
 	}
-	adoptErr := e.adoptLadders(ctx, orders)
+	// Quote lanes are adopted first, so the watcher and the ladder sweep
+	// below know their orders and leave them to the lane.
+	quoteErr := e.recoverQuotes(ctx, orders)
+	adoptErr := errors.Join(quoteErr, e.adoptLadders(ctx, orders))
 	resumeErr := errors.Join(e.adoptOpenOrders(ctx, orders), adoptErr, e.sweepParkedLadders(ctx, orders), e.publishPendingLadders(ctx))
 	for _, order := range orders {
 		if order.State != statemachine.StateSigned {
@@ -276,9 +290,11 @@ func (e *Executor) recoverOpenOrders(ctx context.Context) error {
 	return resumeErr
 }
 
-// Close stops the multi-level retries and waits for their posts to finish.
+// Close stops the multi-level and quote retries and waits for their posts to
+// finish.
 func (e *Executor) Close(context.Context) error {
 	e.ladders.closeAll()
+	e.quoteLanes.closeAll()
 	return nil
 }
 

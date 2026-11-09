@@ -38,6 +38,8 @@ type metrics struct {
 	passOverruns  *prometheus.CounterVec
 	keepWarm      *prometheus.HistogramVec
 	keepWarmFails prometheus.Counter
+	quoteLevels   *prometheus.CounterVec
+	quoteFill     prometheus.Histogram
 }
 
 func newMetrics() *metrics {
@@ -73,10 +75,17 @@ func newMetrics() *metrics {
 		keepWarmFails: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "executiond_keepwarm_failures_total", Help: "Keep-warm pings that failed.",
 		}),
+		quoteLevels: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "executiond_quote_levels_total", Help: "Quote lane level posts and cancels, by action and reason.",
+		}, []string{"action", "reason"}),
+		quoteFill: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "executiond_quote_fill_to_cancel_seconds", Help: "A quote lane's first fill seen to the batch cancel of its other levels answered.", Buckets: latencyBuckets,
+		}),
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.orderHTTP, m.orderTTFB, m.orderColdConn, m.prePost, m.cancel, m.cancelOrders, m.pass, m.passOverruns, m.keepWarm, m.keepWarmFails,
+		m.quoteLevels, m.quoteFill,
 	)
 	return m
 }
@@ -116,6 +125,14 @@ func (m *metrics) observeKeepWarm(orders, reads time.Duration, err error) {
 	}
 	m.keepWarm.WithLabelValues("order").Observe(orders.Seconds())
 	m.keepWarm.WithLabelValues("read").Observe(reads.Seconds())
+}
+
+func (m *metrics) observeQuoteLevels(action, reason string, n int) {
+	m.quoteLevels.WithLabelValues(action, reason).Add(float64(n))
+}
+
+func (m *metrics) observeQuoteFillToCancel(took time.Duration) {
+	m.quoteFill.Observe(took.Seconds())
 }
 
 // outcome keeps the label set small: ok, a 4xx or 5xx class, a refused

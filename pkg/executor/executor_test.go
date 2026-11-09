@@ -46,6 +46,8 @@ type fakeStore struct {
 
 	// ladderPhase is the multi-level phase of the fixture intent.
 	ladderPhase store.LadderPhase
+
+	quoteMem
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {

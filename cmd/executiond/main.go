@@ -160,6 +160,7 @@ func run() error {
 	})
 	execution.SetCancelLatencyHook(stats.observeCancel)
 	execution.SetPassLatencyHook(stats.observePass)
+	execution.SetQuoteMetrics(executor.QuoteMetrics{Levels: stats.observeQuoteLevels, FillToCancel: stats.observeQuoteFillToCancel})
 	quotes := marketquotes.New()
 	execution.SetQuoteProvider(quotes)
 	quotes.OnNewMarket(metadataWarmer(ctx, clob))
@@ -184,6 +185,11 @@ func run() error {
 	}
 	repair.SetMissingOrderGrace(cfg.MissingOrderGrace)
 	repair.SetMaxTradeAge(cfg.MaxTradeAge)
+	// Every observer of a quote level tells its lane, so the first fill,
+	// however it is seen, ends the quote.
+	orders.SetQuoteFillHook(execution.QuoteOrderObserved)
+	fills.SetQuoteFillHook(execution.QuoteOrderObserved)
+	repair.SetQuoteFillHook(execution.QuoteOrderObserved)
 	positions, err := positionfeatures.New(store, events, time.Now, cfg.FeatureInterval)
 	if err != nil {
 		return err
@@ -201,6 +207,9 @@ func run() error {
 
 	openWork, err := nats.SubscribeOpen(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError)
 	if err != nil {
+		return err
+	}
+	if err := nats.SubscribeQuote(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError); err != nil {
 		return err
 	}
 	if err := nats.SubscribeQuotes(bus, quotes); err != nil {

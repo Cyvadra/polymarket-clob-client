@@ -94,6 +94,11 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 			return err
 		}
 	}
+	if req.Mode == protocol.ExecutionCloseModeForce {
+		// A quote lane's levels come down first, through the lane, so it
+		// does not repost a parked one behind the close.
+		e.WithdrawQuote(ctx, req.UniqueTag, req.ConditionID, req.AssetID)
+	}
 	stale, err := e.laneActiveOrders(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
 	if err != nil {
 		return err
@@ -123,7 +128,7 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 		if !supersededBy(req.Mode, candidate) {
 			continue
 		}
-		if candidate.intent.Kind == store.IntentOpen && isLadder(candidate.intent) {
+		if candidate.intent.Kind == store.IntentOpen && isLevelIntent(candidate.intent) {
 			ladders.add(candidate)
 			continue
 		}
@@ -175,6 +180,9 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 // request ends here as a no-op. A prior close on the lane is left alone — it is
 // an exit the strategy still wants, and this mode never supersedes one.
 func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.ExecutionCloseRequest) error {
+	// A quote lane's levels come down through the lane first, so it reposts
+	// none of them behind the cancel.
+	e.WithdrawQuote(ctx, req.UniqueTag, req.ConditionID, req.AssetID)
 	lane, err := e.laneActiveOrders(ctx, req.ConditionID, req.AssetID, req.UniqueTag)
 	if err != nil {
 		return err
@@ -205,7 +213,7 @@ func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.Execut
 		if candidate.intent.Kind == store.IntentClose {
 			continue
 		}
-		if isLadder(candidate.intent) {
+		if isLevelIntent(candidate.intent) {
 			ladders.add(candidate)
 			continue
 		}
@@ -269,6 +277,13 @@ func (e *Executor) cancelLaneLadders(ctx context.Context, ladders laneLadders, s
 		}
 	}
 	return errs
+}
+
+// isLevelIntent reports whether an intent's every child is a strategy level:
+// a multi-level ladder or a quote lane. Their levels are cancelled together
+// (cancelLadderLevels), parked ones locally.
+func isLevelIntent(intent store.OrderIntentRecord) bool {
+	return isLadder(intent) || accountfeed.IsQuoteIntent(intent)
 }
 
 // supersededBy reports whether a fresh close in this mode retires the lane
@@ -413,8 +428,8 @@ func (e *Executor) laneActiveOrders(ctx context.Context, conditionID, tokenID, u
 			intent, intents[order.IntentID] = loaded, loaded
 		}
 		// Internal children (a force-close exit) are not the lane's strategy
-		// orders. Every level of a ladder is one.
-		if order.ChildSequence != store.StrategyChildSequence && !isLadder(intent) {
+		// orders. Every level of a ladder or a quote lane is one.
+		if order.ChildSequence != store.StrategyChildSequence && !isLevelIntent(intent) {
 			continue
 		}
 		if intent.ConditionID == conditionID && intent.TokenID == tokenID && intent.UniqueTag == uniqueTag {

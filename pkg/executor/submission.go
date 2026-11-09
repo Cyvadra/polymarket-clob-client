@@ -512,6 +512,11 @@ func (e *Executor) settleFromResponse(ctx context.Context, intent protocol.Execu
 		return
 	}
 	e.publishTransition(updated, intent, reason)
+	if intent.Policy.Style == protocol.ExecutionStyleQuote {
+		// A quote level reports nothing itself: its first match ends the lane.
+		e.quoteOrderSeen(context.WithoutCancel(ctx), intent, updated, true)
+		return
+	}
 	if !statemachine.IsTerminal(updated.State) {
 		// A partly matched resting order is still working; its result comes
 		// when an observer sees it finish.
@@ -610,9 +615,9 @@ func (e unresolvedSubmission) Unwrap() error { return e.cause }
 
 func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, intent protocol.ExecutionIntent, submitErr error) error {
 	reason := rejectionReason(submitErr)
-	// A multi-level level whose post-only order crossed the book was never
-	// accepted, so it parks with its reservation held and is reposted.
-	if intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit && order.PostOnly && isPostOnlyCross(reason) {
+	// A multi-level or quote level whose post-only order crossed the book was
+	// never accepted, so it parks with its reservation held and is reposted.
+	if parksCrossedLevels(intent) && order.PostOnly && isPostOnlyCross(reason) {
 		parked, err := e.store.TransitionOrder(ctx, order, statemachine.EventPostOnlyCross, order.MatchedShares, order.ExchangeOrderID, reason)
 		if err != nil {
 			return fmt.Errorf("park post-only cross for retry: %w", err)
@@ -626,6 +631,12 @@ func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrd
 	}
 	e.publishTransition(rejected, intent, reason)
 	return rejection{code: protocol.ReasonOrderRejected, reason: reason, cause: submitErr}
+}
+
+// parksCrossedLevels reports whether intent's post-only levels park and repost
+// when they would cross the book, instead of failing.
+func parksCrossedLevels(intent protocol.ExecutionIntent) bool {
+	return intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit || intent.Policy.Style == protocol.ExecutionStyleQuote
 }
 
 // isPostOnlyCross reports whether the exchange refused an order only because

@@ -29,6 +29,23 @@ func (s *fakeSubscriber) Subscribe(subject string, handler natsbus.Handler) erro
 
 type fakeStore struct{ positions []store.PositionRecord }
 
+func (fakeStore) QuoteLane(context.Context, store.QuoteLaneKey) (store.QuoteLaneRecord, bool, error) {
+	return store.QuoteLaneRecord{}, false, nil
+}
+func (fakeStore) QuoteLaneByIntent(context.Context, string) (store.QuoteLaneRecord, bool, error) {
+	return store.QuoteLaneRecord{}, false, nil
+}
+func (fakeStore) SaveQuoteLane(context.Context, store.QuoteLaneRecord) error { return nil }
+func (fakeStore) MarkQuoteDone(context.Context, store.QuoteLaneKey, string, int) (bool, error) {
+	return true, nil
+}
+func (fakeStore) MoveQuoteResult(context.Context, store.QuoteLaneKey, store.QuoteResultState, store.QuoteResultState) (bool, error) {
+	return true, nil
+}
+func (fakeStore) OwedQuoteResults(context.Context) ([]store.QuoteLaneRecord, error) { return nil, nil }
+func (fakeStore) RecordQuoteLevel(context.Context, string, int, string) error       { return nil }
+func (fakeStore) QuoteLevelRequest(context.Context, string, int) (string, error)    { return "", nil }
+
 func (fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
 	return fn(ctx)
 }

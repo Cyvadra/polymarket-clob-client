@@ -216,7 +216,7 @@ func (e *Executor) placeLadder(ctx context.Context, intent protocol.ExecutionInt
 	// still registered, so no other observer publishes in between.
 	next := store.LadderActive
 	switch {
-	case placed == 0 && len(parked) == 0:
+	case len(placed) == 0 && len(parked) == 0:
 		// Nothing rests and nothing is parked: the caller reports the failure
 		// (ExecuteOpen publishes the rejection), so the ladder must not report
 		// it as well. The claim keeps any later observer from doing so.
@@ -272,17 +272,17 @@ func postGateDropped(ctx context.Context) bool {
 
 // postLevels reserves the planned levels, then posts them together: one
 // batch call per clobclient.MaxBatchOrders levels, each level keeping its own
-// sign, persist and result path. It reports the parked levels and how many
-// were placed. A level that fails on its own does not stop the others; only
+// sign, persist and result path. It reports the parked levels and the
+// sequences of those placed. A level that fails on its own does not stop the others; only
 // when none was placed is the first failure the ladder's. Levels are reserved
 // one at a time in plan order (highest price first), so when exposure runs
 // out part way, the levels nearest the market are the ones placed.
-func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.ExecutionIntent, children []plannedChild) (map[int]store.SignedOrderRecord, int, error) {
+func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.ExecutionIntent, children []plannedChild) (map[int]store.SignedOrderRecord, []int, error) {
 	var (
 		mu       sync.Mutex
 		wg       sync.WaitGroup
 		parked   = map[int]store.SignedOrderRecord{}
-		placed   int
+		placed   []int
 		firstErr error
 	)
 	fail := func(sequence int, err error) {
@@ -319,7 +319,7 @@ func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.Executi
 			case err == nil, errors.As(err, &unresolved):
 				// An unknown outcome is a live order for now: the
 				// reconciler decides it, and it must not fail the ladder.
-				placed++
+				placed = append(placed, child.Sequence)
 			case errors.As(err, &wait):
 				parked[child.Sequence] = wait.order
 			default:
@@ -791,7 +791,7 @@ func (e *Executor) sweepParkedLadders(ctx context.Context, orders []store.Signed
 	var errs error
 	intents := map[string]protocol.ExecutionIntent{}
 	for _, order := range orders {
-		if order.State != statemachine.StateRetryPending || e.ladders.has(order.IntentID) {
+		if order.State != statemachine.StateRetryPending || e.ladders.has(order.IntentID) || e.isQuoteOrder(order.IntentID) {
 			continue
 		}
 		intent, ok := intents[order.IntentID]
