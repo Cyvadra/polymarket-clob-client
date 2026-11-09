@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -42,6 +43,9 @@ type fakeStore struct {
 	// to LIVE at that time before the submission response lands: the
 	// SUBMIT_ACKNOWLEDGED transition then conflicts.
 	streamObservedAt time.Time
+
+	// ladderPhase is the multi-level phase of the fixture intent.
+	ladderPhase store.LadderPhase
 }
 
 func (s *fakeStore) WithIntentLock(ctx context.Context, _ string, fn func(context.Context) error) error {
@@ -183,6 +187,37 @@ func (s *fakeStore) Release(_ context.Context, reservationID, _ string) error {
 	return nil
 }
 func (s *fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error) { return false, nil }
+
+func (s *fakeStore) IntentOrders(_ context.Context, intentID string) ([]store.SignedOrderRecord, error) {
+	var orders []store.SignedOrderRecord
+	if s.order.IntentID == intentID {
+		orders = append(orders, s.order)
+	}
+	for _, order := range s.extraOrders {
+		if order.IntentID == intentID {
+			orders = append(orders, order)
+		}
+	}
+	return orders, nil
+}
+func (s *fakeStore) LadderPhase(context.Context, string) (store.LadderPhase, error) {
+	return s.ladderPhase, nil
+}
+func (s *fakeStore) MoveLadderPhase(_ context.Context, _ string, to store.LadderPhase, from ...store.LadderPhase) (bool, error) {
+	if !slices.Contains(from, s.ladderPhase) {
+		return false, nil
+	}
+	s.ladderPhase = to
+	return true, nil
+}
+func (s *fakeStore) PendingLadders(context.Context) ([]string, error) { return nil, nil }
+func (s *fakeStore) PlacingLadders(context.Context) ([]string, error) { return nil, nil }
+func (s *fakeStore) ResignRetryOrder(context.Context, store.SignedOrderRecord, []byte, string, string, string, string) (store.SignedOrderRecord, error) {
+	return store.SignedOrderRecord{}, errors.New("fakeStore does not re-sign orders")
+}
+func (s *fakeStore) OrderAveragePrice(context.Context, string) (string, error) {
+	return "", store.ErrNotFound
+}
 
 // latestClose, when set, is what LatestLimitCloseIntent returns for any lane.
 func (s *fakeStore) LatestLimitCloseIntent(_ context.Context, _, _, _ string) (store.OrderIntentRecord, error) {

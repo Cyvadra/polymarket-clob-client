@@ -68,6 +68,23 @@ func (fakeStore) Reservation(context.Context, string) (store.ReservationRecord, 
 }
 func (fakeStore) Release(context.Context, string, string) error             { return nil }
 func (fakeStore) ApplyFill(context.Context, store.FillRecord) (bool, error) { return false, nil }
+func (fakeStore) IntentOrders(context.Context, string) ([]store.SignedOrderRecord, error) {
+	return nil, nil
+}
+func (fakeStore) LadderPhase(context.Context, string) (store.LadderPhase, error) {
+	return store.LadderNone, nil
+}
+func (fakeStore) MoveLadderPhase(context.Context, string, store.LadderPhase, ...store.LadderPhase) (bool, error) {
+	return false, nil
+}
+func (fakeStore) PendingLadders(context.Context) ([]string, error) { return nil, nil }
+func (fakeStore) PlacingLadders(context.Context) ([]string, error) { return nil, nil }
+func (fakeStore) ResignRetryOrder(context.Context, store.SignedOrderRecord, []byte, string, string, string, string) (store.SignedOrderRecord, error) {
+	return store.SignedOrderRecord{}, store.ErrNotFound
+}
+func (fakeStore) OrderAveragePrice(context.Context, string) (string, error) {
+	return "", store.ErrNotFound
+}
 func (s fakeStore) LatestLimitCloseIntent(context.Context, string, string, string) (store.OrderIntentRecord, error) {
 	return store.OrderIntentRecord{}, store.ErrNotFound
 }

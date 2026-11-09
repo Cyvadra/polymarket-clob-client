@@ -44,6 +44,7 @@ type config struct {
 	BalanceCacheTTL            time.Duration
 	EquityMaxQuoteAge          time.Duration
 	MaxEquityFraction          float64
+	MaxLadderLevels            int // most levels one MULTI_LEVEL_LIMIT open may span
 	MaxDrawdown                equity.DrawdownLimit
 	StrategyMaxDrawdown        map[string]equity.DrawdownLimit // by strategy name prefix
 	StrategyDefaultMaxDrawdown equity.DrawdownLimit
@@ -55,6 +56,10 @@ type config struct {
 	KeepWarmInterval           time.Duration
 	ShutdownGracePeriod        time.Duration
 }
+
+// maxLadderLevelsCeiling is the most levels a ladder can have at all: one for
+// each cent from 0.01 to 0.99.
+const maxLadderLevelsCeiling = 99
 
 type module interface {
 	Init(context.Context) error
@@ -319,6 +324,7 @@ func run() error {
 	}
 	execution.SetEntrySizer(sizer)
 	execution.SetSizeMultipliers(cfg.SizeMultipliers)
+	execution.SetMaxLadderLevels(cfg.MaxLadderLevels)
 	for prefix, multiplier := range cfg.SizeMultipliers {
 		log.Printf("strategy %s opens at %sx the size it asks for", prefix, multiplier)
 	}
@@ -456,6 +462,7 @@ func configFromEnv() (config, error) {
 		BalanceCacheTTL:        durationEnv("EXECUTION_BALANCE_CACHE_TTL", equity.DefaultCashTTL),
 		EquityMaxQuoteAge:      durationEnv("EXECUTION_EQUITY_MAX_QUOTE_AGE", 30*time.Second),
 		MaxEquityFraction:      equity.DefaultMaxFraction,
+		MaxLadderLevels:        executor.DefaultMaxLadderLevels,
 		EquityFlowThresholdUSD: equity.DefaultFlowThresholdUSD,
 		ConnectTimeout:         durationEnv("EXECUTION_CONNECT_TIMEOUT", 10*time.Second),
 		KeepWarmInterval:       durationEnv("EXECUTION_KEEPWARM_INTERVAL", 15*time.Second),
@@ -509,6 +516,13 @@ func configFromEnv() (config, error) {
 			return config{}, fmt.Errorf("EXECUTION_MAX_EQUITY_FRACTION must be in (0, 1]")
 		}
 		cfg.MaxEquityFraction = fraction
+	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_LADDER_LEVELS")); value != "" {
+		levels, err := strconv.Atoi(value)
+		if err != nil || levels < 1 || levels > maxLadderLevelsCeiling {
+			return config{}, fmt.Errorf("EXECUTION_MAX_LADDER_LEVELS must be an integer from 1 to %d", maxLadderLevelsCeiling)
+		}
+		cfg.MaxLadderLevels = levels
 	}
 	if value := strings.TrimSpace(os.Getenv("EXECUTION_MAX_DRAWDOWN")); value != "" {
 		limit, bare, err := parseDrawdownLimit(value)

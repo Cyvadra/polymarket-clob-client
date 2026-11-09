@@ -11,6 +11,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -97,10 +98,41 @@ func (e *Executor) replaceCloseLane(ctx context.Context, req protocol.ExecutionC
 	if err != nil {
 		return err
 	}
+	// A ladder still placing persists levels the scan above did not see.
+	// Stop every superseded ladder first, which waits for placement to end,
+	// then read the lane again so the replacement covers all of its levels.
+	stopped := map[string]bool{}
+	for _, candidate := range stale {
+		if candidate.intent.Kind == store.IntentOpen && isLadder(candidate.intent) && supersededBy(req.Mode, candidate) && !stopped[candidate.intent.IntentID] {
+			stopped[candidate.intent.IntentID] = true
+			if err := e.stopLadder(ctx, candidate.intent); err != nil {
+				return err
+			}
+		}
+	}
+	if len(stopped) > 0 {
+		if stale, err = e.laneActiveOrders(ctx, req.ConditionID, req.AssetID, req.UniqueTag); err != nil {
+			return err
+		}
+	}
+	// Ladder levels are gathered and cancelled together, each ladder stopped
+	// once; every other child is replaced one at a time as before.
+	ladders := laneLadders{}
+	var others []closeableOrder
 	for _, candidate := range stale {
 		if !supersededBy(req.Mode, candidate) {
 			continue
 		}
+		if candidate.intent.Kind == store.IntentOpen && isLadder(candidate.intent) {
+			ladders.add(candidate)
+			continue
+		}
+		others = append(others, candidate)
+	}
+	if err := e.cancelLaneLadders(ctx, ladders, stopped, "multi-level intent superseded by a close"); err != nil {
+		return err
+	}
+	for _, candidate := range others {
 		if err := e.replaceStaleChild(ctx, candidate); err != nil {
 			return err
 		}
@@ -147,9 +179,34 @@ func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.Execut
 	if err != nil {
 		return err
 	}
-	var cancelErr error
+	// A ladder still placing persists levels the scan above did not see. Stop
+	// every ladder first, which waits for placement to end, then read the lane
+	// again so the cancel covers all of its levels.
+	var stopErr error
+	stoppedAny := false
+	stopped := map[string]bool{}
+	for _, candidate := range lane {
+		if candidate.intent.Kind == store.IntentOpen && isLadder(candidate.intent) && !stopped[candidate.intent.IntentID] {
+			stopped[candidate.intent.IntentID] = true
+			stoppedAny = true
+			stopErr = errors.Join(stopErr, e.stopLadder(ctx, candidate.intent))
+		}
+	}
+	if stoppedAny {
+		if lane, err = e.laneActiveOrders(ctx, req.ConditionID, req.AssetID, req.UniqueTag); err != nil {
+			return errors.Join(stopErr, err)
+		}
+	}
+	cancelErr := stopErr
+	// A multi-level intent is stopped first, so it posts no level after the
+	// cancel, and its result is published once its levels have ended.
+	ladders := laneLadders{}
 	for _, candidate := range lane {
 		if candidate.intent.Kind == store.IntentClose {
+			continue
+		}
+		if isLadder(candidate.intent) {
+			ladders.add(candidate)
 			continue
 		}
 		policy := mapping.ExecutionIntent(candidate.intent).Policy
@@ -167,7 +224,51 @@ func (e *Executor) cancelLaneOpenOrders(ctx context.Context, req protocol.Execut
 			cancelErr = errors.Join(cancelErr, err)
 		}
 	}
-	return cancelErr
+	return errors.Join(cancelErr, e.cancelLaneLadders(ctx, ladders, stopped, "multi-level intent cancelled"))
+}
+
+// laneLadders groups a lane scan's ladder levels by intent, in scan order.
+type laneLadders struct {
+	ids    []string
+	intent map[string]store.OrderIntentRecord
+	levels map[string][]store.SignedOrderRecord
+}
+
+func (l *laneLadders) add(candidate closeableOrder) {
+	id := candidate.intent.IntentID
+	if l.intent == nil {
+		l.intent, l.levels = map[string]store.OrderIntentRecord{}, map[string][]store.SignedOrderRecord{}
+	}
+	if _, seen := l.intent[id]; !seen {
+		l.ids = append(l.ids, id)
+		l.intent[id] = candidate.intent
+	}
+	l.levels[id] = append(l.levels[id], candidate.order)
+}
+
+func (l laneLadders) with(candidate closeableOrder) laneLadders {
+	l.add(candidate)
+	return l
+}
+
+// cancelLaneLadders stops each ladder not already in stopped, cancels its
+// levels, and publishes its result if that is now due: levels cancelled
+// locally, never on the exchange, have no account-feed event to trigger it.
+func (e *Executor) cancelLaneLadders(ctx context.Context, ladders laneLadders, stopped map[string]bool, reason string) error {
+	var errs error
+	for _, id := range ladders.ids {
+		intent := ladders.intent[id]
+		if !stopped[id] {
+			stopped[id] = true
+			// A ladder the first scan missed: it found no row of it then.
+			errs = errors.Join(errs, e.stopLadder(ctx, intent))
+		}
+		errs = errors.Join(errs, e.cancelLadderLevels(ctx, intent, ladders.levels[id]))
+		if err := accountfeed.PublishLadderResult(ctx, e.store, e.publish, id, reason, e.now()); err != nil {
+			errs = errors.Join(errs, err)
+		}
+	}
+	return errs
 }
 
 // supersededBy reports whether a fresh close in this mode retires the lane
@@ -201,6 +302,9 @@ func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declar
 // that is still live keeps its truthful result instead of vanishing silently.
 func (e *Executor) replaceStaleChild(ctx context.Context, candidate closeableOrder) error {
 	if candidate.intent.Kind != store.IntentClose {
+		if isLadder(candidate.intent) {
+			return e.cancelLaneLadders(ctx, laneLadders{}.with(candidate), map[string]bool{}, "multi-level intent superseded by a close")
+		}
 		return e.cancelOpenOrder(ctx, mapping.ExecutionIntent(candidate.intent).Policy, candidate.order, cancelRequested)
 	}
 	prior := string(candidate.intent.Status)
@@ -289,16 +393,29 @@ func (e *Executor) laneActiveOrders(ctx context.Context, conditionID, tokenID, u
 		return nil, fmt.Errorf("load open orders: %w", err)
 	}
 	var lane []closeableOrder
+	// Every level of a ladder shares one intent: load each intent once.
+	intents := map[string]store.OrderIntentRecord{}
+	missing := map[string]bool{}
 	for _, order := range orders {
-		if order.ChildSequence != store.StrategyChildSequence {
+		if missing[order.IntentID] {
 			continue
 		}
-		intent, err := e.store.Intent(ctx, order.IntentID)
-		if err != nil {
+		intent, ok := intents[order.IntentID]
+		if !ok {
+			loaded, err := e.store.Intent(ctx, order.IntentID)
 			if errors.Is(err, store.ErrNotFound) {
+				missing[order.IntentID] = true
 				continue
 			}
-			return nil, fmt.Errorf("load order intent: %w", err)
+			if err != nil {
+				return nil, fmt.Errorf("load order intent: %w", err)
+			}
+			intent, intents[order.IntentID] = loaded, loaded
+		}
+		// Internal children (a force-close exit) are not the lane's strategy
+		// orders. Every level of a ladder is one.
+		if order.ChildSequence != store.StrategyChildSequence && !isLadder(intent) {
+			continue
 		}
 		if intent.ConditionID == conditionID && intent.TokenID == tokenID && intent.UniqueTag == uniqueTag {
 			lane = append(lane, closeableOrder{intent: intent, order: order})

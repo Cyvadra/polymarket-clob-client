@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -39,6 +40,9 @@ type repository interface {
 	store.ExecutionStore
 	store.PositionStore
 	store.PositionReconciler
+	// LadderStore carries a multi-level intent's phase, children and re-signed
+	// retries.
+	store.LadderStore
 	// LanePosition reads one lane's position row; found is false when the
 	// wallet has none. Every close checks its lane, and a close for another
 	// wallet's strategy checks it to learn the lane is not held here, so it
@@ -89,6 +93,14 @@ type Executor struct {
 	// inflight holds the orders whose POST is awaiting its answer, so a
 	// CANCEL_OPEN can reach them before the exchange replies (inflight.go).
 	inflight inflightPosts
+
+	// ladders are the multi-level intents running in this process, so a
+	// CANCEL_OPEN can stop their retries (ladder.go).
+	ladders         ladderRegistry
+	maxLadderLevels int
+	// laddersAdopted is set once the pass after a restart has covered every
+	// open order of a ladder this process is not running.
+	laddersAdopted atomic.Bool
 }
 
 // orderKey names one child order of an intent.
@@ -226,7 +238,8 @@ func (e *Executor) recoverOpenOrders(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load open orders for recovery: %w", err)
 	}
-	resumeErr := e.adoptOpenOrders(ctx, orders)
+	adoptErr := e.adoptLadders(ctx, orders)
+	resumeErr := errors.Join(e.adoptOpenOrders(ctx, orders), adoptErr, e.sweepParkedLadders(ctx, orders), e.publishPendingLadders(ctx))
 	for _, order := range orders {
 		if order.State != statemachine.StateSigned {
 			continue
@@ -244,7 +257,12 @@ func (e *Executor) recoverOpenOrders(ctx context.Context) error {
 	}
 	return resumeErr
 }
-func (e *Executor) Close(context.Context) error { return nil }
+
+// Close stops the multi-level retries and waits for their posts to finish.
+func (e *Executor) Close(context.Context) error {
+	e.ladders.closeAll()
+	return nil
+}
 
 // SetSubmitLatencyHook reports, per order, the time from the request arriving
 // to the POST starting. Set it before the executor handles requests.

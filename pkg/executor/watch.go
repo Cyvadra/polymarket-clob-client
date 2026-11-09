@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
@@ -18,6 +19,11 @@ import (
 // deadline and drift bound. An entry with a 3s timeout chasing a moving book
 // cannot wait a whole second past either.
 const watchInterval = 50 * time.Millisecond
+
+// maxConcurrentCancels bounds the cancels one watcher pass has in flight. The
+// orders due in a pass are usually the levels of one ladder, a handful; the
+// bound only keeps a mass expiry from opening a connection per order.
+const maxConcurrentCancels = 8
 
 // cancelRetryWindow is how long the watcher keeps re-sending a cancel the
 // exchange refuses, once per watchInterval. Polymarket's order endpoints
@@ -62,9 +68,10 @@ func (e *Executor) watchOrder(intent protocol.ExecutionIntent, childSequence int
 	if rest := intent.Policy.RestAfterAckMillis; rest > 0 && !ackAt.IsZero() {
 		earlier(ackAt.Add(time.Duration(rest) * time.Millisecond))
 	}
-	// Only an open's strategy child is cancelled for drift. A bound that does
-	// not parse was refused at validation; it reads as none.
-	if intent.Kind == protocol.IntentOpen && childSequence == store.StrategyChildSequence {
+	// Only an open's strategy child is cancelled for drift, or every level of
+	// a ladder, which are all strategy children. A bound that does not parse
+	// was refused at validation; it reads as none.
+	if intent.Kind == protocol.IntentOpen && (childSequence == store.StrategyChildSequence || intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit) {
 		watched.drift, _ = tactics.ParseDrift(intent)
 	}
 	if watched.deadline.IsZero() && !watched.drift.Bounded() {
@@ -140,12 +147,32 @@ func (e *Executor) checkWatched(ctx context.Context) error {
 	}
 	e.watchMu.Unlock()
 
-	var errs error
+	// Each cancel is an exchange round trip, 66ms at the median and over
+	// 500ms at p90 (2026-11-09, aws-london-light). Sent one after another, the
+	// three levels of a ladder held this pass for 1.0 to 1.4s, during which no
+	// other order's deadline or drift was checked. They are independent
+	// orders, so they go out together; the pass still waits for all of them,
+	// so passes never overlap and an order is never cancelled twice at once.
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs error
+		slot = make(chan struct{}, maxConcurrentCancels)
+	)
 	for _, d := range pending {
-		if err := e.cancelWatched(ctx, d.key, d.watched, d.drifted, now); err != nil {
-			errs = errors.Join(errs, err)
-		}
+		slot <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slot }()
+			if err := e.cancelWatched(ctx, d.key, d.watched, d.drifted, now); err != nil {
+				mu.Lock()
+				errs = errors.Join(errs, err)
+				mu.Unlock()
+			}
+		}()
 	}
+	wg.Wait()
 	return errs
 }
 

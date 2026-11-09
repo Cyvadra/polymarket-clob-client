@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -426,6 +427,16 @@ func (s *lockedStore) Intent(ctx context.Context, intentID string) (store.OrderI
 	defer s.mu.Unlock()
 	return s.fakeStore.Intent(ctx, intentID)
 }
+func (s *lockedStore) MarkIntentCanceling(ctx context.Context, intentID string, childSequence int, status string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.MarkIntentCanceling(ctx, intentID, childSequence, status)
+}
+func (s *lockedStore) UpdateIntentStatus(ctx context.Context, intentID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fakeStore.UpdateIntentStatus(ctx, intentID, status)
+}
 func (s *lockedStore) PositionFeatures(ctx context.Context) ([]store.PositionRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -665,5 +676,94 @@ func TestExecuteCloseCancelOpenWithNothingWorkingIsANoOp(t *testing.T) {
 	}
 	if len(client.canceledOrderIDs) != 0 || client.submissions != 0 || len(closeResults(pub)) != 0 {
 		t.Fatalf("expected the cancel to do nothing, got cancels=%+v submissions=%d results=%+v", client.canceledOrderIDs, client.submissions, closeResults(pub))
+	}
+}
+
+// multiStore holds one order per child, so a pass has several due at once.
+type multiStore struct {
+	*fakeStore
+	mu     sync.Mutex
+	orders map[int]store.SignedOrderRecord
+}
+
+func (s *multiStore) OrderByIntent(_ context.Context, _ string, child int) (store.SignedOrderRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	order, ok := s.orders[child]
+	if !ok {
+		return store.SignedOrderRecord{}, store.ErrNotFound
+	}
+	return order, nil
+}
+func (s *multiStore) MarkIntentCanceling(context.Context, string, int, string) (bool, error) {
+	return true, nil
+}
+func (s *multiStore) TransitionOrder(_ context.Context, order store.SignedOrderRecord, event statemachine.Event, matched, exchangeID, _ string) (store.SignedOrderRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	transition, _, err := statemachine.Apply(order.State, event)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	order.State, order.Revision, order.MatchedShares = transition.To, order.Revision+1, matched
+	s.orders[order.ChildSequence] = order
+	return order, nil
+}
+
+// slowCancelCLOB takes a fixed time per cancel and records how many were in
+// flight at once.
+type slowCancelCLOB struct {
+	*fakeCLOB
+	delay         time.Duration
+	mu            sync.Mutex
+	inflight, max int
+}
+
+func (c *slowCancelCLOB) CancelOrder(context.Context, string) error {
+	c.mu.Lock()
+	c.inflight++
+	c.max = max(c.max, c.inflight)
+	c.mu.Unlock()
+	time.Sleep(c.delay)
+	c.mu.Lock()
+	c.inflight--
+	c.mu.Unlock()
+	return nil
+}
+
+// The levels of an expired ladder are cancelled together, so a pass costs one
+// exchange round trip rather than one per level. In series, three 1.4s-class
+// cancels held the deadline pass for over a second (2026-11-09).
+func TestCheckWatchedCancelsDueOrdersConcurrently(t *testing.T) {
+	const levels = 3
+	now := time.Now().UTC()
+	storer := &multiStore{fakeStore: &fakeStore{inserted: true}, orders: map[int]store.SignedOrderRecord{}}
+	client := &slowCancelCLOB{fakeCLOB: &fakeCLOB{}, delay: 200 * time.Millisecond}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	for child := 1; child <= levels; child++ {
+		storer.orders[child] = store.SignedOrderRecord{
+			IntentID: "ladder-1", ChildSequence: child, ExchangeOrderID: fmt.Sprintf("order-%d", child),
+			State: statemachine.StateLive, Revision: 1, RequestedShares: "2", MatchedShares: "0",
+		}
+		exec.watchOrder(protocol.ExecutionIntent{IntentID: "ladder-1", ExpiresAt: now.Add(-time.Second)}, child, now, now)
+	}
+
+	started := time.Now()
+	if err := exec.checkWatched(context.Background()); err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if took := time.Since(started); took >= 2*client.delay {
+		t.Fatalf("pass took %s for %d cancels of %s: they ran in series", took, levels, client.delay)
+	}
+	if client.max != levels {
+		t.Fatalf("expected %d cancels in flight together, saw %d", levels, client.max)
+	}
+	for child, order := range storer.orders {
+		if order.State == statemachine.StateLive {
+			t.Fatalf("child %d never moved off LIVE", child)
+		}
 	}
 }

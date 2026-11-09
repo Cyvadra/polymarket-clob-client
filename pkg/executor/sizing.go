@@ -64,3 +64,10 @@ func releaseCashHold(ctx context.Context) {
 		release()
 	}
 }
+
+// withoutCashHold returns ctx without the entry's free-cash release, for a
+// caller that takes several reservations under one entry and wants the claim
+// held until its own release runs.
+func withoutCashHold(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cashHoldKey{}, nil)
+}

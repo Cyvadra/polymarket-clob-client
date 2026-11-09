@@ -54,6 +54,15 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 			return invalid("invalid target usd %q", intent.TargetUSD)
 		}
 	}
+	if intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit {
+		if _, err := parseLadder(intent); err != nil {
+			return err
+		}
+	} else if intent.BottomPrice != "" || intent.ScalingMode != "" {
+		// Both are stored for every style; refuse them here rather than as
+		// an opaque insert failure on the numeric cast or range check.
+		return invalid("bottom_price and scaling_mode apply only to %s", protocol.ExecutionStyleMultiLevelLimit)
+	}
 	if _, err := decimal.Price(intent.LimitPrice); err != nil {
 		return invalid("invalid limit price %q", intent.LimitPrice)
 	}
@@ -84,7 +93,13 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 	if intent.Policy.MaxFeatureAgeMillis > 0 && (intent.FeatureCompletedAt.IsZero() || now.Sub(intent.FeatureCompletedAt) > time.Duration(intent.Policy.MaxFeatureAgeMillis)*time.Millisecond) {
 		return invalid("execution intent feature is stale")
 	}
-	if err := tactics.ValidatePolicy(intent); err != nil {
+	// A ladder's levels are planned as limit orders, so its policy is checked
+	// as one.
+	planned := intent
+	if planned.Policy.Style == protocol.ExecutionStyleMultiLevelLimit {
+		planned.Policy.Style = protocol.ExecutionStyleLimit
+	}
+	if err := tactics.ValidatePolicy(planned); err != nil {
 		if tactics.UnsupportedStyle(err) {
 			return rejection{code: protocol.ReasonUnsupportedStyle, reason: err.Error(), cause: err}
 		}
@@ -102,7 +117,7 @@ func validatePolicyDurations(policy protocol.ExecutionPolicy) error {
 	if policy.MaxReprices < 0 {
 		return invalid("execution policy max_reprices must not be negative")
 	}
-	if policy.RepriceIntervalMillis > 0 || policy.MaxReprices > 0 || policy.PostOnlyCrossRetry ||
+	if policy.RepriceIntervalMillis > 0 || policy.MaxReprices > 0 || (policy.PostOnlyCrossRetry && policy.Style != protocol.ExecutionStyleMultiLevelLimit) ||
 		policy.SoftCloseAfterMillis > 0 || policy.ForceCloseAfterMillis > 0 {
 		return reject(protocol.ReasonUnimplementedPolicy, "execution policy lifecycle controls are not implemented")
 	}

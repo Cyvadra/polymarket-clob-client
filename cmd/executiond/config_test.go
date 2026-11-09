@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
 )
 
 // Every config needs the strategies the wallet trades; tests of other
@@ -29,6 +30,23 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 	}
 	if cfg.MaxTradeAge != 24*time.Hour {
 		t.Fatalf("expected default max trade age of 24h, got %s", cfg.MaxTradeAge)
+	}
+}
+
+func TestConfigFromEnvMaxLadderLevels(t *testing.T) {
+	cfg, err := configFromEnv()
+	if err != nil || cfg.MaxLadderLevels != executor.DefaultMaxLadderLevels {
+		t.Fatalf("default: levels=%d err=%v, want %d", cfg.MaxLadderLevels, err, executor.DefaultMaxLadderLevels)
+	}
+	withEnv(t, map[string]string{"EXECUTION_MAX_LADDER_LEVELS": "40"})
+	if cfg, err = configFromEnv(); err != nil || cfg.MaxLadderLevels != 40 {
+		t.Fatalf("set: levels=%d err=%v, want 40", cfg.MaxLadderLevels, err)
+	}
+	for _, bad := range []string{"0", "-3", "100", "many", "2.5"} {
+		t.Setenv("EXECUTION_MAX_LADDER_LEVELS", bad)
+		if _, err := configFromEnv(); err == nil {
+			t.Fatalf("EXECUTION_MAX_LADDER_LEVELS=%q was accepted", bad)
+		}
 	}
 }
 

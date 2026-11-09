@@ -61,6 +61,8 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 		Side:               req.Side,
 		TargetUSD:          scaleSize(req.TargetUSD, e.sizeMultiplier(req.Strategy), usdDigits),
 		LimitPrice:         req.LimitPrice,
+		BottomPrice:        req.BottomPrice,
+		ScalingMode:        req.ScalingMode,
 		TimeInForce:        req.TimeInForce,
 		PostOnly:           req.PostOnly,
 		FeatureSeq:         req.FeatureSeq,
@@ -185,6 +187,9 @@ func (e *Executor) submitSignedOrder(ctx context.Context, intent protocol.Execut
 }
 
 func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
+	if intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit {
+		return e.placeLadder(ctx, intent)
+	}
 	child, err := e.planInitialChild(ctx, intent)
 	if err != nil {
 		return err
@@ -200,6 +205,14 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 	if err := e.reserveChild(ctx, intent, child, reservationID); err != nil {
 		return err
 	}
+	return e.placeReservedChild(ctx, intent, child)
+}
+
+// placeReservedChild is placeChild once the child's exposure is reserved:
+// it signs, persists and submits, and releases the reservation if it fails
+// before the order is persisted.
+func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild) error {
+	reservationID := reservationID(intent.IntentID, child.Sequence)
 	releaseCashHold(ctx)
 	releaseOnFailure := true
 	defer func() {
@@ -207,26 +220,17 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 			_ = e.store.Release(context.Background(), reservationID, "prepare order failed")
 		}
 	}()
-	order, err := userOrder(intent, child)
+	signed, err := e.signChild(ctx, intent, child)
 	if err != nil {
 		return err
 	}
-	signed, err := e.clob.CreateOrder(ctx, order)
-	if err != nil {
-		return fmt.Errorf("sign order: %w", err)
-	}
-	payload, err := json.Marshal(signed)
-	if err != nil {
-		return fmt.Errorf("marshal signed order: %w", err)
-	}
-	hash := sha256.Sum256(payload)
 	now := e.now().UTC()
 	// Persisting and marking the order SUBMITTING commit together: the row
 	// still exists before the exchange sees the order, with one fewer
 	// database round trip on the way there.
 	submitting, err := e.store.PersistSubmittingOrder(ctx, store.SignedOrderRecord{
-		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: payload, SignedOrderHash: fmt.Sprintf("%x", hash[:]),
-		Salt: strconv.FormatInt(signed.Salt, 10), ExchangeOrderID: signed.OrderID, RequestedShares: child.Shares, Price: child.Price,
+		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: signed.payload, SignedOrderHash: signed.hash,
+		Salt: signed.salt, ExchangeOrderID: signed.order.OrderID, RequestedShares: child.Shares, Price: child.Price,
 		OrderType: store.TimeInForce(child.TimeInForce), PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
 		MatchedShares: "0", CreatedAt: now, UpdatedAt: now,
 	}, "submit requested")
@@ -234,7 +238,34 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 		return fmt.Errorf("persist signed order: %w", err)
 	}
 	releaseOnFailure = false
-	return e.sendOrder(ctx, intent, signed, child, submitting)
+	return e.sendOrder(ctx, intent, signed.order, child, submitting)
+}
+
+// signedChild is a child order signed and ready to persist.
+type signedChild struct {
+	order   clobclient.SignedOrderV2
+	payload []byte
+	hash    string
+	salt    string
+}
+
+// signChild signs one child. A new signature has a new salt, hash and exchange
+// order ID, so signing again is how a retry avoids reposting a rejected hash.
+func (e *Executor) signChild(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild) (signedChild, error) {
+	order, err := userOrder(intent, child)
+	if err != nil {
+		return signedChild{}, err
+	}
+	signed, err := e.clob.CreateOrder(ctx, order)
+	if err != nil {
+		return signedChild{}, fmt.Errorf("sign order: %w", err)
+	}
+	payload, err := json.Marshal(signed)
+	if err != nil {
+		return signedChild{}, fmt.Errorf("marshal signed order: %w", err)
+	}
+	hash := sha256.Sum256(payload)
+	return signedChild{order: signed, payload: payload, hash: fmt.Sprintf("%x", hash[:]), salt: strconv.FormatInt(signed.Salt, 10)}, nil
 }
 
 // reserveChild locks the child's exposure, tolerating a reservation this same
@@ -291,11 +322,8 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	// signed: once it reaches the book it may fill at once, and no cancel can
 	// take that back. The planner prices from the quote; the drift check
 	// reads the book when it has one (driftQuote).
-	drift, _ := tactics.ParseDrift(intent)
-	quote, hasQuote := e.driftQuote(intent, request.Now)
-	if mid, breached := tactics.DriftBreach(intent, drift, quote, hasQuote, request.Now); breached {
-		return plannedChild{}, reject(protocol.ReasonSignalDrift, "mid %s moved more than %s against the signal %s before submission",
-			decimal.FormatPrice(mid), intent.MaxSignalDrift, intent.SignalPrice)
+	if err := e.checkOpenDrift(intent, request.Now); err != nil {
+		return plannedChild{}, err
 	}
 	decision, err := tactics.Plan(request)
 	if err != nil {
@@ -309,6 +337,20 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 		PostOnly: decision.PostOnly, TimeInForce: decision.TimeInForce,
 		ReservationReason: "execution intent accepted",
 	}, nil
+}
+
+// checkOpenDrift refuses an open whose market has already moved away from the
+// signal: once it reaches the book it may fill at once and no cancel can take
+// that back. The planner prices from the quote; the check reads the book when
+// it has one (driftQuote).
+func (e *Executor) checkOpenDrift(intent protocol.ExecutionIntent, now time.Time) error {
+	drift, _ := tactics.ParseDrift(intent)
+	quote, hasQuote := e.driftQuote(intent, now)
+	if mid, breached := tactics.DriftBreach(intent, drift, quote, hasQuote, now); breached {
+		return reject(protocol.ReasonSignalDrift, "mid %s moved more than %s against the signal %s before submission",
+			decimal.FormatPrice(mid), intent.MaxSignalDrift, intent.SignalPrice)
+	}
+	return nil
 }
 
 // sellableShares is the size a SELL child can actually reserve. The store gates
@@ -487,7 +529,7 @@ func (e *Executor) settleFromResponse(ctx context.Context, intent protocol.Execu
 		collateral = response.TakingAmount
 	}
 	average, _ := decimal.DivideAndRoundDown(collateral, matched, 6)
-	if err := accountfeed.PublishTerminalResult(e.publish, record, updated, reason, average, e.now()); err != nil {
+	if err := accountfeed.PublishTerminalResultWithStore(ctx, e.store, e.publish, record, updated, reason, average, e.now()); err != nil {
 		e.reportError(err)
 	}
 }
@@ -568,10 +610,32 @@ func (e unresolvedSubmission) Unwrap() error { return e.cause }
 
 func (e *Executor) markSubmitRejected(ctx context.Context, order store.SignedOrderRecord, intent protocol.ExecutionIntent, submitErr error) error {
 	reason := rejectionReason(submitErr)
+	// A multi-level level whose post-only order crossed the book was never
+	// accepted, so it parks with its reservation held and is reposted.
+	if intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit && order.PostOnly && isPostOnlyCross(reason) {
+		parked, err := e.store.TransitionOrder(ctx, order, statemachine.EventPostOnlyCross, order.MatchedShares, order.ExchangeOrderID, reason)
+		if err != nil {
+			return fmt.Errorf("park post-only cross for retry: %w", err)
+		}
+		e.publishTransition(parked, intent, reason)
+		return &parkedError{order: parked}
+	}
 	rejected, err := e.store.TransitionOrder(ctx, order, statemachine.EventRejectedObserved, order.MatchedShares, order.ExchangeOrderID, reason)
 	if err != nil {
 		return fmt.Errorf("mark submit rejected: %w", err)
 	}
 	e.publishTransition(rejected, intent, reason)
 	return rejection{code: protocol.ReasonOrderRejected, reason: reason, cause: submitErr}
+}
+
+// isPostOnlyCross reports whether the exchange refused an order only because
+// a post-only order would have matched: a definite rejection that a repost
+// may succeed after the book moves. The CLOB gives no structured code, only
+// text, believed to read "invalid post-only order: order crosses book". That
+// wording has not been confirmed against a live rejection: the match is a
+// post-only refusal that says cross or marketable. Any other refusal is final,
+// so an unrecognised wording fails the level instead of retrying it forever.
+func isPostOnlyCross(reason string) bool {
+	value := strings.NewReplacer("-", " ", "_", " ").Replace(strings.ToLower(reason))
+	return strings.Contains(value, "post only") && (strings.Contains(value, "cross") || strings.Contains(value, "marketable"))
 }
