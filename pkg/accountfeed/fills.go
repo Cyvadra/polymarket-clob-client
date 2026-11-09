@@ -32,6 +32,7 @@ type FillConsumer struct {
 	now     func() time.Time
 	onError func(error)
 	onFill  func()
+	onQuote QuoteFillHook
 	fees    FeeSchedules
 	// started is when the consumer was created. An out-of-band fill matched
 	// before it was already seen by an earlier run, since the reconciler
@@ -68,6 +69,11 @@ func (c *FillConsumer) SetErrorHandler(handler func(error)) {
 // wallet balance a fill moves can be dropped.
 func (c *FillConsumer) SetFillHook(hook func()) {
 	c.onFill = hook
+}
+
+// SetQuoteFillHook is told of every new fill on a quote level.
+func (c *FillConsumer) SetQuoteFillHook(hook QuoteFillHook) {
+	c.onQuote = hook
 }
 
 // SetFeeSchedules makes the consumer record the fee each fill paid. The
@@ -119,6 +125,11 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 	})
 	if inserted && c.onFill != nil {
 		c.onFill()
+	}
+	if inserted && err == nil && IsQuoteIntent(intent) && c.onQuote != nil && decimal.Positive(fill.Shares) {
+		// The trade can land before the order message that would show the
+		// match; it is a fill all the same and ends the quote.
+		c.onQuote(ctx, intent, order, true)
 	}
 	return inserted, err
 }

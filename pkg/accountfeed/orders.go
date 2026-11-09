@@ -31,6 +31,7 @@ type OrderConsumer struct {
 	publish    protocol.ExecutionEventPublisher
 	priceWait  time.Duration
 	onError    func(error)
+	onQuote    QuoteFillHook
 }
 
 func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) (*OrderConsumer, error) {
@@ -52,6 +53,12 @@ func (c *OrderConsumer) SetEventPublisher(publisher protocol.ExecutionEventPubli
 // callback has already returned.
 func (c *OrderConsumer) SetErrorHandler(handler func(error)) {
 	c.onError = handler
+}
+
+// SetQuoteFillHook is told of every observed change to a quote level, so the
+// first fill can end its lane.
+func (c *OrderConsumer) SetQuoteFillHook(hook QuoteFillHook) {
+	c.onQuote = hook
 }
 
 // SetPriceWait bounds how long a terminal result waits for its fills to land
@@ -108,6 +115,10 @@ func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEve
 		return fmt.Errorf("publish account order event: %w", err)
 	}
 	if intent.IntentID == "" {
+		return nil
+	}
+	if IsQuoteIntent(intent) {
+		NotifyQuoteOrder(ctx, c.onQuote, intent, updated)
 		return nil
 	}
 	return c.publishPricedResult(ctx, intent, updated, reason)
@@ -207,6 +218,11 @@ func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent st
 	if IsLadderIntent(intent) {
 		return ErrAggregateIntent
 	}
+	if IsQuoteIntent(intent) {
+		// A quote level never reports on its own: the executor publishes the
+		// lane's one result at its first fill (execution.quote.result).
+		return nil
+	}
 	if intent.Kind == store.IntentClose && intent.Status == store.IntentStatusSuperseded {
 		return nil
 	}
@@ -232,13 +248,38 @@ var ErrAggregateIntent = errors.New("a multi-level intent reports one aggregated
 
 // IsLadderIntent reports whether an intent places a multi-level ladder.
 func IsLadderIntent(intent store.OrderIntentRecord) bool {
+	return intentStyle(intent) == protocol.ExecutionStyleMultiLevelLimit
+}
+
+// IsQuoteIntent reports whether an intent is a quote lane's.
+func IsQuoteIntent(intent store.OrderIntentRecord) bool {
+	return intentStyle(intent) == protocol.ExecutionStyleQuote
+}
+
+func intentStyle(intent store.OrderIntentRecord) protocol.ExecutionStyle {
 	if len(intent.Policy) == 0 {
-		return false
+		return ""
 	}
 	var policy struct {
 		Style protocol.ExecutionStyle `json:"style"`
 	}
-	return json.Unmarshal(intent.Policy, &policy) == nil && policy.Style == protocol.ExecutionStyleMultiLevelLimit
+	if json.Unmarshal(intent.Policy, &policy) != nil {
+		return ""
+	}
+	return policy.Style
+}
+
+// QuoteFillHook hears of every observed change to a quote level: filled is
+// true once the level is known to have matched, partially or in full. The
+// executor's QuoteOrderObserved is the one implementation: the first fill on
+// a lane ends it, and a level that ended unfilled stops counting as resting.
+type QuoteFillHook func(ctx context.Context, intent store.OrderIntentRecord, order store.SignedOrderRecord, filled bool)
+
+// NotifyQuoteOrder passes an observed quote level to hook.
+func NotifyQuoteOrder(ctx context.Context, hook QuoteFillHook, intent store.OrderIntentRecord, order store.SignedOrderRecord) {
+	if hook != nil {
+		hook(ctx, intent, order, decimal.Positive(order.MatchedShares))
+	}
 }
 
 // PublishTerminalResultWithStore publishes the result a child order's end

@@ -44,6 +44,12 @@ type Reconciler struct {
 	replayedFills     map[string]struct{}
 	onError           func(error)
 	publish           protocol.ExecutionEventPublisher
+	onQuote           accountfeed.QuoteFillHook
+}
+
+// SetQuoteFillHook is told of every reconciled change to a quote level.
+func (r *Reconciler) SetQuoteFillHook(hook accountfeed.QuoteFillHook) {
+	r.onQuote = hook
 }
 
 func New(repository store.ReconcileStore, clob CLOB, fills *accountfeed.FillConsumer, apiKey string, now func() time.Time, interval time.Duration) (*Reconciler, error) {
@@ -287,14 +293,15 @@ func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrder
 // before reconciliation reads a 404 as a lost submission.
 const submittingGrace = 2 * time.Second
 
-// ladderChild reports whether order is a level of a multi-level intent. A
+// ladderChild reports whether order is a level of a multi-level intent or of
+// a quote lane, both of which repost parked levels through SUBMITTING. A
 // store that cannot say reads as no, which keeps the generic behaviour.
 func (r *Reconciler) ladderChild(ctx context.Context, order store.SignedOrderRecord) bool {
 	if r.aggregates == nil {
 		return false
 	}
 	intent, err := r.aggregates.Intent(ctx, order.IntentID)
-	return err == nil && accountfeed.IsLadderIntent(intent)
+	return err == nil && (accountfeed.IsLadderIntent(intent) || accountfeed.IsQuoteIntent(intent))
 }
 
 func isMissingOrder(err error) bool {
@@ -379,6 +386,10 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 		return fmt.Errorf("publish reconciliation event: %w", err)
 	}
 	if intent.IntentID == "" {
+		return nil
+	}
+	if accountfeed.IsQuoteIntent(intent) {
+		accountfeed.NotifyQuoteOrder(ctx, r.onQuote, intent, updated)
 		return nil
 	}
 	if err := accountfeed.PublishTerminalResultWithStore(ctx, r.aggregates, r.publish, intent, updated, reason, accountfeed.PricedResult(ctx, r.store, updated), r.now()); err != nil {
