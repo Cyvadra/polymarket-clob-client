@@ -229,6 +229,11 @@ func (e *Executor) placeLadder(ctx context.Context, intent protocol.ExecutionInt
 		run.finish()
 		return placeErr
 	}
+	if placeErr != nil {
+		// Some levels rest, so the ladder goes on, but the first failure
+		// (postLevels reports only the later ones) must still be seen.
+		e.reportError(fmt.Errorf("multi-level intent %s: %w", intent.IntentID, placeErr))
+	}
 	if len(parked) > 0 && stop.Err() == nil && !dropped {
 		createdAt, _ := ctx.Value(intentCreatedAtKey{}).(time.Time)
 		go e.retryLadder(stop, postCtx, run, intent, ladderDeadline(intent, createdAt), parked)

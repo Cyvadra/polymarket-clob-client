@@ -871,13 +871,17 @@ func TestSupersedingCloseStopsTheLadderAndCancelsEveryLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// As replaceCloseLane does: level intents are gathered and cancelled
+	// together, never one at a time through replaceStaleChild.
+	ladders := laneLadders{}
 	for _, candidate := range lane {
 		if !supersededBy(protocol.ExecutionCloseModeForce, candidate) {
 			t.Fatal("a force close should retire the ladder's levels")
 		}
-		if err := h.exec.replaceStaleChild(context.Background(), candidate); err != nil {
-			t.Fatal(err)
-		}
+		ladders.add(candidate)
+	}
+	if err := h.exec.cancelLaneLadders(context.Background(), ladders, map[string]bool{}, "multi-level intent superseded by a close"); err != nil {
+		t.Fatal(err)
 	}
 	settled := h.clob.totalPosts()
 	time.Sleep(120 * time.Millisecond)

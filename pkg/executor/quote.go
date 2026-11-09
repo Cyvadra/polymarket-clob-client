@@ -84,6 +84,9 @@ type quoteLane struct {
 	// cents. They are no longer wanted, and every sweep retries their cancel.
 	stuck   []*quoteLevel
 	nextSeq int
+	// pruned is set, under mu and the registry lock, when the registry drops
+	// the lane. A caller holding the old pointer must fetch the lane again.
+	pruned bool
 	// filledAt is when the first fill was seen, for the fill-to-cancel metric.
 	filledAt time.Time
 }
@@ -128,6 +131,14 @@ func (r *quoteRegistry) bindIntent(lane *quoteLane, intentID string) {
 		r.byIntent = map[string]*quoteLane{}
 	}
 	r.byIntent[intentID] = lane
+}
+
+func (r *quoteRegistry) unbindIntent(lane *quoteLane, intentID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.byIntent[intentID] == lane {
+		delete(r.byIntent, intentID)
+	}
 }
 
 func (r *quoteRegistry) hasIntent(intentID string) bool {
@@ -270,12 +281,20 @@ func (e *Executor) ApplyQuote(ctx context.Context, req protocol.ExecutionQuoteRe
 	if err != nil {
 		return fmt.Errorf("drop quote %s seq %d for %s: %w", req.RequestID, req.Seq, req.UniqueTag, err)
 	}
-	lane := e.quoteLanes.lane(quoteKeyOf(req.UniqueTag, req.ConditionID, req.TokenID))
-	if lane.done.Load() {
-		return nil
-	}
 	received := time.Now()
-	lane.mu.Lock()
+	var lane *quoteLane
+	for {
+		lane = e.quoteLanes.lane(quoteKeyOf(req.UniqueTag, req.ConditionID, req.TokenID))
+		if lane.done.Load() {
+			return nil
+		}
+		lane.mu.Lock()
+		if !lane.pruned {
+			break
+		}
+		// Pruned between the lookup and the lock: one key, one lane.
+		lane.mu.Unlock()
+	}
 	if lane.loaded && req.Seq <= lane.lastSeq {
 		lane.mu.Unlock()
 		return nil
@@ -419,6 +438,15 @@ func (e *Executor) restoreQuoteLane(ctx context.Context, lane *quoteLane, record
 	return nil
 }
 
+// quoteSuspended reports whether the strategy is over a drawdown limit.
+func (e *Executor) quoteSuspended(strategy string) bool {
+	if e.gate == nil {
+		return false
+	}
+	suspended, _ := e.gate.Suspended(strategy)
+	return suspended
+}
+
 func (l *quoteLane) hasParkedLocked() bool {
 	for _, level := range l.levels {
 		if level.parked {
@@ -440,6 +468,7 @@ func (e *Executor) applyQuote(ctx context.Context, lane *quoteLane, req protocol
 		lane.mu.Unlock()
 		return nil
 	}
+	prevSeq, prevDeadline := lane.lastSeq, lane.deadline
 	lane.lastSeq = req.Seq
 	lane.deadline = req.ExpiresAt.UTC()
 	intent := lane.intent
@@ -457,6 +486,10 @@ func (e *Executor) applyQuote(ctx context.Context, lane *quoteLane, req protocol
 		want, reason = nil, "deadline"
 	case e.checkOpenDrift(next, now) != nil:
 		want, reason = nil, "drift"
+	case e.quoteSuspended(req.Strategy):
+		// Over its drawdown limit: the same gate ExecuteOpen applies. Nothing
+		// new may rest, and what rests comes down.
+		want, reason = nil, "drawdown"
 	}
 	created := false
 	if len(want) > 0 && intent.IntentID == "" {
@@ -499,6 +532,16 @@ func (e *Executor) applyQuote(ctx context.Context, lane *quoteLane, req protocol
 	}
 	if err := e.store.SaveQuoteLane(ctx, saved); err != nil {
 		if created {
+			// Unlink the new intent so the next request creates and links
+			// one again, rather than posting under an intent quote_lanes
+			// never learned (and recovery would never adopt).
+			lane.mu.Lock()
+			lane.intent = intent
+			if lane.lastSeq == req.Seq {
+				lane.lastSeq, lane.deadline = prevSeq, prevDeadline
+			}
+			lane.mu.Unlock()
+			e.quoteLanes.unbindIntent(lane, next.IntentID)
 			return fmt.Errorf("link quote lane to its intent: %w", err)
 		}
 		e.reportError(err)
@@ -656,7 +699,9 @@ func (e *Executor) cancelQuoteLevels(ctx context.Context, lane *quoteLane, level
 	if len(failed) > 0 {
 		lane.mu.Lock()
 		for _, level := range failed {
-			level.cancelling = true
+			// No longer parked: the retry loop must not pick it up again at
+			// once. The deadline sweep retries cancelling levels on its pace.
+			level.cancelling, level.parked = true, false
 			if _, taken := lane.levels[level.cents]; !taken {
 				lane.levels[level.cents] = level
 			} else {
@@ -1151,9 +1196,12 @@ func (e *Executor) pruneQuoteLanes(now time.Time) {
 			continue
 		}
 		lane.mu.Lock()
-		idle := len(lane.levels) == 0 && lane.pending == nil && !lane.draining && !lane.retrying &&
+		idle := len(lane.levels) == 0 && len(lane.stuck) == 0 && lane.pending == nil && !lane.draining && !lane.retrying &&
 			!lane.sweeping.Load() && lane.deadline.Add(quoteLaneIdle).Before(now)
 		intentID := lane.intent.IntentID
+		if idle {
+			lane.pruned = true
+		}
 		lane.mu.Unlock()
 		lane.ops.Unlock()
 		if !idle {

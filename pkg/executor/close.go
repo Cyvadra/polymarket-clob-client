@@ -254,11 +254,6 @@ func (l *laneLadders) add(candidate closeableOrder) {
 	l.levels[id] = append(l.levels[id], candidate.order)
 }
 
-func (l laneLadders) with(candidate closeableOrder) laneLadders {
-	l.add(candidate)
-	return l
-}
-
 // cancelLaneLadders stops each ladder not already in stopped, cancels its
 // levels, and publishes its result if that is now due: levels cancelled
 // locally, never on the exchange, have no account-feed event to trigger it.
@@ -317,9 +312,8 @@ func (e *Executor) publishCloseRejection(intent protocol.ExecutionIntent, declar
 // that is still live keeps its truthful result instead of vanishing silently.
 func (e *Executor) replaceStaleChild(ctx context.Context, candidate closeableOrder) error {
 	if candidate.intent.Kind != store.IntentClose {
-		if isLadder(candidate.intent) {
-			return e.cancelLaneLadders(ctx, laneLadders{}.with(candidate), map[string]bool{}, "multi-level intent superseded by a close")
-		}
+		// Level intents never reach here: replaceCloseLane cancels them
+		// together through cancelLaneLadders.
 		return e.cancelOpenOrder(ctx, mapping.ExecutionIntent(candidate.intent).Policy, candidate.order, cancelRequested)
 	}
 	prior := string(candidate.intent.Status)
