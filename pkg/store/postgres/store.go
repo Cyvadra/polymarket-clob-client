@@ -1990,3 +1990,144 @@ func scanEquitySnapshot(row pgx.Row) (store.EquitySnapshotRecord, error) {
 		&record.TradeCashUSD, &record.ExternalFlowUSD, &record.TradeIndex, &record.UnmarkedPositions)
 	return record, err
 }
+
+const quoteLaneColumns = `unique_tag, condition_id, token_id, intent_id, last_seq, deadline, done, result_state, filled_sequence, updated_at`
+
+func scanQuoteLane(row rowScanner) (store.QuoteLaneRecord, error) {
+	var lane store.QuoteLaneRecord
+	var deadline *time.Time
+	var result string
+	err := row.Scan(&lane.Key.UniqueTag, &lane.Key.ConditionID, &lane.Key.TokenID, &lane.IntentID, &lane.LastSeq,
+		&deadline, &lane.Done, &result, &lane.FilledSequence, &lane.UpdatedAt)
+	if err != nil {
+		return store.QuoteLaneRecord{}, err
+	}
+	if deadline != nil {
+		lane.Deadline = deadline.UTC()
+	}
+	lane.ResultState = store.QuoteResultState(result)
+	return lane, nil
+}
+
+func (s *Store) quoteLaneWhere(ctx context.Context, where string, args ...any) (store.QuoteLaneRecord, bool, error) {
+	lane, err := scanQuoteLane(s.pool.QueryRow(ctx, `SELECT `+quoteLaneColumns+` FROM quote_lanes WHERE `+where, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.QuoteLaneRecord{}, false, nil
+	}
+	if err != nil {
+		return store.QuoteLaneRecord{}, false, fmt.Errorf("read quote lane: %w", err)
+	}
+	return lane, true, nil
+}
+
+// QuoteLane reads one quote lane.
+func (s *Store) QuoteLane(ctx context.Context, key store.QuoteLaneKey) (store.QuoteLaneRecord, bool, error) {
+	return s.quoteLaneWhere(ctx, `unique_tag = $1 AND condition_id = $2 AND token_id = $3`, key.UniqueTag, key.ConditionID, key.TokenID)
+}
+
+// QuoteLaneByIntent reads the lane a QUOTE intent belongs to.
+func (s *Store) QuoteLaneByIntent(ctx context.Context, intentID string) (store.QuoteLaneRecord, bool, error) {
+	if intentID == "" {
+		return store.QuoteLaneRecord{}, false, nil
+	}
+	return s.quoteLaneWhere(ctx, `intent_id = $1`, intentID)
+}
+
+// SaveQuoteLane upserts a lane's applied request. A requote commits without
+// waiting for the disk (execAsync): a lost write only costs a restart the seq
+// and deadline that pmm re-states within a second. The write that links the
+// lane to a new intent commits durably, since without it a restart could not
+// find the lane's levels.
+func (s *Store) SaveQuoteLane(ctx context.Context, lane store.QuoteLaneRecord) error {
+	exec := s.execAsync
+	if lane.IntentID != "" {
+		exec = s.pool.Exec
+	}
+	_, err := exec(ctx, `
+		INSERT INTO quote_lanes (unique_tag, condition_id, token_id, intent_id, last_seq, deadline)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (unique_tag, condition_id, token_id) DO UPDATE SET
+			intent_id = CASE WHEN EXCLUDED.intent_id <> '' THEN EXCLUDED.intent_id ELSE quote_lanes.intent_id END,
+			last_seq = EXCLUDED.last_seq,
+			deadline = EXCLUDED.deadline,
+			updated_at = now()
+		WHERE quote_lanes.last_seq < EXCLUDED.last_seq AND NOT quote_lanes.done
+	`, lane.Key.UniqueTag, lane.Key.ConditionID, lane.Key.TokenID, lane.IntentID, lane.LastSeq, zeroTimeToNil(lane.Deadline))
+	if err != nil {
+		return fmt.Errorf("save quote lane: %w", err)
+	}
+	return nil
+}
+
+// MarkQuoteDone is the compare-and-set that ends a lane at its first fill. It
+// commits durably: the owed result must survive a crash.
+func (s *Store) MarkQuoteDone(ctx context.Context, key store.QuoteLaneKey, intentID string, filledSequence int) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO quote_lanes (unique_tag, condition_id, token_id, intent_id, done, result_state, filled_sequence)
+		VALUES ($1, $2, $3, $4, TRUE, $5, $6)
+		ON CONFLICT (unique_tag, condition_id, token_id) DO UPDATE SET
+			intent_id = CASE WHEN EXCLUDED.intent_id <> '' THEN EXCLUDED.intent_id ELSE quote_lanes.intent_id END,
+			done = TRUE, result_state = EXCLUDED.result_state, filled_sequence = EXCLUDED.filled_sequence, updated_at = now()
+		WHERE NOT quote_lanes.done
+	`, key.UniqueTag, key.ConditionID, key.TokenID, intentID, string(store.QuoteResultOwed), filledSequence)
+	if err != nil {
+		return false, fmt.Errorf("mark quote lane done: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// MoveQuoteResult moves a lane's result state from one value to another.
+func (s *Store) MoveQuoteResult(ctx context.Context, key store.QuoteLaneKey, to, from store.QuoteResultState) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE quote_lanes SET result_state = $1, updated_at = now()
+		WHERE unique_tag = $2 AND condition_id = $3 AND token_id = $4 AND result_state = $5
+	`, string(to), key.UniqueTag, key.ConditionID, key.TokenID, string(from))
+	if err != nil {
+		return false, fmt.Errorf("move quote result to %s: %w", to, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// OwedQuoteResults lists the lanes whose result is still owed.
+func (s *Store) OwedQuoteResults(ctx context.Context) ([]store.QuoteLaneRecord, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+quoteLaneColumns+` FROM quote_lanes WHERE result_state = $1`, string(store.QuoteResultOwed))
+	if err != nil {
+		return nil, fmt.Errorf("list owed quote results: %w", err)
+	}
+	defer rows.Close()
+	var lanes []store.QuoteLaneRecord
+	for rows.Next() {
+		lane, err := scanQuoteLane(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan quote lane: %w", err)
+		}
+		lanes = append(lanes, lane)
+	}
+	return lanes, rows.Err()
+}
+
+// RecordQuoteLevel stores the request that posted a level. It is written after
+// the level's POST, off the path to the exchange.
+func (s *Store) RecordQuoteLevel(ctx context.Context, intentID string, childSequence int, requestID string) error {
+	_, err := s.execAsync(ctx, `
+		INSERT INTO quote_levels (intent_id, child_sequence, request_id) VALUES ($1, $2, $3)
+		ON CONFLICT (intent_id, child_sequence) DO UPDATE SET request_id = EXCLUDED.request_id
+	`, intentID, childSequence, requestID)
+	if err != nil {
+		return fmt.Errorf("record quote level: %w", err)
+	}
+	return nil
+}
+
+// QuoteLevelRequest reads the request that posted a level.
+func (s *Store) QuoteLevelRequest(ctx context.Context, intentID string, childSequence int) (string, error) {
+	var requestID string
+	err := s.pool.QueryRow(ctx, `SELECT request_id FROM quote_levels WHERE intent_id = $1 AND child_sequence = $2`, intentID, childSequence).Scan(&requestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read quote level request: %w", err)
+	}
+	return requestID, nil
+}

@@ -77,6 +77,11 @@ func (m ExecutionCloseResult) stamped(i Identity) any {
 	return m
 }
 
+func (m ExecutionQuoteResult) stamped(i Identity) any {
+	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
+	return m
+}
+
 func (m ExecutionOrderEvent) stamped(i Identity) any {
 	m.WalletAddress, m.SignerAddress = i.WalletAddress, i.SignerAddress
 	return m

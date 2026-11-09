@@ -27,6 +27,11 @@ const (
 	SubjectPositionFeaturesPrefix         = "position.features"
 	SubjectStrategyExecutionPositionQuery = "strategy.execution.position.query"
 	SubjectStrategyExecutionBalanceQuery  = "strategy.execution.balance.query"
+	// SubjectStrategyExecutionQuote carries a quote lane's wanted resting
+	// levels (ExecutionQuoteRequest), and SubjectExecutionQuoteResult the
+	// first fill that ends the quote (ExecutionQuoteResult).
+	SubjectStrategyExecutionQuote = "strategy.execution.quote"
+	SubjectExecutionQuoteResult   = "execution.quote.result"
 )
 
 type Side = clobclient.Side
@@ -61,6 +66,10 @@ const (
 	// ExecutionStyleMultiLevelLimit posts a post-only GTC buy at every cent of
 	// bottom_price..limit_price; see docs/protocol/nats-v1.md.
 	ExecutionStyleMultiLevelLimit ExecutionStyle = "MULTI_LEVEL_LIMIT"
+	// ExecutionStyleQuote marks the stored intent of a quote lane, whose
+	// post-only GTC buy levels follow ExecutionQuoteRequest. No request
+	// carries it: it is never accepted on strategy.execution.open.
+	ExecutionStyleQuote ExecutionStyle = "QUOTE"
 )
 
 // ScalingModeFlat sizes every level of a multi-level intent at the full
@@ -160,6 +169,72 @@ type ExecutionOpenRequest struct {
 	SignalPrice    string          `json:"signal_price,omitempty"`
 	MaxSignalDrift string          `json:"max_signal_drift,omitempty"`
 	Policy         ExecutionPolicy `json:"policy,omitempty"`
+}
+
+// ExecutionQuoteRequest states which whole cents a quote lane (unique_tag,
+// condition_id, token_id) wants a post-only GTC buy resting at. executiond
+// keeps a resting level that is still wanted, so it holds its queue place,
+// cancels one no longer wanted and posts a new one. See docs/protocol/nats-v1.md.
+type ExecutionQuoteRequest struct {
+	SchemaVersion string `json:"schema_version"`
+	RequestID     string `json:"request_id,omitempty"`
+	UniqueTag     string `json:"unique_tag"`
+	Strategy      string `json:"strategy"`
+	MarketID      string `json:"market_id,omitempty"`
+	EventSlug     string `json:"event_slug,omitempty"`
+	ConditionID   string `json:"condition_id"`
+	TokenID       string `json:"token_id"`
+	Outcome       string `json:"outcome"`
+	Side          Side   `json:"side"`
+	// Seq orders a lane's requests: one applies only when its Seq is above
+	// the last one applied.
+	Seq int64 `json:"seq"`
+	// Levels are whole-cent prices, highest first; empty means nothing rests.
+	Levels               []string  `json:"levels"`
+	TargetUSD            string    `json:"target_usd,omitempty"`
+	TargetEquityFraction string    `json:"target_equity_fraction,omitempty"`
+	PostOnly             bool      `json:"post_only"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	SignalPrice          string    `json:"signal_price,omitempty"`
+	MaxSignalDrift       string    `json:"max_signal_drift,omitempty"`
+	FeatureSeq           int64     `json:"feature_seq,omitempty"`
+	FeatureCompletedAt   time.Time `json:"feature_completed_at,omitzero"`
+	CreatedAt            time.Time `json:"created_at,omitzero"`
+	Trigger              string    `json:"trigger,omitempty"`
+	TickVisibleAt        time.Time `json:"tick_visible_at,omitzero"`
+}
+
+// QuoteStatusFilled is an ExecutionQuoteResult's only status.
+const QuoteStatusFilled = "FILLED"
+
+// ExecutionQuoteResult reports the first fill that ended a quote lane. It is
+// published once per lane per wallet; nothing else is published for a quote.
+type ExecutionQuoteResult struct {
+	SchemaVersion string    `json:"schema_version"`
+	RequestID     string    `json:"request_id,omitempty"`
+	UniqueTag     string    `json:"unique_tag"`
+	Strategy      string    `json:"strategy,omitempty"`
+	WalletAddress string    `json:"wallet_address,omitempty"`
+	SignerAddress string    `json:"signer_address,omitempty"`
+	ConditionID   string    `json:"condition_id"`
+	TokenID       string    `json:"token_id"`
+	Outcome       string    `json:"outcome"`
+	Side          Side      `json:"side"`
+	Status        string    `json:"status"`
+	Price         string    `json:"price,omitempty"`
+	FilledShares  float64   `json:"filled_shares"`
+	AveragePrice  float64   `json:"average_price,omitempty"`
+	OccurredAt    time.Time `json:"occurred_at"`
+}
+
+func PublishExecutionQuoteResult(publisher ExecutionEventPublisher, result ExecutionQuoteResult) error {
+	if publisher == nil {
+		return nil
+	}
+	result.SchemaVersion = SchemaVersionV1
+	result.Status = QuoteStatusFilled
+	result.OccurredAt = result.OccurredAt.UTC()
+	return publisher.PublishJSON(SubjectExecutionQuoteResult, result)
 }
 
 type ExecutionCloseMode string

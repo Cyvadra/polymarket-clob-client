@@ -434,6 +434,60 @@ type LadderStore interface {
 	PlacingLadders(ctx context.Context) ([]string, error)
 }
 
+// QuoteLaneKey names a quote lane: every rule of a quote applies per lane.
+type QuoteLaneKey struct {
+	UniqueTag   string
+	ConditionID string
+	TokenID     string
+}
+
+// QuoteResultState is whether a quote lane's one result is owed.
+type QuoteResultState string
+
+const (
+	QuoteResultNone      QuoteResultState = ""
+	QuoteResultOwed      QuoteResultState = "OWED"
+	QuoteResultPublished QuoteResultState = "PUBLISHED"
+)
+
+// QuoteLaneRecord is what a quote lane keeps across a restart. Its levels are
+// the child orders of IntentID, the lane's one QUOTE intent, which is empty
+// until the lane first posts.
+type QuoteLaneRecord struct {
+	Key      QuoteLaneKey
+	IntentID string
+	LastSeq  int64
+	Deadline time.Time
+	// Done is set by the first fill; the lane then refuses every request.
+	Done           bool
+	ResultState    QuoteResultState
+	FilledSequence int
+	UpdatedAt      time.Time
+}
+
+// QuoteStore is the durable state of quote lanes.
+type QuoteStore interface {
+	// QuoteLane reads one lane; found is false when it has never quoted.
+	QuoteLane(ctx context.Context, key QuoteLaneKey) (lane QuoteLaneRecord, found bool, err error)
+	// QuoteLaneByIntent reads the lane whose QUOTE intent is intentID.
+	QuoteLaneByIntent(ctx context.Context, intentID string) (lane QuoteLaneRecord, found bool, err error)
+	// SaveQuoteLane records a newly applied request: its seq, the deadline
+	// and the lane's intent. It never lowers last_seq and never touches a
+	// lane that is done.
+	SaveQuoteLane(ctx context.Context, lane QuoteLaneRecord) error
+	// MarkQuoteDone ends a lane at its first fill and makes its result owed,
+	// once: it reports false when the lane was already done.
+	MarkQuoteDone(ctx context.Context, key QuoteLaneKey, intentID string, filledSequence int) (marked bool, err error)
+	// MoveQuoteResult is a compare-and-set on the result state.
+	MoveQuoteResult(ctx context.Context, key QuoteLaneKey, to, from QuoteResultState) (moved bool, err error)
+	// OwedQuoteResults lists the lanes whose result is owed.
+	OwedQuoteResults(ctx context.Context) ([]QuoteLaneRecord, error)
+	// RecordQuoteLevel stores the request that posted a level.
+	RecordQuoteLevel(ctx context.Context, intentID string, childSequence int, requestID string) error
+	// QuoteLevelRequest reads it back; empty when none was recorded.
+	QuoteLevelRequest(ctx context.Context, intentID string, childSequence int) (string, error)
+}
+
 type AccountOrderStore interface {
 	TransitionOrder(context.Context, SignedOrderRecord, statemachine.Event, string, string, string) (SignedOrderRecord, error)
 	OrderByExchangeID(context.Context, string) (SignedOrderRecord, error)
