@@ -86,6 +86,8 @@ type OrderIntentRecord struct {
 	TargetEquityFraction string
 	SizedEquityUSD       string
 	LimitPrice           string
+	BottomPrice          string
+	ScalingMode          string
 	TimeInForce          TimeInForce
 	PostOnly             bool
 	FeatureSeq           int64
@@ -378,6 +380,58 @@ type AccountFillStore interface {
 // order; an empty string means no fill is recorded yet.
 type OrderPriceStore interface {
 	OrderAveragePrice(context.Context, string) (string, error)
+}
+
+// LadderPhase is where a multi-level intent is in its life. It is its own
+// column because the intent status follows every child order's state: a
+// marker kept in the status would be overwritten by the next child transition.
+type LadderPhase string
+
+const (
+	// LadderNone is an intent that is not a ladder, or one not yet started.
+	LadderNone LadderPhase = ""
+	// LadderPlacing: children are still being planned and posted, so an
+	// all-terminal set of children is not yet the end of the intent.
+	LadderPlacing LadderPhase = "PLACING"
+	// LadderActive: every child that will ever exist has been posted.
+	LadderActive LadderPhase = "ACTIVE"
+	// LadderStopping: a CANCEL_OPEN, force close or expiry is withdrawing
+	// the ladder; nothing is reposted.
+	LadderStopping LadderPhase = "STOPPING"
+	// LadderPublished: the one aggregated result has been claimed.
+	LadderPublished LadderPhase = "PUBLISHED"
+)
+
+// AggregateOrderStore is the durable view that folds a multi-level intent's
+// children into one result. It is separate from AccountOrderStore so that
+// consumers of a single exchange order do not have to carry it.
+type AggregateOrderStore interface {
+	Intent(context.Context, string) (OrderIntentRecord, error)
+	// IntentOrders returns every child of the intent, lowest sequence first.
+	IntentOrders(context.Context, string) ([]SignedOrderRecord, error)
+	LadderPhase(context.Context, string) (LadderPhase, error)
+	// MoveLadderPhase sets the phase only while it is one of from, and
+	// reports whether it did. It is the compare-and-set that makes cancel,
+	// placement and result publication agree without holding a lock.
+	MoveLadderPhase(ctx context.Context, intentID string, to LadderPhase, from ...LadderPhase) (moved bool, err error)
+	OrderPriceStore
+}
+
+// LadderStore is what the executor needs to run a multi-level intent.
+type LadderStore interface {
+	AggregateOrderStore
+	// ResignRetryOrder replaces a RETRY_PENDING order's signed payload, hash,
+	// salt and exchange order ID and moves it to SUBMITTING in one commit. A
+	// post-only cross is a definite rejection, but a fresh signature keeps
+	// the repost from being refused as a duplicate of the rejected hash.
+	ResignRetryOrder(ctx context.Context, order SignedOrderRecord, payload []byte, hash, salt, exchangeOrderID, reason string) (SignedOrderRecord, error)
+	// PendingLadders lists the intents whose placement has ended, whose
+	// children have all ended, and whose result has not been published, so a
+	// result lost to a crash or a failed publish is found again.
+	PendingLadders(ctx context.Context) ([]string, error)
+	// PlacingLadders lists the intents still marked PLACING, so a restart can
+	// end the placement a crash interrupted, even when no child is left open.
+	PlacingLadders(ctx context.Context) ([]string, error)
 }
 
 type AccountOrderStore interface {

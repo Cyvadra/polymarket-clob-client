@@ -14,6 +14,7 @@ const (
 	StateIntentReceived   State = "INTENT_RECEIVED"
 	StateSigned           State = "SIGNED"
 	StateSubmitting       State = "SUBMITTING"
+	StateRetryPending     State = "RETRY_PENDING"
 	StateSubmitUnknown    State = "SUBMIT_UNKNOWN"
 	StateLive             State = "LIVE"
 	StatePartiallyFilled  State = "PARTIALLY_FILLED"
@@ -34,6 +35,8 @@ const (
 	EventSubmitStarted         Event = "SUBMIT_STARTED"
 	EventSubmitAcknowledged    Event = "SUBMIT_ACKNOWLEDGED"
 	EventSubmitTimedOut        Event = "SUBMIT_TIMED_OUT"
+	EventPostOnlyCross         Event = "POST_ONLY_CROSS"
+	EventRetryStarted          Event = "RETRY_STARTED"
 	EventOrderLiveObserved     Event = "ORDER_LIVE_OBSERVED"
 	EventPartialFillObserved   Event = "PARTIAL_FILL_OBSERVED"
 	EventFillObserved          Event = "FILL_OBSERVED"
@@ -142,7 +145,7 @@ func fullyMatched(matched, requested string) bool {
 
 func RequiresLockedExposure(state State) bool {
 	switch state {
-	case StateSubmitting, StateSubmitUnknown, StateLive, StatePartiallyFilled, StateCancelRequested, StateCancelPending, StateUnknownReconcile:
+	case StateSubmitting, StateRetryPending, StateSubmitUnknown, StateLive, StatePartiallyFilled, StateCancelRequested, StateCancelPending, StateUnknownReconcile:
 		return true
 	default:
 		return false
@@ -163,6 +166,7 @@ var transitions = map[State]map[Event]State{
 		EventCancelObserved: StateCanceled,
 	},
 	StateSubmitting: {
+		EventPostOnlyCross:         StateRetryPending,
 		EventSubmitAcknowledged:    StateLive,
 		EventSubmitTimedOut:        StateSubmitUnknown,
 		EventOrderLiveObserved:     StateLive,
@@ -173,6 +177,10 @@ var transitions = map[State]map[Event]State{
 		EventFailedObserved:        StateFailed,
 		EventRejectedObserved:      StateRejected,
 		EventReconcileInconclusive: StateUnknownReconcile,
+	},
+	StateRetryPending: {
+		EventRetryStarted:   StateSubmitting,
+		EventCancelObserved: StateCanceled,
 	},
 	StateSubmitUnknown: {
 		EventSubmitAcknowledged:    StateLive,

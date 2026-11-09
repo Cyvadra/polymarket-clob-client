@@ -2,6 +2,39 @@ package statemachine
 
 import "testing"
 
+func TestPostOnlyCrossRetryRetainsExposureAndReentersSubmitting(t *testing.T) {
+	transition, changed, err := Apply(StateSubmitting, EventPostOnlyCross)
+	if err != nil || !changed || transition.To != StateRetryPending {
+		t.Fatalf("cross transition=%+v changed=%v err=%v", transition, changed, err)
+	}
+	if !RequiresLockedExposure(transition.To) {
+		t.Fatal("retry pending released exposure")
+	}
+	transition, changed, err = Apply(transition.To, EventRetryStarted)
+	if err != nil || !changed || transition.To != StateSubmitting {
+		t.Fatalf("retry transition=%+v changed=%v err=%v", transition, changed, err)
+	}
+}
+
+func TestRetryPendingIsCancellableButNothingElse(t *testing.T) {
+	if IsTerminal(StateRetryPending) {
+		t.Fatal("a parked order is still working: it holds its reservation")
+	}
+	transition, changed, err := Apply(StateRetryPending, EventCancelObserved)
+	if err != nil || !changed || transition.To != StateCanceled {
+		t.Fatalf("cancel transition=%+v changed=%v err=%v", transition, changed, err)
+	}
+	if RequiresLockedExposure(transition.To) {
+		t.Fatal("a cancelled parked order kept its exposure")
+	}
+	// Nothing was ever on the exchange, so nothing can fill, expire or go live.
+	for _, event := range []Event{EventFillObserved, EventPartialFillObserved, EventOrderLiveObserved, EventSubmitAcknowledged, EventExpiredObserved, EventCancelRequested} {
+		if _, _, err := Apply(StateRetryPending, event); err == nil {
+			t.Fatalf("a parked order accepted %s", event)
+		}
+	}
+}
+
 func TestHappyPathTransitionsToLiveAndFilled(t *testing.T) {
 	state := StateIntentReceived
 	for _, event := range []Event{EventSigned, EventSubmitStarted, EventSubmitAcknowledged, EventFillObserved} {

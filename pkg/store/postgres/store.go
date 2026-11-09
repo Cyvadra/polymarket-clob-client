@@ -260,14 +260,14 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at,
 			target_equity_fraction, sized_equity_usd, request_id,
-			signal_price, max_signal_drift
+			signal_price, max_signal_drift, bottom_price, scaling_mode
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7,
 			$8, $9, $10, NULLIF($11, '')::numeric, $12,
 			$13, $14, $15, $16, $17,
 			$18, $19, $20, $21,
 			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric, $24,
-			NULLIF($25, '')::numeric, NULLIF($26, '')::numeric
+			NULLIF($25, '')::numeric, NULLIF($26, '')::numeric, NULLIF($27, '')::numeric, $28
 		)
 		ON CONFLICT (intent_id) DO NOTHING
 	`, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
@@ -275,7 +275,7 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt,
 		record.TargetEquityFraction, record.SizedEquityUSD, record.RequestID,
-		record.SignalPrice, record.MaxSignalDrift)
+		record.SignalPrice, record.MaxSignalDrift, record.BottomPrice, record.ScalingMode)
 	if err != nil {
 		return false, fmt.Errorf("insert intent: %w", err)
 	}
@@ -291,7 +291,7 @@ func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentR
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at, request_id,
-			signal_price::text, max_signal_drift::text
+			signal_price::text, max_signal_drift::text, bottom_price::text, scaling_mode
 		FROM order_intents
 		WHERE intent_id = $1
 	`, intentID)
@@ -311,7 +311,7 @@ func (s *Store) LatestLimitCloseIntent(ctx context.Context, conditionID, tokenID
 			token_id, outcome, side, target_usd::text, limit_price::text,
 			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
 			status, policy, created_at, updated_at, request_id,
-			signal_price::text, max_signal_drift::text
+			signal_price::text, max_signal_drift::text, bottom_price::text, scaling_mode
 		FROM order_intents
 		WHERE condition_id = $1 AND token_id = $2 AND unique_tag = $3
 			AND kind = 'CLOSE' AND time_in_force <> 'FAK'
@@ -613,6 +613,146 @@ func (s *Store) OpenOrders(ctx context.Context) ([]store.SignedOrderRecord, erro
 		return nil, fmt.Errorf("scan open orders: %w", err)
 	}
 	return orders, nil
+}
+
+func (s *Store) IntentOrders(ctx context.Context, intentID string) ([]store.SignedOrderRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT intent_id, child_sequence, signed_payload, signed_order_hash, salt, exchange_order_id,
+			requested_shares::text, matched_shares::text, price::text, order_type, post_only,
+			state, revision, created_at, updated_at
+		FROM orders WHERE intent_id = $1 ORDER BY child_sequence`, intentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.SignedOrderRecord
+	for rows.Next() {
+		record, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+// LadderPhase reads where a multi-level intent is in its life.
+func (s *Store) LadderPhase(ctx context.Context, intentID string) (store.LadderPhase, error) {
+	var phase string
+	err := s.pool.QueryRow(ctx, `SELECT ladder_phase FROM order_intents WHERE intent_id = $1`, intentID).Scan(&phase)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.LadderNone, store.ErrNotFound
+	}
+	if err != nil {
+		return store.LadderNone, fmt.Errorf("read ladder phase: %w", err)
+	}
+	return store.LadderPhase(phase), nil
+}
+
+// MoveLadderPhase is a compare-and-set on the phase column.
+func (s *Store) MoveLadderPhase(ctx context.Context, intentID string, to store.LadderPhase, from ...store.LadderPhase) (bool, error) {
+	if intentID == "" || to == store.LadderNone || len(from) == 0 {
+		return false, fmt.Errorf("intent ID, a target phase and the phases it may move from are required")
+	}
+	prior := make([]string, len(from))
+	for i, phase := range from {
+		prior[i] = string(phase)
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE order_intents SET ladder_phase = $1, updated_at = now()
+		WHERE intent_id = $2 AND ladder_phase = ANY($3)
+	`, string(to), intentID, prior)
+	if err != nil {
+		return false, fmt.Errorf("move ladder phase to %s: %w", to, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// PendingLadders lists the multi-level intents past placement whose result has
+// not been published and whose children have all ended, so a ladder with a
+// level still resting costs the recovery pass nothing.
+func (s *Store) PendingLadders(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT i.intent_id FROM order_intents i
+		WHERE i.ladder_phase = ANY($1)
+		  AND NOT EXISTS (
+			SELECT 1 FROM orders o
+			WHERE o.intent_id = i.intent_id
+			  AND o.state NOT IN ('CANCELED', 'FILLED', 'REJECTED', 'EXPIRED', 'FAILED'))
+	`, []string{string(store.LadderActive), string(store.LadderStopping)})
+	if err != nil {
+		return nil, fmt.Errorf("list pending ladders: %w", err)
+	}
+	return collectIDs(rows)
+}
+
+// PlacingLadders lists the multi-level intents still marked PLACING.
+func (s *Store) PlacingLadders(ctx context.Context) ([]string, error) {
+	return s.laddersIn(ctx, store.LadderPlacing)
+}
+
+func (s *Store) laddersIn(ctx context.Context, phases ...store.LadderPhase) ([]string, error) {
+	wanted := make([]string, len(phases))
+	for i, phase := range phases {
+		wanted[i] = string(phase)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT intent_id FROM order_intents WHERE ladder_phase = ANY($1)`, wanted)
+	if err != nil {
+		return nil, fmt.Errorf("list ladders in %v: %w", phases, err)
+	}
+	return collectIDs(rows)
+}
+
+func collectIDs(rows pgx.Rows) ([]string, error) {
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ResignRetryOrder swaps a RETRY_PENDING order's signature and re-enters
+// SUBMITTING in one transaction, guarded by the order's revision.
+func (s *Store) ResignRetryOrder(ctx context.Context, order store.SignedOrderRecord, payload []byte, hash, salt, exchangeOrderID, reason string) (store.SignedOrderRecord, error) {
+	if len(payload) == 0 || hash == "" || salt == "" || exchangeOrderID == "" {
+		return store.SignedOrderRecord{}, fmt.Errorf("payload, hash, salt and exchange order ID are required")
+	}
+	transition, matched, noop, err := planTransition(order, statemachine.EventRetryStarted, order.MatchedShares, exchangeOrderID)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	if noop {
+		return store.SignedOrderRecord{}, fmt.Errorf("re-signing a %s order changes nothing", order.State)
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("begin order re-sign: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
+		UPDATE orders SET signed_payload = $1, signed_order_hash = $2, salt = $3, exchange_order_id = $4
+		WHERE intent_id = $5 AND child_sequence = $6 AND revision = $7 AND state = $8
+	`, payload, hash, salt, exchangeOrderID, order.IntentID, order.ChildSequence, order.Revision, order.State)
+	if err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("replace signed order: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return store.SignedOrderRecord{}, store.ErrConflict
+	}
+	updated, err := writeTransitionTx(ctx, tx, order, statemachine.EventRetryStarted, transition, matched, exchangeOrderID, reason)
+	if err != nil {
+		return store.SignedOrderRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("commit order re-sign: %w", err)
+	}
+	updated.SignedPayload, updated.SignedOrderHash, updated.Salt = payload, hash, salt
+	return updated, nil
 }
 
 func (s *Store) OrderByExchangeID(ctx context.Context, exchangeOrderID string) (store.SignedOrderRecord, error) {
@@ -1342,13 +1482,13 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	// NULL for a zero time. They must be read back through pointers or every
 	// intent stored without them fails to scan.
 	var featureCompletedAt, expiresAt *time.Time
-	var signalPrice, maxSignalDrift *string
+	var signalPrice, maxSignalDrift, bottomPrice *string
 	err := row.Scan(
 		&record.IntentID, &record.UniqueTag, &record.Strategy, &record.Kind, &record.MarketID, &record.EventSlug, &record.ConditionID,
 		&record.TokenID, &record.Outcome, &record.Side, &targetUSD, &record.LimitPrice,
 		&record.TimeInForce, &record.PostOnly, &record.FeatureSeq, &featureCompletedAt, &expiresAt,
 		&record.Status, &policy, &record.CreatedAt, &record.UpdatedAt, &record.RequestID,
-		&signalPrice, &maxSignalDrift,
+		&signalPrice, &maxSignalDrift, &bottomPrice, &record.ScalingMode,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.OrderIntentRecord{}, store.ErrNotFound
@@ -1370,6 +1510,9 @@ func scanIntent(row rowScanner) (store.OrderIntentRecord, error) {
 	}
 	if maxSignalDrift != nil {
 		record.MaxSignalDrift = *maxSignalDrift
+	}
+	if bottomPrice != nil {
+		record.BottomPrice = *bottomPrice
 	}
 	if len(policy) > 0 {
 		record.Policy = policy

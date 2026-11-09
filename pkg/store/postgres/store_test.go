@@ -210,6 +210,7 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 		"GTC", false, int64(0), nil, nil,
 		"INTENT_RECEIVED", []byte(`{}`), now, now, "req-1",
 		nil, nil,
+		nil, "",
 	}}
 	record, err := scanIntent(row)
 	if err != nil {
@@ -231,6 +232,8 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 	row.values[16] = expires
 	row.values[22] = "0.305000000000000000"
 	row.values[23] = "0.030000000000000000"
+	row.values[24] = "0.200000000000000000"
+	row.values[25] = "flat"
 	record, err = scanIntent(row)
 	if err != nil {
 		t.Fatalf("scan intent with populated timestamps: %v", err)
@@ -240,5 +243,8 @@ func TestScanIntentAcceptsNullableTimestamps(t *testing.T) {
 	}
 	if record.SignalPrice != "0.305000000000000000" || record.MaxSignalDrift != "0.030000000000000000" {
 		t.Fatalf("drift bound lost: %+v", record)
+	}
+	if record.BottomPrice != "0.200000000000000000" || record.ScalingMode != "flat" {
+		t.Fatalf("multi-level fields lost: %+v", record)
 	}
 }
