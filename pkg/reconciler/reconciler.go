@@ -33,6 +33,7 @@ type paginatedTrades interface {
 
 type Reconciler struct {
 	store             store.ReconcileStore
+	aggregates        store.AggregateOrderStore // nil when store cannot read a multi-level intent's children
 	clob              CLOB
 	fills             *accountfeed.FillConsumer
 	apiKey            string
@@ -55,7 +56,8 @@ func New(repository store.ReconcileStore, clob CLOB, fills *accountfeed.FillCons
 	if interval <= 0 {
 		interval = defaultInterval
 	}
-	return &Reconciler{store: repository, clob: clob, fills: fills, apiKey: apiKey, now: now, interval: interval, missingOrderGrace: defaultMissingOrderGrace, replayedFills: map[string]struct{}{}}, nil
+	aggregates, _ := repository.(store.AggregateOrderStore)
+	return &Reconciler{store: repository, aggregates: aggregates, clob: clob, fills: fills, apiKey: apiKey, now: now, interval: interval, missingOrderGrace: defaultMissingOrderGrace, replayedFills: map[string]struct{}{}}, nil
 }
 
 func (r *Reconciler) SetMissingOrderGrace(grace time.Duration) {
@@ -231,6 +233,18 @@ func isSettled(tradeStatus string) bool {
 // fillsCurrent reports whether this pass's trade replay succeeded, so the
 // store's fills can be trusted as the full record of what the order matched.
 func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrderRecord, fillsCurrent bool) error {
+	// A parked multi-level order holds the ID of a post-only order the exchange
+	// refused: nothing is there to look up, and the retry loop owns the row.
+	if order.State == statemachine.StateRetryPending {
+		return nil
+	}
+	// A ladder level that keeps reposting is in SUBMITTING almost continuously,
+	// and a 404 on its fresh order means "not yet", not "lost". Each repost
+	// renews the row's update time, so only a submission stuck for longer is
+	// looked up. Other orders keep the immediate reading.
+	if order.State == statemachine.StateSubmitting && r.now().Sub(order.UpdatedAt) < submittingGrace && r.ladderChild(ctx, order) {
+		return nil
+	}
 	if order.ExchangeOrderID == "" {
 		if order.State == statemachine.StateSigned {
 			return nil
@@ -267,6 +281,20 @@ func (r *Reconciler) reconcileOrder(ctx context.Context, order store.SignedOrder
 		return fmt.Errorf("lookup order %s: empty response", order.ExchangeOrderID)
 	}
 	return r.applyRemoteOrder(ctx, order, *remote, "REST order observation "+remote.Status)
+}
+
+// submittingGrace is how long a SUBMITTING ladder level is left to its poster
+// before reconciliation reads a 404 as a lost submission.
+const submittingGrace = 2 * time.Second
+
+// ladderChild reports whether order is a level of a multi-level intent. A
+// store that cannot say reads as no, which keeps the generic behaviour.
+func (r *Reconciler) ladderChild(ctx context.Context, order store.SignedOrderRecord) bool {
+	if r.aggregates == nil {
+		return false
+	}
+	intent, err := r.aggregates.Intent(ctx, order.IntentID)
+	return err == nil && accountfeed.IsLadderIntent(intent)
 }
 
 func isMissingOrder(err error) bool {
@@ -353,7 +381,7 @@ func (r *Reconciler) apply(ctx context.Context, order store.SignedOrderRecord, e
 	if intent.IntentID == "" {
 		return nil
 	}
-	if err := accountfeed.PublishTerminalResult(r.publish, intent, updated, reason, accountfeed.PricedResult(ctx, r.store, updated), r.now()); err != nil {
+	if err := accountfeed.PublishTerminalResultWithStore(ctx, r.aggregates, r.publish, intent, updated, reason, accountfeed.PricedResult(ctx, r.store, updated), r.now()); err != nil {
 		return fmt.Errorf("publish reconciliation open result: %w", err)
 	}
 	return nil

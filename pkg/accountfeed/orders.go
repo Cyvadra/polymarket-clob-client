@@ -2,6 +2,7 @@ package accountfeed
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,11 +23,14 @@ const DefaultPriceWait = 3500 * time.Millisecond
 const priceWaitPoll = 100 * time.Millisecond
 
 type OrderConsumer struct {
-	store     store.AccountOrderStore
-	now       func() time.Time
-	publish   protocol.ExecutionEventPublisher
-	priceWait time.Duration
-	onError   func(error)
+	store store.AccountOrderStore
+	// aggregates is the same store seen as a multi-level reader, nil when it
+	// is not one.
+	aggregates store.AggregateOrderStore
+	now        func() time.Time
+	publish    protocol.ExecutionEventPublisher
+	priceWait  time.Duration
+	onError    func(error)
 }
 
 func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) (*OrderConsumer, error) {
@@ -36,7 +40,8 @@ func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) 
 	if now == nil {
 		now = time.Now
 	}
-	return &OrderConsumer{store: repository, now: now, priceWait: DefaultPriceWait}, nil
+	aggregates, _ := repository.(store.AggregateOrderStore)
+	return &OrderConsumer{store: repository, aggregates: aggregates, now: now, priceWait: DefaultPriceWait}, nil
 }
 
 func (c *OrderConsumer) SetEventPublisher(publisher protocol.ExecutionEventPublisher) {
@@ -126,7 +131,7 @@ func (c *OrderConsumer) publishPricedResult(ctx context.Context, intent store.Or
 	if price == "" {
 		price = PricedResult(ctx, c.store, order)
 	}
-	return PublishTerminalResult(c.publish, intent, order, reason, price, c.now())
+	return PublishTerminalResultWithStore(ctx, c.aggregates, c.publish, intent, order, reason, price, c.now())
 }
 
 func (c *OrderConsumer) awaitPriceAndPublish(ctx context.Context, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason string) {
@@ -151,7 +156,7 @@ func (c *OrderConsumer) awaitPriceAndPublish(ctx context.Context, intent store.O
 // deferred publication runs off the stream goroutine, so there is no caller
 // left to return the error to.
 func (c *OrderConsumer) publishResult(intent store.OrderIntentRecord, order store.SignedOrderRecord, reason, price string) {
-	if err := PublishTerminalResult(c.publish, intent, order, reason, price, c.now()); err != nil && c.onError != nil {
+	if err := PublishTerminalResultWithStore(context.Background(), c.aggregates, c.publish, intent, order, reason, price, c.now()); err != nil && c.onError != nil {
 		c.onError(err)
 	}
 }
@@ -199,6 +204,9 @@ func restingOrderType(tif store.TimeInForce) bool {
 }
 
 func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason, averagePrice string, occurredAt time.Time) error {
+	if IsLadderIntent(intent) {
+		return ErrAggregateIntent
+	}
 	if intent.Kind == store.IntentClose && intent.Status == store.IntentStatusSuperseded {
 		return nil
 	}
@@ -213,6 +221,93 @@ func PublishTerminalResult(publisher protocol.ExecutionEventPublisher, intent st
 			return fmt.Errorf("publish terminal close result: %w", err)
 		}
 		return nil
+	}
+	return nil
+}
+
+// ErrAggregateIntent is returned by PublishTerminalResult for a multi-level
+// intent. Its children never report on their own: one result covers them all,
+// and only PublishTerminalResultWithStore can tell when that result is due.
+var ErrAggregateIntent = errors.New("a multi-level intent reports one aggregated result, not one per child order")
+
+// IsLadderIntent reports whether an intent places a multi-level ladder.
+func IsLadderIntent(intent store.OrderIntentRecord) bool {
+	if len(intent.Policy) == 0 {
+		return false
+	}
+	var policy struct {
+		Style protocol.ExecutionStyle `json:"style"`
+	}
+	return json.Unmarshal(intent.Policy, &policy) == nil && policy.Style == protocol.ExecutionStyleMultiLevelLimit
+}
+
+// PublishTerminalResultWithStore publishes the result a child order's end
+// calls for: its own for an ordinary intent, and for a multi-level intent the
+// aggregated one, once every child has ended. aggregates may be nil when the
+// caller's store cannot read children; that fails only for a multi-level
+// intent, loudly, rather than silently dropping its result.
+func PublishTerminalResultWithStore(ctx context.Context, aggregates store.AggregateOrderStore, publisher protocol.ExecutionEventPublisher, intent store.OrderIntentRecord, order store.SignedOrderRecord, reason, averagePrice string, occurredAt time.Time) error {
+	if !IsLadderIntent(intent) {
+		return PublishTerminalResult(publisher, intent, order, reason, averagePrice, occurredAt)
+	}
+	if aggregates == nil {
+		return fmt.Errorf("multi-level intent %s needs an aggregate order store to publish its result", intent.IntentID)
+	}
+	if !statemachine.IsTerminal(order.State) {
+		// This child is still open, so the aggregated result cannot be due:
+		// skip the reads PublishLadderResult would make to learn that.
+		return nil
+	}
+	return PublishLadderResult(ctx, aggregates, publisher, intent.IntentID, reason, occurredAt)
+}
+
+// PublishLadderResult publishes a multi-level intent's result when it is due
+// and does nothing otherwise. It takes no lock, so it is safe to call from
+// inside code that holds the intent lock. Observers race freely: the phase
+// compare-and-set picks the one that publishes, and a publish that fails puts
+// the phase back so the next observer retries.
+//
+// A result is due once placement has finished (the phase is ACTIVE or
+// STOPPING, never PLACING) and every child is terminal.
+func PublishLadderResult(ctx context.Context, aggregates store.AggregateOrderStore, publisher protocol.ExecutionEventPublisher, intentID, reason string, occurredAt time.Time) error {
+	phase, err := aggregates.LadderPhase(ctx, intentID)
+	if err != nil {
+		return fmt.Errorf("read ladder phase: %w", err)
+	}
+	if phase != store.LadderActive && phase != store.LadderStopping {
+		return nil
+	}
+	orders, err := aggregates.IntentOrders(ctx, intentID)
+	if err != nil {
+		return fmt.Errorf("load ladder children: %w", err)
+	}
+	if len(orders) == 0 {
+		return nil
+	}
+	children := make([]mapping.LadderChild, len(orders))
+	for i, order := range orders {
+		if !statemachine.IsTerminal(order.State) {
+			return nil
+		}
+		children[i] = mapping.LadderChild{Order: order, AveragePrice: AveragePrice(ctx, aggregates, order)}
+	}
+	intent, err := aggregates.Intent(ctx, intentID)
+	if err != nil {
+		return fmt.Errorf("load ladder intent: %w", err)
+	}
+	result, err := mapping.AggregateOpenResult(intent, children, reason, occurredAt)
+	if err != nil {
+		return err
+	}
+	claimed, err := aggregates.MoveLadderPhase(ctx, intentID, store.LadderPublished, store.LadderActive, store.LadderStopping)
+	if err != nil || !claimed {
+		return err
+	}
+	if err := protocol.PublishExecutionOpenResult(publisher, result); err != nil {
+		if _, restoreErr := aggregates.MoveLadderPhase(ctx, intentID, phase, store.LadderPublished); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+		return fmt.Errorf("publish aggregated open result: %w", err)
 	}
 	return nil
 }
