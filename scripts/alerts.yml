@@ -74,3 +74,10 @@ groups:
         labels: {severity: warn}
         annotations:
           summary: "executiond {{ $labels.instance }}: keep-warm pings are failing, orders will pay for cold connections"
+
+      - alert: ExecutiondKeepWarmStale
+        expr: time() - executiond_last_success_timestamp_seconds{component="keepwarm"} > 600
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }}: no successful keep-warm ping in 10 minutes"

@@ -50,10 +50,11 @@ type Sweeper struct {
 // Reserved those left to a working close, ReservedWinners the winners among
 // them. A winner left alone may already have been redeemed with no payout
 // recorded for it yet. Failed marks a pass that hit an error, whose counts
-// may leave out lanes it could not read.
+// may leave out lanes it could not read. Errored counts the lanes that hit
+// one; Aborted marks a pass that stopped before reaching every lane.
 type Sweep struct {
-	Checked, Lost, Redeemed, Shrunk, Dust, Reserved, ReservedWinners, Settling int
-	Failed                                                                     bool
+	Checked, Lost, Redeemed, Shrunk, Dust, Reserved, ReservedWinners, Settling, Errored int
+	Failed, Aborted                                                                     bool
 }
 
 // DustShares is the lane size below which a resolved lane is written off
@@ -115,6 +116,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 	var sweep Sweep
 	positions, err := s.store.PositionFeatures(ctx)
 	if err != nil {
+		sweep.Aborted = true
 		return sweep, fmt.Errorf("load positions to sweep: %w", err)
 	}
 	now := s.now()
@@ -127,6 +129,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 			continue
 		}
 		if err := ctx.Err(); err != nil {
+			sweep.Aborted = true
 			return sweep, errors.Join(errs, err)
 		}
 		sweep.Checked++
@@ -135,6 +138,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 			!decimal.Positive(p.ReservedSize) && Settled(p, now) {
 			resolved, err := s.resolver.Resolved(ctx, p.ConditionID, p.TokenID)
 			if err != nil {
+				sweep.Errored++
 				errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
 				continue
 			}
@@ -143,6 +147,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 			}
 			changed, err := s.store.SettlePosition(ctx, p.ConditionID, p.TokenID, p.UniqueTag, "0.000000", false)
 			if err != nil {
+				sweep.Errored++
 				errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
 				continue
 			}
@@ -155,6 +160,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 		}
 		outcome, err := s.resolver.Outcome(ctx, p.ConditionID, p.TokenID)
 		if err != nil {
+			sweep.Errored++
 			errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
 			continue
 		}
@@ -163,6 +169,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 		}
 		size, err := decimal.PositiveFloat(p.PositionSize)
 		if err != nil {
+			sweep.Errored++
 			errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
 			continue
 		}
@@ -199,6 +206,7 @@ func (s *Sweeper) Sweep(ctx context.Context) (Sweep, error) {
 		shares := strconv.FormatFloat(keep, 'f', 6, 64)
 		changed, err := s.store.SettlePosition(ctx, p.ConditionID, p.TokenID, p.UniqueTag, shares, outcome.Winner)
 		if err != nil {
+			sweep.Errored++
 			errs = errors.Join(errs, fmt.Errorf("sweep %s: %w", lane, err))
 			continue
 		}

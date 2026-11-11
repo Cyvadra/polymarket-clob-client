@@ -78,8 +78,10 @@ func (l *lastSuccess) Collect(ch chan<- prometheus.Metric) {
 // liveness is what /healthz and the connection gauges read.
 type liveness struct {
 	started time.Time
-	// connected checks, by name: nats, account_stream.
+	// connected checks, by name: nats, account_stream. Each exports a gauge;
+	// only those named in required fail /healthz when down.
 	connected map[string]func() bool
+	required  map[string]bool
 	// fresh checks: each component must have succeeded, or the daemon have
 	// started, within its allowance.
 	fresh map[string]time.Duration
@@ -112,9 +114,9 @@ func (m *metrics) watchLiveness(l liveness) {
 	report := func(now time.Time) healthReport {
 		r := healthReport{OK: true, Checks: map[string]healthCheck{}}
 		for name, up := range l.connected {
-			c := healthCheck{OK: up(), Detail: "connected"}
-			if !c.OK {
-				c.Detail = "disconnected"
+			c := healthCheck{OK: true, Detail: "connected"}
+			if !up() {
+				c.OK, c.Detail = !l.required[name], "disconnected"
 			}
 			r.Checks[name] = c
 		}

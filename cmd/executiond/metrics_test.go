@@ -43,7 +43,7 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 	m.errorHandler("reconcile", "reconciliation error")(errors.New("boom"))
 	m.countError("warm_fees")
 	m.observeSweep(settlement.Sweep{Checked: 4, Lost: 1, Redeemed: 2}, time.Unix(1700000000, 0))
-	m.observeSweep(settlement.Sweep{Failed: true}, time.Unix(1700000100, 0))
+	m.observeSweep(settlement.Sweep{Failed: true, Aborted: true}, time.Unix(1700000100, 0))
 	m.observeEquity("123.45", time.Unix(1700000000, 0))
 	m.observeSizingBase(100)
 	guard, err := equity.NewStrategyGroupDrawdownGuard(fakeEquityStore{}, "pmm", time.Unix(0, 0), equity.FractionLimit(0.2))

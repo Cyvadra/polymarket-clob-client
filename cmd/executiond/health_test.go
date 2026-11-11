@@ -31,7 +31,8 @@ func TestHealthReportsEachCheck(t *testing.T) {
 	m.lastSuccess.watch("reconcile", func() time.Time { return reconciled })
 	m.watchLiveness(liveness{
 		started:   time.Now().Add(-time.Hour),
-		connected: map[string]func() bool{"nats": func() bool { return natsUp }},
+		connected: map[string]func() bool{"nats": func() bool { return natsUp }, "account_stream": func() bool { return false }},
+		required:  map[string]bool{"nats": true},
 		fresh:     map[string]time.Duration{"reconcile": time.Minute},
 	})
 	code, r := get()

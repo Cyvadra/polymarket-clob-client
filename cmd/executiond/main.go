@@ -136,6 +136,13 @@ func run() error {
 	log.Printf("trading strategies: %s", strings.Join(cfg.AllowedStrategies.Names(), ", "))
 	obs.startRun(ctx, clob.Address(), clob.MakerAddress(), cfg)
 	defer obs.stopRun()
+	// Report the last recorded equity now rather than 0 until the next
+	// snapshot, which can be hours away.
+	if latest, ok, err := store.LatestEquitySnapshot(ctx); err != nil {
+		log.Printf("read latest equity snapshot: %v", err)
+	} else if ok {
+		stats.observeEquity(latest.EquityUSD, latest.TakenAt)
+	}
 	// Several executiond instances share the bus, so everything this one
 	// publishes names its wallet.
 	identity := protocol.NewIdentity(clob.Address(), clob.MakerAddress(), cfg.AllowedStrategies.Names())
@@ -386,7 +393,10 @@ func run() error {
 	stats.watchLiveness(liveness{
 		started:   time.Now(),
 		connected: map[string]func() bool{"nats": bus.Connected, "account_stream": accountStream.Connected},
-		fresh:     map[string]time.Duration{"reconcile": 3 * cfg.ReconcileInterval, "sweep": 3 * cfg.SettlementInterval},
+		// The user stream reconnects on its own and the reconciler covers
+		// fills meanwhile, so a reconnect must not fail the daemon's health.
+		required: map[string]bool{"nats": true},
+		fresh:    map[string]time.Duration{"reconcile": 3 * cfg.ReconcileInterval, "sweep": 3 * cfg.SettlementInterval},
 	})
 
 	runErr := runModules(ctx, modules)

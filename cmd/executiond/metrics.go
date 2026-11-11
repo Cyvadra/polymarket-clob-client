@@ -195,15 +195,23 @@ func (m *metrics) succeeded(component string, at time.Time) {
 func (m *metrics) observeSweep(s settlement.Sweep, at time.Time) {
 	for result, n := range map[string]int{
 		"checked": s.Checked, "lost": s.Lost, "redeemed": s.Redeemed, "shrunk": s.Shrunk,
-		"dust": s.Dust, "closing": s.Reserved, "settling": s.Settling,
+		"dust": s.Dust, "closing": s.Reserved, "settling": s.Settling, "errored": s.Errored,
 	} {
 		m.sweepLanes.WithLabelValues(result).Add(float64(n))
 	}
-	if s.Failed {
+	// A pass that reached every lane is a success for health even if some
+	// lanes errored: one lane that keeps failing shows on
+	// executiond_errors_total and the "partial" outcome, and must not mark
+	// a sweeper that settles every other lane as stale.
+	switch {
+	case s.Aborted:
 		m.sweeps.WithLabelValues("failed").Inc()
 		return
+	case s.Failed:
+		m.sweeps.WithLabelValues("partial").Inc()
+	default:
+		m.sweeps.WithLabelValues("ok").Inc()
 	}
-	m.sweeps.WithLabelValues("ok").Inc()
 	m.succeeded("sweep", at)
 }
 
@@ -219,10 +227,7 @@ func (m *metrics) observeSizingBase(usd float64) { m.sizingBase.Set(usd) }
 
 // observeGuard takes a guard's reading after a refresh.
 func (m *metrics) observeGuard(guard *equity.DrawdownGuard) {
-	label := guard.Strategy()
-	if label == "" {
-		label = "wallet"
-	}
+	label := guardLabel(guard)
 	drawdown, limit, dollars := guard.Reading()
 	unit := "fraction"
 	if dollars {

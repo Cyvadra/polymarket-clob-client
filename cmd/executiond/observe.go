@@ -31,7 +31,8 @@ type observer struct {
 
 	mu        sync.Mutex
 	runID     int64
-	suspended map[string]bool // guard label -> last seen state
+	pending   *store.DaemonRun // a run whose record failed, retried on the next write
+	suspended map[string]bool  // guard label -> last seen state
 }
 
 func newObserver(m *metrics, history historyStore, now func() time.Time) *observer {
@@ -40,17 +41,32 @@ func newObserver(m *metrics, history historyStore, now func() time.Time) *observ
 
 // startRun records this process and its non-secret settings.
 func (o *observer) startRun(ctx context.Context, signer, maker string, cfg config) {
-	id, err := o.history.StartDaemonRun(ctx, store.DaemonRun{
+	o.mu.Lock()
+	o.pending = &store.DaemonRun{
 		Version: buildVersion(), Signer: signer, Maker: maker,
 		Strategies: cfg.AllowedStrategies.Names(), Config: runConfig(cfg),
-	})
+	}
+	o.mu.Unlock()
+	o.ensureRun(ctx)
+}
+
+// ensureRun records the pending run, if any, and returns this process's run
+// ID: 0 while it is not recorded. A failed record is retried on the next
+// history write, so a brief database outage at startup does not leave the
+// whole run's rows unlinked.
+func (o *observer) ensureRun(ctx context.Context) int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.runID != 0 || o.pending == nil {
+		return o.runID
+	}
+	id, err := o.history.StartDaemonRun(ctx, *o.pending)
 	if err != nil {
 		o.historyFailed(err)
-		return
+		return 0
 	}
-	o.mu.Lock()
-	o.runID = id
-	o.mu.Unlock()
+	o.runID, o.pending = id, nil
+	return id
 }
 
 // stopRun stamps this process's stop time, with its own deadline since the
@@ -73,16 +89,17 @@ func (o *observer) run() int64 {
 	return o.runID
 }
 
-// sweep records a pass on /metrics, and in the database when it did
-// anything or failed, so quiet passes do not flood the table.
+// sweep records a pass on /metrics, and in the database when it changed a
+// lane or failed, so quiet passes do not flood the table. Lanes left closing
+// or settling are a standing state, counted again every pass, not a change.
 func (o *observer) sweep(ctx context.Context, s settlement.Sweep) {
 	at := o.now()
 	o.observeSweep(s, at)
-	if s.Lost+s.Redeemed+s.Shrunk+s.Dust+s.Reserved+s.Settling == 0 && !s.Failed {
+	if s.Lost+s.Redeemed+s.Shrunk+s.Dust == 0 && !s.Failed {
 		return
 	}
 	if err := o.history.RecordSweep(ctx, store.SweepRecord{
-		RunID: o.run(), At: at, Checked: s.Checked, Lost: s.Lost, Redeemed: s.Redeemed,
+		RunID: o.ensureRun(ctx), At: at, Checked: s.Checked, Lost: s.Lost, Redeemed: s.Redeemed,
 		Dust: s.Dust, Shrunk: s.Shrunk, Closing: s.Reserved, Settling: s.Settling, Failed: s.Failed,
 	}); err != nil {
 		o.historyFailed(err)
@@ -135,7 +152,7 @@ func (o *observer) snapshotDeferred(ctx context.Context, winnersHeld int) {
 
 func (o *observer) riskEvent(ctx context.Context, kind, subject, reason string, details map[string]any) {
 	if err := o.history.RecordRiskEvent(ctx, store.RiskEvent{
-		RunID: o.run(), At: o.now(), Kind: kind, Subject: subject, Reason: reason, Details: details,
+		RunID: o.ensureRun(ctx), At: o.now(), Kind: kind, Subject: subject, Reason: reason, Details: details,
 	}); err != nil {
 		o.historyFailed(err)
 	}

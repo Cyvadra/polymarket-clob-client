@@ -15,13 +15,19 @@ is JSON with one entry per check:
 ```json
 {"ok": false, "checks": {
   "nats": {"ok": true, "detail": "connected"},
-  "account_stream": {"ok": false, "detail": "disconnected"},
+  "account_stream": {"ok": true, "detail": "disconnected"},
   "reconcile": {"ok": true, "detail": "last success 2026-11-10T12:00:00Z, 20s ago (allowed 3m0s)"},
   "sweep": {"ok": true, "detail": "no success since start, 40s ago (allowed 3m0s)"}}}
 ```
 
 `reconcile` and `sweep` fail once three of their intervals pass without a
-successful pass. Before the modules start, every request gets a `503`.
+successful pass. A sweep pass counts as successful once it reaches every
+lane, even if some lanes errored; those show as the `partial` outcome and on
+`executiond_errors_total{component="sweep"}`. `nats` fails the check when
+down. `account_stream` reports its state but never fails it: the stream
+reconnects on its own and the reconciler picks up fills meanwhile. It reads
+connected once the server has sent something back. Before the modules start,
+every request gets a `503`.
 
 ## Metrics
 
@@ -34,8 +40,8 @@ successful pass. Before the modules start, every request gets a `503`.
 | `executiond_sizing_base_usd` | | Equity that equity-fraction opens are sized from. |
 | `executiond_drawdown`, `executiond_drawdown_limit` | `guard`, `unit` | Each guard's drawdown and its limit; `unit` is `fraction` or `usd`, and `guard` is `wallet` or a strategy prefix. |
 | `executiond_opens_suspended` | `guard` | 1 while a guard holds back opens. |
-| `executiond_sweeps_total` | `outcome` | Settlement sweep passes, `ok` or `failed`. |
-| `executiond_sweep_lanes_total` | `result` | Lanes that sweeps checked, lost, redeemed, shrank, wrote off as dust, left to a close, or left settling. |
+| `executiond_sweeps_total` | `outcome` | Settlement sweep passes: `ok`, `partial` (some lanes errored) or `failed` (stopped before reaching every lane). |
+| `executiond_sweep_lanes_total` | `result` | Lane results summed over passes. `lost`, `redeemed`, `shrunk` and `dust` count each lane once. `checked`, `closing`, `settling` and `errored` count a lane again on every pass it stays that way. |
 | `executiond_results_total` | `kind`, `strategy`, `status`, `reason_code` | Open, close and quote results sent to strategies. |
 | `executiond_order_events_total` | `strategy`, `state` | Order lifecycle events sent to strategies. |
 | `executiond_fills_total` | | Fills newly recorded. |
@@ -43,7 +49,8 @@ successful pass. Before the modules start, every request gets a `503`.
 | `executiond_order_prepost_seconds` | `kind`, `tif`, `post_only` | From request arrival to the order POST. |
 | `executiond_cancel_seconds`, `executiond_cancel_batch_orders` | `batch`, `outcome` | Exchange cancels. |
 | `executiond_loop_pass_seconds`, `executiond_loop_pass_overruns_total` | `loop` | Executor background loops. |
-| `executiond_keepwarm_rtt_seconds`, `executiond_keepwarm_failures_total` | `pool` | Keep-warm pings. |
+| `executiond_keepwarm_rtt_seconds` | `pool` | Keep-warm ping round trips. |
+| `executiond_keepwarm_failures_total` | | Keep-warm pings that failed. |
 | `executiond_quote_levels_total`, `executiond_quote_fill_to_cancel_seconds` | `action`, `reason` | Quote lane level churn and how fast a fill cancels the remaining levels. |
 
 ### Queries
@@ -75,7 +82,7 @@ Next to the trading tables (`order_intents`, `orders`, `order_events`,
 | Table | One row per |
 |---|---|
 | `daemon_runs` | executiond process: start and stop times, build revision, signer, maker, strategies, and non-secret settings in `config` |
-| `settlement_sweeps` | sweep pass that changed something or failed |
+| `settlement_sweeps` | sweep pass that lost, redeemed, shrank or wrote off a lane, or hit an error |
 | `risk_events` | risk or sizing decision. `kind` is `suspend`, `resume`, `sizing_base`, `equity_recorded` or `snapshot_deferred`, and `subject` is the guard (`wallet` or a prefix) |
 | `v_intents_daily` (view) | day, strategy, kind and status, with the number of intents |
 

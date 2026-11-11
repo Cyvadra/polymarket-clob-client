@@ -43,7 +43,7 @@ func (s *Store) StopDaemonRun(ctx context.Context, runID int64, at time.Time) er
 func (s *Store) RecordSweep(ctx context.Context, sweep store.SweepRecord) error {
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO settlement_sweeps (run_id, swept_at, checked, lost, redeemed, dust, shrunk, closing, settling, failed)
-		VALUES (NULLIF($1, 0), $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		VALUES (NULLIF($1::bigint, 0), $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, sweep.RunID, sweep.At, sweep.Checked, sweep.Lost, sweep.Redeemed, sweep.Dust, sweep.Shrunk, sweep.Closing, sweep.Settling, sweep.Failed); err != nil {
 		return fmt.Errorf("record settlement sweep: %w", err)
 	}
@@ -65,7 +65,7 @@ func (s *Store) RecordRiskEvent(ctx context.Context, event store.RiskEvent) erro
 	}
 	if _, err := s.pool.Exec(ctx, `
 		INSERT INTO risk_events (run_id, at, kind, subject, reason, details)
-		VALUES (NULLIF($1, 0), $2, $3, $4, $5, $6::jsonb)
+		VALUES (NULLIF($1::bigint, 0), $2, $3, $4, $5, $6::jsonb)
 	`, event.RunID, event.At, event.Kind, event.Subject, event.Reason, string(encoded)); err != nil {
 		return fmt.Errorf("record risk event: %w", err)
 	}

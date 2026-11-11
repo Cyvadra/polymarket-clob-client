@@ -123,7 +123,8 @@ func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
 	}}); err != nil {
 		return false, fmt.Errorf("subscribe user stream: %w", err)
 	}
-	s.connected.Store(true)
+	// Connected once the server sends something back: a rejected auth
+	// closes the socket instead.
 	defer s.connected.Store(false)
 	pings := time.NewTicker(s.cfg.PingInterval)
 	defer pings.Stop()
@@ -136,6 +137,7 @@ func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
 				return
 			}
 			s.lastMessage.Store(time.Now().UnixNano())
+			s.connected.Store(true)
 			if err := s.consume(ctx, payload); err != nil && s.onError != nil {
 				s.onError(err)
 			}
