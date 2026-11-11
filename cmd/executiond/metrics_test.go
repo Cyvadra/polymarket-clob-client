@@ -13,6 +13,9 @@ import (
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
 
 func TestMetricsServeEveryHookSeries(t *testing.T) {
@@ -39,6 +42,15 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 	m.observeKeepWarm(0, 0, errors.New("down"))
 	m.errorHandler("reconcile", "reconciliation error")(errors.New("boom"))
 	m.countError("warm_fees")
+	m.observeSweep(settlement.Sweep{Checked: 4, Lost: 1, Redeemed: 2}, time.Unix(1700000000, 0))
+	m.observeSweep(settlement.Sweep{Failed: true}, time.Unix(1700000100, 0))
+	m.observeEquity("123.45", time.Unix(1700000000, 0))
+	m.observeSizingBase(100)
+	guard, err := equity.NewStrategyGroupDrawdownGuard(fakeEquityStore{}, "pmm", time.Unix(0, 0), equity.FractionLimit(0.2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.observeGuard(guard)
 
 	resp, err := http.Get("http://" + addr + "/metrics")
 	if err != nil {
@@ -62,9 +74,19 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 		`executiond_errors_total{component="reconcile"} 1`,
 		`executiond_errors_total{component="warm_fees"} 1`,
 		`executiond_errors_total{component="sweep"} 0`,
+		`executiond_sweep_lanes_total{result="redeemed"} 2`,
+		`executiond_sweeps_total{outcome="failed"} 1`,
+		`executiond_last_success_timestamp_seconds{component="sweep"} 1.7e+09`,
+		`executiond_equity_usd 123.45`,
+		`executiond_sizing_base_usd 100`,
+		`executiond_drawdown_limit{guard="pmm",unit="fraction"} 0.2`,
+		`executiond_opens_suspended{guard="pmm"} 0`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("missing %s", want)
 		}
 	}
 }
+
+// fakeEquityStore satisfies store.EquityStore; observeGuard never reads it.
+type fakeEquityStore struct{ store.EquityStore }

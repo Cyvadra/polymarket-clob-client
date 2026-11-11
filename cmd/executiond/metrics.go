@@ -16,6 +16,8 @@ import (
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
 )
 
 // latencyBuckets span a warm keep-alive round trip (a few ms) to a stalled
@@ -41,6 +43,14 @@ type metrics struct {
 	quoteLevels   *prometheus.CounterVec
 	quoteFill     prometheus.Histogram
 	errors        *prometheus.CounterVec // errors that would otherwise only be logged, by component
+	lastSuccess   *prometheus.GaugeVec
+	equity        prometheus.Gauge
+	sizingBase    prometheus.Gauge
+	drawdown      *prometheus.GaugeVec
+	drawdownLimit *prometheus.GaugeVec
+	suspended     *prometheus.GaugeVec
+	sweepLanes    *prometheus.CounterVec
+	sweeps        *prometheus.CounterVec
 }
 
 // errorComponents are the values of executiond_errors_total's component
@@ -95,6 +105,30 @@ func newMetrics() *metrics {
 			Name: "executiond_errors_total", Help: "Errors reported by each executiond component; the log line carries the detail.",
 		}, []string{"component"}),
 	}
+	m.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "executiond_last_success_timestamp_seconds", Help: "Unix time of each component's last successful pass, for staleness alerts.",
+	}, []string{"component"})
+	m.equity = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "executiond_equity_usd", Help: "Wallet equity in the latest recorded snapshot.",
+	})
+	m.sizingBase = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "executiond_sizing_base_usd", Help: "Equity that equity-fraction opens are sized from; 0 until a base is recorded.",
+	})
+	m.drawdown = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "executiond_drawdown", Help: "Each guard's drawdown as last read, in its limit's unit.",
+	}, []string{"guard", "unit"})
+	m.drawdownLimit = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "executiond_drawdown_limit", Help: "Each guard's drawdown limit, in the unit of executiond_drawdown.",
+	}, []string{"guard", "unit"})
+	m.suspended = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "executiond_opens_suspended", Help: "1 while a guard holds back opens.",
+	}, []string{"guard"})
+	m.sweepLanes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "executiond_sweep_lanes_total", Help: "Lanes each settlement sweep handled, by result.",
+	}, []string{"result"})
+	m.sweeps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "executiond_sweeps_total", Help: "Settlement sweep passes, by outcome.",
+	}, []string{"outcome"})
 	for _, component := range errorComponents {
 		m.errors.WithLabelValues(component)
 	}
@@ -102,6 +136,7 @@ func newMetrics() *metrics {
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.orderHTTP, m.orderTTFB, m.orderColdConn, m.prePost, m.cancel, m.cancelOrders, m.pass, m.passOverruns, m.keepWarm, m.keepWarmFails,
 		m.quoteLevels, m.quoteFill, m.errors,
+		m.lastSuccess, m.equity, m.sizingBase, m.drawdown, m.drawdownLimit, m.suspended, m.sweepLanes, m.sweeps,
 	)
 	return m
 }
@@ -141,6 +176,7 @@ func (m *metrics) observeKeepWarm(orders, reads time.Duration, err error) {
 	}
 	m.keepWarm.WithLabelValues("order").Observe(orders.Seconds())
 	m.keepWarm.WithLabelValues("read").Observe(reads.Seconds())
+	m.succeeded("keepwarm", time.Now())
 }
 
 func (m *metrics) observeQuoteLevels(action, reason string, n int) {
@@ -149,6 +185,56 @@ func (m *metrics) observeQuoteLevels(action, reason string, n int) {
 
 func (m *metrics) observeQuoteFillToCancel(took time.Duration) {
 	m.quoteFill.Observe(took.Seconds())
+}
+
+// succeeded stamps component's last successful pass.
+func (m *metrics) succeeded(component string, at time.Time) {
+	m.lastSuccess.WithLabelValues(component).Set(float64(at.Unix()))
+}
+
+func (m *metrics) observeSweep(s settlement.Sweep, at time.Time) {
+	for result, n := range map[string]int{
+		"checked": s.Checked, "lost": s.Lost, "redeemed": s.Redeemed, "shrunk": s.Shrunk,
+		"dust": s.Dust, "closing": s.Reserved, "settling": s.Settling,
+	} {
+		m.sweepLanes.WithLabelValues(result).Add(float64(n))
+	}
+	if s.Failed {
+		m.sweeps.WithLabelValues("failed").Inc()
+		return
+	}
+	m.sweeps.WithLabelValues("ok").Inc()
+	m.succeeded("sweep", at)
+}
+
+// observeEquity takes a recorded snapshot's equity, a decimal string.
+func (m *metrics) observeEquity(equityUSD string, at time.Time) {
+	if v, err := strconv.ParseFloat(equityUSD, 64); err == nil {
+		m.equity.Set(v)
+		m.succeeded("equity_snapshot", at)
+	}
+}
+
+func (m *metrics) observeSizingBase(usd float64) { m.sizingBase.Set(usd) }
+
+// observeGuard takes a guard's reading after a refresh.
+func (m *metrics) observeGuard(guard *equity.DrawdownGuard) {
+	label := guard.Strategy()
+	if label == "" {
+		label = "wallet"
+	}
+	drawdown, limit, dollars := guard.Reading()
+	unit := "fraction"
+	if dollars {
+		unit = "usd"
+	}
+	m.drawdown.WithLabelValues(label, unit).Set(drawdown)
+	m.drawdownLimit.WithLabelValues(label, unit).Set(limit)
+	suspended := 0.0
+	if s, _ := guard.Suspended(); s {
+		suspended = 1
+	}
+	m.suspended.WithLabelValues(label).Set(suspended)
 }
 
 // countError counts one error from component. The caller still logs it.

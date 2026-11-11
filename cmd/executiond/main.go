@@ -257,7 +257,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if err := refreshDrawdown(ctx, limits); err != nil {
+		if err := refreshDrawdown(ctx, limits, stats); err != nil {
 			return err
 		}
 		execution.SetOpenGate(limits)
@@ -270,7 +270,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		if err := refreshAnchor(ctx, anchor); err != nil {
+		if err := refreshAnchor(ctx, anchor, stats); err != nil {
 			return err
 		}
 	}
@@ -285,10 +285,11 @@ func run() error {
 	}
 	equityDue, anchorStale := len(pending.PayoutIDs) > 0, false
 	sweeper.SetSweepHandler(func(s settlement.Sweep) {
+		stats.observeSweep(s, time.Now())
 		// A failed refresh would leave sizing on the pre-loss base until
 		// another snapshot happened to be recorded; retry it every sweep.
 		if anchorStale {
-			if err := refreshAnchor(ctx, anchor); err != nil {
+			if err := refreshAnchor(ctx, anchor, stats); err != nil {
 				log.Printf("refresh sizing base: %v", err)
 				stats.countError("refresh_sizing")
 			} else {
@@ -333,7 +334,7 @@ func run() error {
 		equityDue = false
 		// Any snapshot may carry a deposit or withdrawal the base follows.
 		if anchor != nil {
-			if err := refreshAnchor(ctx, anchor); err != nil {
+			if err := refreshAnchor(ctx, anchor, stats); err != nil {
 				log.Printf("refresh sizing base: %v", err)
 				stats.countError("refresh_sizing")
 				anchorStale = true
@@ -745,19 +746,20 @@ func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason 
 		stats.countError("equity_record")
 		return false
 	}
+	stats.observeEquity(snapshot.EquityUSD, time.Now())
 	log.Printf("equity after settlement (%s): $%s (trade cash $%s, external flow $%s, trade index %s)",
 		reason, snapshot.EquityUSD, snapshot.TradeCashUSD, snapshot.ExternalFlowUSD, snapshot.TradeIndex)
 	if limits == nil {
 		return true
 	}
-	if err := refreshDrawdown(ctx, limits); err != nil {
+	if err := refreshDrawdown(ctx, limits, stats); err != nil {
 		log.Printf("refresh drawdown limit: %v", err)
 		stats.countError("drawdown_refresh")
 	}
 	return true
 }
 
-func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
+func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor, stats *metrics) error {
 	base, ok, err := anchor.Refresh(ctx)
 	if err != nil {
 		return err
@@ -766,6 +768,7 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor) error {
 		log.Printf("equity-fraction opens size from live equity until a sizing base is recorded on a settlement sweep")
 		return nil
 	}
+	stats.observeSizingBase(base.EquityUSD)
 	log.Printf("sizing equity-fraction opens from $%.6f: $%s recorded %s (%s), external flow since $%.6f",
 		base.EquityUSD, base.Snapshot.EquityUSD, base.Snapshot.TakenAt.Format(time.RFC3339), base.Snapshot.Reason, base.FlowUSD)
 	return nil
@@ -801,9 +804,10 @@ func drawdownLimits(s storepkg.EquityStore, cfg config) (*equity.DrawdownLimits,
 
 // refreshDrawdown refreshes every guard, so one that fails does not leave
 // the others stale, and returns the errors joined.
-func refreshDrawdown(ctx context.Context, limits *equity.DrawdownLimits) error {
+func refreshDrawdown(ctx context.Context, limits *equity.DrawdownLimits, stats *metrics) error {
 	refreshed, err := limits.Refresh(ctx)
 	for _, guard := range refreshed {
+		stats.observeGuard(guard)
 		if suspended, reason := guard.Suspended(); suspended {
 			log.Printf("opens suspended: %s", reason)
 			continue

@@ -518,6 +518,14 @@ func (g *DrawdownGuard) Status() string {
 	return fmt.Sprintf("%s of the %s limit", g.measured(), g.limit)
 }
 
+// Reading is the drawdown as last read and its limit, both in the limit's
+// unit, which dollars reports: dollars below the peak, or a fraction of it.
+func (g *DrawdownGuard) Reading() (drawdown, limit float64, dollars bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.drawdown, g.limit.value, g.limit.dollars
+}
+
 // measured formats the drawdown as last read; g.mu must be held.
 func (g *DrawdownGuard) measured() string {
 	if g.limit.Dollars() {
