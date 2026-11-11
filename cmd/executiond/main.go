@@ -139,7 +139,8 @@ func run() error {
 	// Several executiond instances share the bus, so everything this one
 	// publishes names its wallet.
 	identity := protocol.NewIdentity(clob.Address(), clob.MakerAddress(), cfg.AllowedStrategies.Names())
-	events := protocol.WithIdentity(bus, identity)
+	results := newResultMetrics(stats.registry)
+	events := countingPublisher{next: protocol.WithIdentity(bus, identity), metrics: results}
 	credentials, err := clob.EnsureCredentials(ctx)
 	if err != nil {
 		return err
@@ -347,7 +348,10 @@ func run() error {
 	})
 	// A fill moves the exchange balance and shrinks the open-buy reservations
 	// at once; a cached pre-fill balance would count that cash twice.
-	fills.SetFillHook(wallet.Invalidate)
+	fills.SetFillHook(func() {
+		wallet.Invalidate()
+		results.fills.Inc()
+	})
 	if err := nats.SubscribeBalanceQuery(bus, wallet, identity); err != nil {
 		return err
 	}
