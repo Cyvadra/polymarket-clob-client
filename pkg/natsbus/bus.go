@@ -59,6 +59,15 @@ func (b *Bus) Init(ctx context.Context) error {
 	return nil
 }
 
+// Connected reports whether the connection is up; false before Init and
+// while reconnecting.
+func (b *Bus) Connected() bool {
+	b.mu.Lock()
+	conn := b.conn
+	b.mu.Unlock()
+	return conn != nil && conn.IsConnected()
+}
+
 // connectOptions builds the client options, including the handlers that make
 // the connection lifecycle legible in the log.
 func (b *Bus) connectOptions() []nats.Option {

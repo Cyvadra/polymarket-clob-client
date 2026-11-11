@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -35,6 +36,21 @@ type UserStream struct {
 	orders  *OrderConsumer
 	fills   *FillConsumer
 	onError func(error)
+
+	connected   atomic.Bool
+	lastMessage atomic.Int64 // unix nanoseconds
+}
+
+// Connected reports whether the stream is subscribed now.
+func (s *UserStream) Connected() bool { return s.connected.Load() }
+
+// LastMessage is when the stream last delivered a message, zero before the
+// first.
+func (s *UserStream) LastMessage() time.Time {
+	if n := s.lastMessage.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 func NewUserStream(cfg UserStreamConfig, orders *OrderConsumer, fills *FillConsumer) (*UserStream, error) {
@@ -107,6 +123,8 @@ func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
 	}}); err != nil {
 		return false, fmt.Errorf("subscribe user stream: %w", err)
 	}
+	s.connected.Store(true)
+	defer s.connected.Store(false)
 	pings := time.NewTicker(s.cfg.PingInterval)
 	defer pings.Stop()
 	read := make(chan error, 1)
@@ -117,6 +135,7 @@ func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
 				read <- err
 				return
 			}
+			s.lastMessage.Store(time.Now().UnixNano())
 			if err := s.consume(ctx, payload); err != nil && s.onError != nil {
 				s.onError(err)
 			}

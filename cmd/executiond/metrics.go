@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -43,7 +44,8 @@ type metrics struct {
 	quoteLevels   *prometheus.CounterVec
 	quoteFill     prometheus.Histogram
 	errors        *prometheus.CounterVec // errors that would otherwise only be logged, by component
-	lastSuccess   *prometheus.GaugeVec
+	lastSuccess   *lastSuccess
+	health        atomic.Pointer[func(time.Time) healthReport]
 	equity        prometheus.Gauge
 	sizingBase    prometheus.Gauge
 	drawdown      *prometheus.GaugeVec
@@ -105,9 +107,7 @@ func newMetrics() *metrics {
 			Name: "executiond_errors_total", Help: "Errors reported by each executiond component; the log line carries the detail.",
 		}, []string{"component"}),
 	}
-	m.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "executiond_last_success_timestamp_seconds", Help: "Unix time of each component's last successful pass, for staleness alerts.",
-	}, []string{"component"})
+	m.lastSuccess = newLastSuccess()
 	m.equity = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "executiond_equity_usd", Help: "Wallet equity in the latest recorded snapshot.",
 	})
@@ -189,7 +189,7 @@ func (m *metrics) observeQuoteFillToCancel(took time.Duration) {
 
 // succeeded stamps component's last successful pass.
 func (m *metrics) succeeded(component string, at time.Time) {
-	m.lastSuccess.WithLabelValues(component).Set(float64(at.Unix()))
+	m.lastSuccess.set(component, at)
 }
 
 func (m *metrics) observeSweep(s settlement.Sweep, at time.Time) {
@@ -271,7 +271,7 @@ func outcome(err error) string {
 	return "error"
 }
 
-// serveMetrics serves /metrics on addr until ctx ends. An empty addr turns
+// serveMetrics serves /metrics and /healthz on addr until ctx ends. An empty addr turns
 // it off.
 func serveMetrics(ctx context.Context, addr string, m *metrics) error {
 	if addr == "" {
@@ -283,6 +283,7 @@ func serveMetrics(ctx context.Context, addr string, m *metrics) error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}))
+	mux.HandleFunc("/healthz", m.serveHealth)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()

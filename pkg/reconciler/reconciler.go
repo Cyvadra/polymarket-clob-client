@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -43,6 +44,7 @@ type Reconciler struct {
 	maxTradeAge       time.Duration
 	replayedFills     map[string]struct{}
 	onError           func(error)
+	lastSuccess       atomic.Int64 // unix nanoseconds
 	publish           protocol.ExecutionEventPublisher
 	onQuote           accountfeed.QuoteFillHook
 }
@@ -83,10 +85,28 @@ func (r *Reconciler) SetMaxTradeAge(age time.Duration) {
 }
 
 func (r *Reconciler) Init(ctx context.Context) error {
-	if err := r.Reconcile(ctx); err != nil && r.onError != nil {
-		r.onError(err)
-	}
+	r.pass(ctx)
 	return nil
+}
+
+// pass reconciles once, reporting an error or stamping the success.
+func (r *Reconciler) pass(ctx context.Context) {
+	if err := r.Reconcile(ctx); err != nil {
+		if r.onError != nil {
+			r.onError(err)
+		}
+		return
+	}
+	r.lastSuccess.Store(r.now().UnixNano())
+}
+
+// LastSuccess is when a reconciliation pass last completed without error,
+// zero before the first.
+func (r *Reconciler) LastSuccess() time.Time {
+	if n := r.lastSuccess.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
 }
 
 func (r *Reconciler) Run(ctx context.Context) error {
@@ -97,11 +117,7 @@ func (r *Reconciler) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := r.Reconcile(ctx); err != nil {
-				if r.onError != nil {
-					r.onError(err)
-				}
-			}
+			r.pass(ctx)
 		}
 	}
 }

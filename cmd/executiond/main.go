@@ -376,6 +376,14 @@ func run() error {
 	if err := initModules(ctx, modules); err != nil {
 		return err
 	}
+	stats.lastSuccess.watch("reconcile", repair.LastSuccess)
+	stats.lastSuccess.watch("account_stream", accountStream.LastMessage)
+	// A pass may legitimately take a while, so health allows three intervals.
+	stats.watchLiveness(liveness{
+		started:   time.Now(),
+		connected: map[string]func() bool{"nats": bus.Connected, "account_stream": accountStream.Connected},
+		fresh:     map[string]time.Duration{"reconcile": 3 * cfg.ReconcileInterval, "sweep": 3 * cfg.SettlementInterval},
+	})
 
 	runErr := runModules(ctx, modules)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGracePeriod)
