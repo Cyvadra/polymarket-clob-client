@@ -40,6 +40,16 @@ type metrics struct {
 	keepWarmFails prometheus.Counter
 	quoteLevels   *prometheus.CounterVec
 	quoteFill     prometheus.Histogram
+	errors        *prometheus.CounterVec // errors that would otherwise only be logged, by component
+}
+
+// errorComponents are the values of executiond_errors_total's component
+// label. Each is pre-created at zero, so a rate() alert sees the series
+// before its first error.
+var errorComponents = []string{
+	"nats_handler", "position_publish", "account_stream", "fills", "order_results", "lifecycle",
+	"reconcile", "sweep", "refresh_sizing", "cash_flow", "equity_record", "drawdown_refresh",
+	"warm_fees", "warm_metadata", "metrics_server",
 }
 
 func newMetrics() *metrics {
@@ -81,11 +91,17 @@ func newMetrics() *metrics {
 		quoteFill: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name: "executiond_quote_fill_to_cancel_seconds", Help: "A quote lane's first fill seen to the batch cancel of its other levels answered.", Buckets: latencyBuckets,
 		}),
+		errors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "executiond_errors_total", Help: "Errors reported by each executiond component; the log line carries the detail.",
+		}, []string{"component"}),
+	}
+	for _, component := range errorComponents {
+		m.errors.WithLabelValues(component)
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.orderHTTP, m.orderTTFB, m.orderColdConn, m.prePost, m.cancel, m.cancelOrders, m.pass, m.passOverruns, m.keepWarm, m.keepWarmFails,
-		m.quoteLevels, m.quoteFill,
+		m.quoteLevels, m.quoteFill, m.errors,
 	)
 	return m
 }
@@ -135,6 +151,20 @@ func (m *metrics) observeQuoteFillToCancel(took time.Duration) {
 	m.quoteFill.Observe(took.Seconds())
 }
 
+// countError counts one error from component. The caller still logs it.
+func (m *metrics) countError(component string) {
+	m.errors.WithLabelValues(component).Inc()
+}
+
+// errorHandler returns an error handler that logs as "<label>: <err>" and
+// counts the error under component.
+func (m *metrics) errorHandler(component, label string) func(error) {
+	return func(err error) {
+		log.Printf("%s: %v", label, err)
+		m.countError(component)
+	}
+}
+
 // outcome keeps the label set small: ok, a 4xx or 5xx class, a refused
 // cancel, or any other error.
 func outcome(err error) string {
@@ -177,6 +207,7 @@ func serveMetrics(ctx context.Context, addr string, m *metrics) error {
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("metrics server stopped: %v", err)
+			m.countError("metrics_server")
 		}
 	}()
 	log.Printf("metrics on http://%s/metrics", listener.Addr())

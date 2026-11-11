@@ -37,6 +37,8 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 	m.observePass("deadline", 1200*time.Millisecond, true)
 	m.observeKeepWarm(5*time.Millisecond, 6*time.Millisecond, nil)
 	m.observeKeepWarm(0, 0, errors.New("down"))
+	m.errorHandler("reconcile", "reconciliation error")(errors.New("boom"))
+	m.countError("warm_fees")
 
 	resp, err := http.Get("http://" + addr + "/metrics")
 	if err != nil {
@@ -57,6 +59,9 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 		`executiond_loop_pass_overruns_total{loop="deadline"} 1`,
 		`executiond_keepwarm_rtt_seconds_count{pool="order"} 1`,
 		`executiond_keepwarm_failures_total 1`,
+		`executiond_errors_total{component="reconcile"} 1`,
+		`executiond_errors_total{component="warm_fees"} 1`,
+		`executiond_errors_total{component="sweep"} 0`,
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("missing %s", want)

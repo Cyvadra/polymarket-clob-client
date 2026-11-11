@@ -107,7 +107,8 @@ func run() error {
 		return fmt.Errorf("migrate execution store: %w", err)
 	}
 
-	onHandlerError := func(err error) { log.Printf("NATS handler error: %v", err) }
+	stats := newMetrics()
+	onHandlerError := stats.errorHandler("nats_handler", "NATS handler error")
 	bus, err := natsbus.New(natsbus.Config{URL: cfg.NATSURL, Name: "polymarket-executiond", ConnectTimeout: cfg.ConnectTimeout, OnHandlerError: onHandlerError})
 	if err != nil {
 		return err
@@ -140,12 +141,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	stats := newMetrics()
 	// Metrics are for the operator, never a reason not to trade: when several
 	// instances share a host and one forgets its own EXECUTION_METRICS_ADDR,
 	// the bind clash must not crash-loop it. It keeps trading unscraped.
 	if err := serveMetrics(ctx, cfg.MetricsAddr, stats); err != nil {
 		log.Printf("execution lifecycle error: metrics disabled, serve on %s: %v (set a distinct EXECUTION_METRICS_ADDR per instance)", cfg.MetricsAddr, err)
+		stats.countError("metrics_server")
 	}
 	clob.SetRequestTraceHook(func(t transport.Timing) {
 		logOrderTiming(t)
@@ -166,7 +167,7 @@ func run() error {
 	execution.SetQuoteMetrics(executor.QuoteMetrics{Levels: stats.observeQuoteLevels, FillToCancel: stats.observeQuoteFillToCancel})
 	quotes := marketquotes.New()
 	execution.SetQuoteProvider(quotes)
-	quotes.OnNewMarket(metadataWarmer(ctx, clob))
+	quotes.OnNewMarket(metadataWarmer(ctx, clob, stats))
 	books := marketquotes.New()
 	execution.SetBookProvider(books)
 	fills, err := accountfeed.NewFillConsumer(store, time.Now)
@@ -197,13 +198,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	positions.SetErrorHandler(func(err error) { log.Printf("position feature publish error: %v", err) })
-	accountStream.SetErrorHandler(func(err error) { log.Printf("account stream error: %v", err) })
-	fills.SetErrorHandler(func(err error) { log.Printf("account fill error: %v", err) })
-	orders.SetErrorHandler(func(err error) { log.Printf("account order result error: %v", err) })
+	positions.SetErrorHandler(stats.errorHandler("position_publish", "position feature publish error"))
+	accountStream.SetErrorHandler(stats.errorHandler("account_stream", "account stream error"))
+	fills.SetErrorHandler(stats.errorHandler("fills", "account fill error"))
+	orders.SetErrorHandler(stats.errorHandler("order_results", "account order result error"))
 	orders.SetPriceWait(cfg.ResultPriceWait)
-	execution.SetErrorHandler(func(err error) { log.Printf("execution lifecycle error: %v", err) })
-	repair.SetErrorHandler(func(err error) { log.Printf("reconciliation error: %v", err) })
+	execution.SetErrorHandler(stats.errorHandler("lifecycle", "execution lifecycle error"))
+	repair.SetErrorHandler(stats.errorHandler("reconcile", "reconciliation error"))
 	execution.SetEventPublisher(events)
 	orders.SetEventPublisher(events)
 	repair.SetEventPublisher(events)
@@ -245,7 +246,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	sweeper.SetErrorHandler(func(err error) { log.Printf("settlement sweep error: %v", err) })
+	sweeper.SetErrorHandler(stats.errorHandler("sweep", "settlement sweep error"))
 	recorder, err := equity.NewRecorder(wallet, store, cfg.EquityFlowThresholdUSD)
 	if err != nil {
 		return err
@@ -289,6 +290,7 @@ func run() error {
 		if anchorStale {
 			if err := refreshAnchor(ctx, anchor); err != nil {
 				log.Printf("refresh sizing base: %v", err)
+				stats.countError("refresh_sizing")
 			} else {
 				anchorStale = false
 			}
@@ -308,6 +310,7 @@ func run() error {
 			moved, err := recorder.CashMoved(ctx)
 			if err != nil {
 				log.Printf("check for deposits and withdrawals: %v", err)
+				stats.countError("cash_flow")
 			}
 			equityDue = moved
 		}
@@ -324,7 +327,7 @@ func run() error {
 		if baseDue {
 			reason = equity.ReasonSizingBase
 		}
-		if !recordSettledEquity(ctx, recorder, reason, limits) {
+		if !recordSettledEquity(ctx, recorder, reason, limits, stats) {
 			return
 		}
 		equityDue = false
@@ -332,6 +335,7 @@ func run() error {
 		if anchor != nil {
 			if err := refreshAnchor(ctx, anchor); err != nil {
 				log.Printf("refresh sizing base: %v", err)
+				stats.countError("refresh_sizing")
 				anchorStale = true
 			}
 		}
@@ -391,7 +395,7 @@ func run() error {
 // round trip and its fills are priced without one. PMM
 // quotes a market from registration and signals it a minute or more later.
 // At startup every live market is announced at once, so warming is bounded.
-func metadataWarmer(ctx context.Context, clob *clobclient.Client) func(marketquotes.Snapshot) {
+func metadataWarmer(ctx context.Context, clob *clobclient.Client, stats *metrics) func(marketquotes.Snapshot) {
 	const concurrent, timeout = 4, 15 * time.Second
 	slots := make(chan struct{}, concurrent)
 	return func(snapshot marketquotes.Snapshot) {
@@ -406,10 +410,12 @@ func metadataWarmer(ctx context.Context, clob *clobclient.Client) func(marketquo
 			defer cancel()
 			if _, err := clob.FeeSchedule(warmCtx, snapshot.ConditionID); err != nil && ctx.Err() == nil {
 				log.Printf("warm fee schedule %s: %v", snapshot.ConditionID, err)
+				stats.countError("warm_fees")
 			}
 			for _, tokenID := range []string{snapshot.Up.AssetID, snapshot.Down.AssetID} {
 				if err := clob.WarmMarketMetadata(warmCtx, tokenID); err != nil && ctx.Err() == nil {
 					log.Printf("warm market metadata %s/%s: %v", snapshot.ConditionID, tokenID, err)
+					stats.countError("warm_metadata")
 				}
 			}
 		}()
@@ -732,10 +738,11 @@ func durationEnv(name string, fallback time.Duration) time.Duration {
 // recordSettledEquity saves the wallet's equity once positions have settled
 // and refreshes the drawdown limit from it. It reports whether a snapshot
 // was recorded; one that was not is retried after the next sweep.
-func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason string, limits *equity.DrawdownLimits) bool {
+func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason string, limits *equity.DrawdownLimits, stats *metrics) bool {
 	snapshot, err := recorder.Record(ctx, reason)
 	if err != nil {
 		log.Printf("record equity after settlement: %v", err)
+		stats.countError("equity_record")
 		return false
 	}
 	log.Printf("equity after settlement (%s): $%s (trade cash $%s, external flow $%s, trade index %s)",
@@ -745,6 +752,7 @@ func recordSettledEquity(ctx context.Context, recorder *equity.Recorder, reason 
 	}
 	if err := refreshDrawdown(ctx, limits); err != nil {
 		log.Printf("refresh drawdown limit: %v", err)
+		stats.countError("drawdown_refresh")
 	}
 	return true
 }
