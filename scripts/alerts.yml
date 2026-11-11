@@ -1,0 +1,76 @@
+# Prometheus alert rules for executiond. See docs/observability.md.
+groups:
+  - name: executiond
+    rules:
+      - alert: ExecutiondDown
+        expr: up{job="executiond"} == 0
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "executiond {{ $labels.instance }} is not being scraped"
+
+      - alert: ExecutiondNATSDisconnected
+        expr: executiond_nats_connected == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "executiond {{ $labels.instance }} is disconnected from NATS"
+
+      - alert: ExecutiondAccountStreamDisconnected
+        expr: executiond_account_stream_connected == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "executiond {{ $labels.instance }} is disconnected from the account stream; fills arrive only through reconciliation"
+
+      - alert: ExecutiondReconcileStale
+        expr: time() - executiond_last_success_timestamp_seconds{component="reconcile"} > 600
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "executiond {{ $labels.instance }} has not reconciled for over 10 minutes"
+
+      - alert: ExecutiondSweepStale
+        expr: time() - executiond_last_success_timestamp_seconds{component="sweep"} > 1800
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }} has not completed a settlement sweep in 30 minutes"
+
+      - alert: ExecutiondErrors
+        expr: sum by (instance, component) (rate(executiond_errors_total[10m])) > 0.05
+        for: 10m
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }}: {{ $labels.component }} errors at {{ $value | humanize }}/s"
+
+      - alert: ExecutiondHistoryWritesFailing
+        expr: increase(executiond_errors_total{component="history"}[15m]) > 0
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }} cannot write observability rows to Postgres"
+
+      - alert: ExecutiondOpensSuspended
+        expr: executiond_opens_suspended == 1
+        labels: {severity: info}
+        annotations:
+          summary: "executiond {{ $labels.instance }}: {{ $labels.guard }} drawdown guard is holding back opens"
+
+      - alert: ExecutiondDrawdownNearLimit
+        expr: executiond_drawdown / executiond_drawdown_limit > 0.8 and on (instance, guard) executiond_opens_suspended == 0
+        for: 5m
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }}: {{ $labels.guard }} is at {{ $value | humanizePercentage }} of its drawdown limit"
+
+      - alert: ExecutiondLoopOverruns
+        expr: sum by (instance, loop) (increase(executiond_loop_pass_overruns_total[15m])) > 3
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }}: the {{ $labels.loop }} loop overran {{ $value }} times in 15 minutes"
+
+      - alert: ExecutiondKeepWarmFailing
+        expr: increase(executiond_keepwarm_failures_total[10m]) > 5
+        labels: {severity: warn}
+        annotations:
+          summary: "executiond {{ $labels.instance }}: keep-warm pings are failing, orders will pay for cold connections"
