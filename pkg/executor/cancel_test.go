@@ -717,6 +717,7 @@ type slowCancelCLOB struct {
 	delay         time.Duration
 	mu            sync.Mutex
 	inflight, max int
+	singles       int
 	batches       []int
 }
 
@@ -731,6 +732,7 @@ func (c *slowCancelCLOB) CancelOrdersResult(ctx context.Context, ids []string) (
 func (c *slowCancelCLOB) CancelOrder(context.Context, string) error {
 	c.mu.Lock()
 	c.inflight++
+	c.singles++
 	c.max = max(c.max, c.inflight)
 	c.mu.Unlock()
 	time.Sleep(c.delay)
@@ -783,5 +785,41 @@ func TestCheckWatchedCancelsDueOrdersInOneBatch(t *testing.T) {
 	}
 	if len(hooked) != 1 || hooked[0] != levels {
 		t.Fatalf("cancel hook saw %v, want one call of %d orders", hooked, levels)
+	}
+}
+
+// One slow cancel must not hold the deadline pass: the pass only starts it,
+// and later passes skip the order until it finishes rather than cancel it a
+// second time. A single 2.4s cancel held the pass on 2026-11-11.
+func TestDeadlinePassDoesNotWaitForASlowCancel(t *testing.T) {
+	now := time.Now().UTC()
+	storer := &multiStore{fakeStore: &fakeStore{inserted: true}, orders: map[int]store.SignedOrderRecord{
+		1: {IntentID: "single-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 1, RequestedShares: "2", MatchedShares: "0"},
+	}}
+	client := &slowCancelCLOB{fakeCLOB: &fakeCLOB{}, delay: 300 * time.Millisecond}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	exec.watchOrder(protocol.ExecutionIntent{IntentID: "single-1", ExpiresAt: now.Add(-time.Second)}, 1, now, now)
+
+	started := time.Now()
+	for range 3 {
+		if err := exec.watchCancelPass(context.Background()); err != nil {
+			t.Fatalf("pass: %v", err)
+		}
+	}
+	if took := time.Since(started); took >= client.delay/2 {
+		t.Fatalf("three passes took %s with a %s cancel outstanding: the pass waited for it", took, client.delay)
+	}
+	exec.watchCancels.Wait()
+	client.mu.Lock()
+	sent := client.singles + len(client.batches)
+	client.mu.Unlock()
+	if sent != 1 {
+		t.Fatalf("expected one cancel while it was in flight, saw %d", sent)
+	}
+	if storer.orders[1].State == statemachine.StateLive {
+		t.Fatal("order never moved off LIVE")
 	}
 }

@@ -107,6 +107,13 @@ type Executor struct {
 	// its deadline or drift bound, checked every watchInterval (watch.go).
 	watchMu sync.Mutex
 	watched map[orderKey]*watchedOrder
+	// watchCancels tracks the deadline pass's background cancels, so Run
+	// returns only once they have finished.
+	watchCancels sync.WaitGroup
+	// watchErrs holds the errors of background cancels that finished since
+	// the last deadline pass, which returns them.
+	watchErrMu sync.Mutex
+	watchErrs  error
 
 	// inflight holds the orders whose POST is awaiting its answer, so a
 	// CANCEL_OPEN can reach them before the exchange replies (inflight.go).
@@ -192,9 +199,11 @@ func (e *Executor) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		e.loop(ctx, "deadline", watchInterval, func(ctx context.Context) error {
-			// Quote lanes only start their cancels here; they never hold the pass.
+			// Quote lanes and watched orders only start their cancels here;
+			// neither holds the pass, so one slow cancel does not delay every
+			// other order's deadline and drift check.
 			e.checkQuotes(ctx)
-			return e.checkWatched(ctx)
+			return e.watchCancelPass(ctx)
 		})
 	}()
 	go func() {
@@ -206,6 +215,7 @@ func (e *Executor) Run(ctx context.Context) error {
 		e.loop(ctx, "close maintenance", time.Second, e.maintainCloses)
 	}()
 	wg.Wait()
+	e.watchCancels.Wait()
 	return nil
 }
 

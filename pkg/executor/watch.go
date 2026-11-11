@@ -42,6 +42,9 @@ type watchedOrder struct {
 	// until the order leaves the open set, so adoptOpenOrders does not start
 	// a fresh window on it every second.
 	gaveUp bool
+	// cancelling is set while a cancel attempt for the order is running in
+	// the background, so later passes skip it rather than send a second one.
+	cancelling bool
 }
 
 // watchOrder starts watching a resting order. createdAt is when the intent
@@ -114,10 +117,28 @@ func (e *Executor) unwatch(key orderKey) {
 }
 
 // checkWatched cancels every watched order past its deadline or drifted past
-// its bound. Deciding that touches only memory; the database is read only for
-// an order that is due a cancel, to learn whether it is still open and to
-// walk its state from the current revision.
+// its bound and waits for those cancels. The deadline loop uses
+// startWatchedCancels, which does not wait.
 func (e *Executor) checkWatched(ctx context.Context) error {
+	return <-e.startWatchedCancels(ctx)
+}
+
+// startWatchedCancels finds every watched order past its deadline or drifted
+// past its bound and starts its cancel in the background. Deciding that
+// touches only memory; the database is read only for an order that is due a
+// cancel, to learn whether it is still open and to walk its state from the
+// current revision. The returned channel yields the attempts' errors once
+// they finish.
+//
+// Each cancel is an exchange round trip, 66ms at the median and over 500ms at
+// p90 (2026-11-09, aws-london-light), and a slow one took 2.4s (2026-11-11).
+// Waiting for them held the pass, so no other order's deadline or drift was
+// checked meanwhile: batching fixed that for ladders, not for a single slow
+// cancel. Now the pass only starts them. An order whose cancel is running is
+// marked cancelling and skipped until it finishes, so it is never cancelled
+// twice at once; orders due in one pass still go out as one batch cancel (per
+// clobclient.MaxBatchOrders), each walking its own state.
+func (e *Executor) startWatchedCancels(ctx context.Context) <-chan error {
 	now := e.now().UTC()
 	type due struct {
 		key     orderKey
@@ -127,7 +148,7 @@ func (e *Executor) checkWatched(ctx context.Context) error {
 	var pending []due
 	e.watchMu.Lock()
 	for key, watched := range e.watched {
-		if watched.gaveUp {
+		if watched.gaveUp || watched.cancelling {
 			continue
 		}
 		expired := !watched.deadline.IsZero() && !watched.deadline.After(now)
@@ -137,18 +158,17 @@ func (e *Executor) checkWatched(ctx context.Context) error {
 			_, drifted = tactics.DriftBreach(watched.intent, watched.drift, quote, hasQuote, now)
 		}
 		if expired || drifted || !watched.cancelFrom.IsZero() {
+			watched.cancelling = true
 			pending = append(pending, due{key, watched, drifted})
 		}
 	}
 	e.watchMu.Unlock()
 
-	// Each cancel is an exchange round trip, 66ms at the median and over
-	// 500ms at p90 (2026-11-09, aws-london-light). Sent one after another, the
-	// three levels of a ladder held this pass for 1.0 to 1.4s, during which no
-	// other order's deadline or drift was checked. The due orders go out as
-	// one batch cancel (per clobclient.MaxBatchOrders); each still walks its
-	// own state. The pass waits for all of them, so passes never overlap and
-	// an order is never cancelled twice at once.
+	done := make(chan error, 1)
+	if len(pending) == 0 {
+		done <- nil
+		return done
+	}
 	var (
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -160,15 +180,46 @@ func (e *Executor) checkWatched(ctx context.Context) error {
 		wg.Go(func() {
 			// An order that needs no exchange cancel leaves the batch.
 			defer member.leave()
-			if err := e.cancelWatched(context.WithValue(ctx, cancelMemberKey{}, member), d.key, d.watched, d.drifted, now); err != nil {
+			err := e.cancelWatched(context.WithValue(ctx, cancelMemberKey{}, member), d.key, d.watched, d.drifted, now)
+			e.watchMu.Lock()
+			d.watched.cancelling = false
+			e.watchMu.Unlock()
+			if err != nil {
 				mu.Lock()
 				errs = errors.Join(errs, err)
 				mu.Unlock()
 			}
 		})
 	}
-	wg.Wait()
-	return errs
+	e.watchCancels.Add(1)
+	go func() {
+		defer e.watchCancels.Done()
+		wg.Wait()
+		done <- errs
+	}()
+	return done
+}
+
+// watchCancelPass is the deadline loop's pass over watched orders: it starts
+// the due cancels without waiting for them. It returns the errors of attempts
+// that finished since the last pass, so they go through the loop's reporting
+// (and its repeat suppression) like any pass error.
+func (e *Executor) watchCancelPass(ctx context.Context) error {
+	done := e.startWatchedCancels(ctx)
+	e.watchCancels.Add(1)
+	go func() {
+		defer e.watchCancels.Done()
+		if err := <-done; err != nil {
+			e.watchErrMu.Lock()
+			e.watchErrs = errors.Join(e.watchErrs, err)
+			e.watchErrMu.Unlock()
+		}
+	}()
+	e.watchErrMu.Lock()
+	defer e.watchErrMu.Unlock()
+	err := e.watchErrs
+	e.watchErrs = nil
+	return err
 }
 
 // cancelWatched makes one attempt to cancel a watched order. The order stops
@@ -189,14 +240,15 @@ func (e *Executor) cancelWatched(ctx context.Context, key orderKey, watched *wat
 		e.unwatch(key)
 		return nil
 	}
+	e.watchMu.Lock()
 	if watched.cancelFrom.IsZero() {
 		watched.cancelFrom = now
 	} else if now.Sub(watched.cancelFrom) >= cancelRetryWindow {
-		e.watchMu.Lock()
 		watched.gaveUp = true
 		e.watchMu.Unlock()
 		return fmt.Errorf("cancel order %s still open after %s of attempts; leaving it to the reconciler", order.ExchangeOrderID, cancelRetryWindow)
 	}
+	e.watchMu.Unlock()
 	reason := cancelRequested
 	// The cause goes on the intent before the cancel is sent, since the
 	// exchange may confirm the cancel on the account stream before the call
