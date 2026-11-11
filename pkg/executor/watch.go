@@ -206,6 +206,17 @@ func (e *Executor) startWatchedCancels(ctx context.Context) <-chan error {
 // (and its repeat suppression) like any pass error.
 func (e *Executor) watchCancelPass(ctx context.Context) error {
 	done := e.startWatchedCancels(ctx)
+	e.watchErrMu.Lock()
+	err := e.watchErrs
+	e.watchErrs = nil
+	e.watchErrMu.Unlock()
+	// A pass with nothing due has its result ready; only running cancels need
+	// a goroutine to collect theirs.
+	select {
+	case passErr := <-done:
+		return errors.Join(err, passErr)
+	default:
+	}
 	e.watchCancels.Add(1)
 	go func() {
 		defer e.watchCancels.Done()
@@ -215,10 +226,6 @@ func (e *Executor) watchCancelPass(ctx context.Context) error {
 			e.watchErrMu.Unlock()
 		}
 	}()
-	e.watchErrMu.Lock()
-	defer e.watchErrMu.Unlock()
-	err := e.watchErrs
-	e.watchErrs = nil
 	return err
 }
 

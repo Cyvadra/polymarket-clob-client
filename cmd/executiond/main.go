@@ -335,6 +335,7 @@ func run() error {
 			obs.snapshotDeferred(ctx, held)
 			return
 		}
+		obs.snapshotDeferred(ctx, 0)
 		// The recorder tags the snapshot as after a loss when it counts one.
 		reason := equity.ReasonSettlement
 		if baseDue {
@@ -791,6 +792,7 @@ func refreshAnchor(ctx context.Context, anchor *equity.LossAnchor, obs *observer
 		return err
 	}
 	if !ok {
+		obs.observeSizingBase(0)
 		log.Printf("equity-fraction opens size from live equity until a sizing base is recorded on a settlement sweep")
 		return nil
 	}

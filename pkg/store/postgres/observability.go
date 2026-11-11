@@ -3,8 +3,11 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -48,6 +51,24 @@ func (s *Store) RecordSweep(ctx context.Context, sweep store.SweepRecord) error 
 		return fmt.Errorf("record settlement sweep: %w", err)
 	}
 	return nil
+}
+
+// LastGuardEvent returns the kind of the latest suspend or resume event for a
+// guard, and false when it has none.
+func (s *Store) LastGuardEvent(ctx context.Context, subject string) (string, bool, error) {
+	var kind string
+	err := s.pool.QueryRow(ctx, `
+		SELECT kind FROM risk_events
+		WHERE subject = $1 AND kind IN ($2, $3)
+		ORDER BY at DESC, event_id DESC LIMIT 1
+	`, subject, store.RiskSuspend, store.RiskResume).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read last guard event: %w", err)
+	}
+	return kind, true, nil
 }
 
 // RecordRiskEvent saves a risk or sizing decision.

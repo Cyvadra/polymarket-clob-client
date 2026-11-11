@@ -19,6 +19,7 @@ type historyStore interface {
 	StopDaemonRun(ctx context.Context, runID int64, at time.Time) error
 	RecordSweep(ctx context.Context, sweep store.SweepRecord) error
 	RecordRiskEvent(ctx context.Context, event store.RiskEvent) error
+	LastGuardEvent(ctx context.Context, subject string) (string, bool, error)
 }
 
 // observer sends each operational fact to /metrics and, when it is history
@@ -32,8 +33,14 @@ type observer struct {
 	mu        sync.Mutex
 	runID     int64
 	pending   *store.DaemonRun // a run whose record failed, retried on the next write
+	starting  bool             // a run record is in flight
 	suspended map[string]bool  // guard label -> last seen state
+	deferred  int              // winners held at the last recorded deferral, 0 when none
 }
+
+// historyTimeout bounds each history write, so a stalled database delays a
+// sweep by at most this much.
+const historyTimeout = 2 * time.Second
 
 func newObserver(m *metrics, history historyStore, now func() time.Time) *observer {
 	return &observer{metrics: m, history: history, now: now, suspended: map[string]bool{}}
@@ -54,13 +61,27 @@ func (o *observer) startRun(ctx context.Context, signer, maker string, cfg confi
 // ID: 0 while it is not recorded. A failed record is retried on the next
 // history write, so a brief database outage at startup does not leave the
 // whole run's rows unlinked.
+//
+// The record is made outside o.mu and with historyTimeout, so a stalled
+// database neither blocks other observer calls nor holds the caller long.
 func (o *observer) ensureRun(ctx context.Context) int64 {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.runID != 0 || o.pending == nil {
-		return o.runID
+	if o.runID != 0 || o.pending == nil || o.starting {
+		id := o.runID
+		o.mu.Unlock()
+		return id
 	}
-	id, err := o.history.StartDaemonRun(ctx, *o.pending)
+	run := *o.pending
+	o.starting = true
+	o.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	id, err := o.history.StartDaemonRun(ctx, run)
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.starting = false
 	if err != nil {
 		o.historyFailed(err)
 		return 0
@@ -98,8 +119,11 @@ func (o *observer) sweep(ctx context.Context, s settlement.Sweep) {
 	if s.Lost+s.Redeemed+s.Shrunk+s.Dust == 0 && !s.Failed {
 		return
 	}
+	runID := o.ensureRun(ctx)
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
 	if err := o.history.RecordSweep(ctx, store.SweepRecord{
-		RunID: o.ensureRun(ctx), At: at, Checked: s.Checked, Lost: s.Lost, Redeemed: s.Redeemed,
+		RunID: runID, At: at, Checked: s.Checked, Lost: s.Lost, Redeemed: s.Redeemed,
 		Dust: s.Dust, Shrunk: s.Shrunk, Closing: s.Reserved, Settling: s.Settling, Failed: s.Failed,
 	}); err != nil {
 		o.historyFailed(err)
@@ -118,6 +142,10 @@ func (o *observer) guard(ctx context.Context, guard *equity.DrawdownGuard) {
 	o.suspended[label] = suspended
 	o.mu.Unlock()
 	if suspended == was && (seen || !suspended) {
+		return
+	}
+	// A guard already suspended before a restart is not a new suspension.
+	if !seen && suspended && o.lastGuardEvent(ctx, label) == store.RiskSuspend {
 		return
 	}
 	kind := store.RiskResume
@@ -146,13 +174,39 @@ func (o *observer) equityRecorded(ctx context.Context, reason string, snapshot s
 	})
 }
 
+// snapshotDeferred records a deferral when the number of winners held
+// changes, not on every sweep it lasts. 0 means the snapshot is no longer
+// deferred.
 func (o *observer) snapshotDeferred(ctx context.Context, winnersHeld int) {
+	o.mu.Lock()
+	changed := winnersHeld != o.deferred
+	o.deferred = winnersHeld
+	o.mu.Unlock()
+	if !changed || winnersHeld == 0 {
+		return
+	}
 	o.riskEvent(ctx, store.RiskSnapshotDeferred, "", "winning lanes not yet settled", map[string]any{"winners_held": winnersHeld})
 }
 
+// lastGuardEvent is the kind of the latest suspend or resume stored for a
+// guard, "" when there is none or it cannot be read.
+func (o *observer) lastGuardEvent(ctx context.Context, label string) string {
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
+	kind, _, err := o.history.LastGuardEvent(ctx, label)
+	if err != nil {
+		o.historyFailed(err)
+		return ""
+	}
+	return kind
+}
+
 func (o *observer) riskEvent(ctx context.Context, kind, subject, reason string, details map[string]any) {
+	runID := o.ensureRun(ctx)
+	ctx, cancel := context.WithTimeout(ctx, historyTimeout)
+	defer cancel()
 	if err := o.history.RecordRiskEvent(ctx, store.RiskEvent{
-		RunID: o.ensureRun(ctx), At: o.now(), Kind: kind, Subject: subject, Reason: reason, Details: details,
+		RunID: runID, At: o.now(), Kind: kind, Subject: subject, Reason: reason, Details: details,
 	}); err != nil {
 		o.historyFailed(err)
 	}

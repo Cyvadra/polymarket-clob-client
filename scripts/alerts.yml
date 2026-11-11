@@ -23,6 +23,10 @@ groups:
         annotations:
           summary: "executiond {{ $labels.instance }} is disconnected from the account stream; fills arrive only through reconciliation"
 
+      # The two staleness thresholds below are fixed, while /healthz allows 3x
+      # EXECUTION_RECONCILE_INTERVAL and 3x EXECUTION_SETTLEMENT_SWEEP_INTERVAL.
+      # Raising either interval past a third of its threshold needs the
+      # threshold raised with it, or the alert fires while /healthz is healthy.
       - alert: ExecutiondReconcileStale
         expr: time() - executiond_last_success_timestamp_seconds{component="reconcile"} > 600
         for: 2m

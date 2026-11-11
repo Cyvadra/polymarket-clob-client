@@ -30,15 +30,19 @@ func newResultMetrics(registry *prometheus.Registry) *resultMetrics {
 	return r
 }
 
-// countingPublisher counts each message before passing it on.
+// countingPublisher counts each message once it is published, so a failed
+// publish is not counted as sent to strategies.
 type countingPublisher struct {
 	next    protocol.ExecutionEventPublisher
 	metrics *resultMetrics
 }
 
 func (p countingPublisher) PublishJSON(subject string, payload any) error {
+	if err := p.next.PublishJSON(subject, payload); err != nil {
+		return err
+	}
 	p.metrics.observe(payload)
-	return p.next.PublishJSON(subject, payload)
+	return nil
 }
 
 func (r *resultMetrics) observe(payload any) {

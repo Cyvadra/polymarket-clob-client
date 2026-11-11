@@ -125,11 +125,19 @@ func (s *UserStream) runOnce(ctx context.Context) (bool, error) {
 	}
 	// Connected once the server sends something back: a rejected auth
 	// closes the socket instead.
-	defer s.connected.Store(false)
+	// The reader may still set connected after this returns, so the flag is
+	// cleared only once the closed socket has stopped it.
+	read := make(chan error, 1)
+	readerDone := make(chan struct{})
+	defer func() {
+		conn.Close()
+		<-readerDone
+		s.connected.Store(false)
+	}()
 	pings := time.NewTicker(s.cfg.PingInterval)
 	defer pings.Stop()
-	read := make(chan error, 1)
 	go func() {
+		defer close(readerDone)
 		for {
 			_, payload, err := conn.ReadMessage()
 			if err != nil {

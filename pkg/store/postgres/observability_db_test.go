@@ -48,3 +48,22 @@ func TestObservabilityRecords(t *testing.T) {
 		t.Fatalf("v_intents_daily: %v", err)
 	}
 }
+
+func TestLastGuardEvent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	subject := "guard-" + time.Now().Format("150405.000000000")
+	if _, ok, err := s.LastGuardEvent(ctx, subject); err != nil || ok {
+		t.Fatalf("want no event yet, got ok=%v err=%v", ok, err)
+	}
+	at := time.Now().UTC()
+	for i, kind := range []string{store.RiskSuspend, store.RiskSizingBase, store.RiskResume, store.RiskSnapshotDeferred} {
+		if err := s.RecordRiskEvent(ctx, store.RiskEvent{At: at.Add(time.Duration(i) * time.Second), Kind: kind, Subject: subject}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kind, ok, err := s.LastGuardEvent(ctx, subject)
+	if err != nil || !ok || kind != store.RiskResume {
+		t.Fatalf("want resume, got %q ok=%v err=%v", kind, ok, err)
+	}
+}
