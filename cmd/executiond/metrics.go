@@ -59,7 +59,7 @@ type metrics struct {
 var errorComponents = []string{
 	"nats_handler", "position_publish", "account_stream", "fills", "order_results", "lifecycle",
 	"reconcile", "sweep", "refresh_sizing", "cash_flow", "equity_record", "drawdown_refresh",
-	"warm_fees", "warm_metadata", "metrics_server",
+	"warm_fees", "warm_metadata", "metrics_server", "history",
 }
 
 func newMetrics() *metrics {

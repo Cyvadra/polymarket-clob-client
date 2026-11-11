@@ -508,3 +508,40 @@ type Store interface {
 	FillStore
 	PositionStore
 }
+
+// DaemonRun is one executiond process: who it signs as and its non-secret
+// settings.
+type DaemonRun struct {
+	Version    string
+	Signer     string
+	Maker      string
+	Strategies []string
+	Config     map[string]any
+}
+
+// SweepRecord is one settlement sweep pass. A zero RunID is stored as NULL.
+type SweepRecord struct {
+	RunID                                                    int64
+	At                                                       time.Time
+	Checked, Lost, Redeemed, Dust, Shrunk, Closing, Settling int
+	Failed                                                   bool
+}
+
+// Risk event kinds.
+const (
+	RiskSuspend          = "suspend"
+	RiskResume           = "resume"
+	RiskSizingBase       = "sizing_base"
+	RiskSnapshotDeferred = "snapshot_deferred"
+	RiskEquityRecorded   = "equity_recorded"
+)
+
+// RiskEvent is a risk or sizing decision. A zero RunID is stored as NULL.
+type RiskEvent struct {
+	RunID   int64
+	At      time.Time
+	Kind    string
+	Subject string
+	Reason  string
+	Details map[string]any
+}

@@ -12,7 +12,7 @@ func TestMigrationsEmbedSchemaThenPositionRebuild(t *testing.T) {
 	}
 	// The schema is a single merged migration; later files are data fixes and
 	// indexes an already-migrated database cannot get from the schema file.
-	want := []string{"000001_schema.sql", "000002_positions_from_fills.sql", "000003_fills_lane_index.sql", "000004_intent_equity_sizing.sql", "000005_equity_snapshots.sql", "000006_intent_request_id.sql", "000007_settlement_losses.sql", "000008_strategy_equity.sql", "000009_intent_signal_drift.sql", "000010_multi_level_limit.sql", "000011_ladder_phase.sql", "000012_quote_lanes.sql"}
+	want := []string{"000001_schema.sql", "000002_positions_from_fills.sql", "000003_fills_lane_index.sql", "000004_intent_equity_sizing.sql", "000005_equity_snapshots.sql", "000006_intent_request_id.sql", "000007_settlement_losses.sql", "000008_strategy_equity.sql", "000009_intent_signal_drift.sql", "000010_multi_level_limit.sql", "000011_ladder_phase.sql", "000012_quote_lanes.sql", "000013_observability.sql"}
 	if len(migrations) != len(want) {
 		t.Fatalf("expected %d migrations, got %d", len(want), len(migrations))
 	}
