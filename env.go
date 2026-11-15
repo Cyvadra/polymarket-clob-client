@@ -50,6 +50,15 @@ func ConfigFromEnv() (Config, error) {
 	if builder != nil {
 		cfg.Builder = &BuilderCredentials{APIKey: builder.APIKey, Secret: builder.Secret, Passphrase: builder.Passphrase}
 	}
+	relayerKey := strings.TrimSpace(os.Getenv("POLYMARKET_RELAYER_API_KEY"))
+	relayerAddress := strings.TrimSpace(os.Getenv("POLYMARKET_RELAYER_API_KEY_ADDRESS"))
+	if relayerKey == "" && relayerAddress != "" {
+		return Config{}, fmt.Errorf("POLYMARKET_RELAYER_API_KEY_ADDRESS is set without POLYMARKET_RELAYER_API_KEY")
+	}
+	if relayerKey != "" {
+		cfg.Relayer = &RelayerCredentials{APIKey: relayerKey, Address: relayerAddress}
+	}
+	cfg.RelayerHost = strings.TrimSpace(os.Getenv("POLYMARKET_RELAYER_HOST"))
 	if raw := os.Getenv("POLYMARKET_PROXY_URL"); raw != "" {
 		proxyURL, parseErr := url.Parse(raw)
 		if parseErr != nil {

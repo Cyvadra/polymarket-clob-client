@@ -245,6 +245,9 @@ standard `executiond` deployment and are omitted from `.env.example`.
 | `POLYMARKET_CHAIN_ID` | `137` | `137` Polygon mainnet, `80002` Amoy testnet. |
 | `POLYMARKET_RPC_ENDPOINT` | `https://polygon-bor-rpc.publicnode.com` on mainnet | Polygon JSON-RPC. `executiond` reads winning outcome-token balances from the ConditionalTokens contract through it (`Client.TokenBalance`), because the CLOB refuses balance reads once a settled market's book is gone; it is also the on-chain fallback inside `Client.ResolveProxyWallet`. |
 | `POLYMARKET_BUILDER_API_KEY` / `_SECRET` / `_PASSPHRASE` | unset | Builder credentials for fee-sharing order headers. Must be set together, or not at all. Only relevant under a builder agreement. |
+| `POLYMARKET_RELAYER_API_KEY` | unset | Relayer API key (Polymarket Settings > API Keys > Relayer API Keys). Used by `polywallet` (split, send) and, later, executiond's split; without it the builder credentials authenticate the relayer instead. Deposit wallets (type 3) only. |
+| `POLYMARKET_RELAYER_API_KEY_ADDRESS` | signer address | The address the relayer key was issued to. |
+| `POLYMARKET_RELAYER_HOST` | `https://relayer-v2.polymarket.com` | Relayer endpoint. |
 
 ## Notes
 

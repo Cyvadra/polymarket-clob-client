@@ -125,6 +125,25 @@ deploy-time settings (e.g. a non-default `EXECUTIOND_PM2_BIN`). It holds no
 secrets, is only read locally by `deploy.sh`, and is never uploaded.
 `scripts/private/` is excluded by `.gitignore`.
 
+## Wallet operations (polywallet)
+
+`polywallet` is a local test tool, not shipped by `deploy.sh`. It splits pUSD
+into Up + Down tokens and sends pUSD or outcome tokens from a deposit wallet
+through Polymarket's gasless relayer. It reads the host's private
+`executiond.env`, which must set `POLYMARKET_RELAYER_API_KEY` (and
+`POLYMARKET_RELAYER_API_KEY_ADDRESS` when the key belongs to another address).
+The env file names the key's server paths, so
+point them at the local copies.
+Without `--yes` it only prints the plan:
+
+```sh
+go build -o /tmp/polywallet ./cmd/polywallet
+(set -a; source scripts/private/germany/executiond.env; set +a
+ POLYMARKET_PRIVATE_KEY_FILE=scripts/private/germany/private-key.json \
+ POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE=scripts/private/germany/private-key.pass \
+ /tmp/polywallet split --condition 0x… --amount 1)
+```
+
 ## PnL report
 
 Each release also ships `pnlreport`. It rebuilds realized PnL from the

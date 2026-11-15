@@ -9,12 +9,16 @@ import (
 const DefaultHost = "https://clob.polymarket.com"
 
 type Config struct {
-	Host          string
-	ChainID       int64
-	RPCEndpoint   string
-	PrivateKey    string
-	Credentials   *Credentials
-	Builder       *BuilderCredentials
+	Host        string
+	ChainID     int64
+	RPCEndpoint string
+	PrivateKey  string
+	Credentials *Credentials
+	Builder     *BuilderCredentials
+	// Relayer authenticates deposit wallet batches (split, send). Builder
+	// credentials are used instead when it is nil.
+	Relayer       *RelayerCredentials
+	RelayerHost   string
 	MakerAddress  string
 	SignatureType SignatureType
 	// HTTPClient, when set, serves both reads and orders, so they share one
@@ -46,6 +50,9 @@ func (c Config) withDefaults() Config {
 	if c.RPCEndpoint == "" && c.ChainID == ChainPolygonMainnet {
 		// polygon-rpc.com answers every call with 403 (tenant disabled).
 		c.RPCEndpoint = "https://polygon-bor-rpc.publicnode.com"
+	}
+	if c.RelayerHost == "" {
+		c.RelayerHost = DefaultRelayerHost
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = 20 * time.Second

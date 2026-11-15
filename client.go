@@ -22,6 +22,9 @@ type Client struct {
 	orders   *transport.Client
 	metadata *metadataCache
 	rpc      *rpcConn
+	// relayerTransport is built on first use, under relayerMu.
+	relayerMu        sync.Mutex
+	relayerTransport *transport.Client
 }
 
 type metadataCache struct {
