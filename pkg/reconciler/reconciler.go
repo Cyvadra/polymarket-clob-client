@@ -90,18 +90,23 @@ func (r *Reconciler) Init(ctx context.Context) error {
 }
 
 // pass reconciles once, reporting an error or stamping the success.
+//
+// A pass that reached every unresolved order is a success for health even if
+// some orders errored: one order that keeps failing shows through the error
+// handler and must not mark a reconciler that settles every other order as
+// stale.
 func (r *Reconciler) pass(ctx context.Context) {
-	if err := r.Reconcile(ctx); err != nil {
-		if r.onError != nil {
-			r.onError(err)
-		}
-		return
+	completed, err := r.reconcile(ctx)
+	if err != nil && r.onError != nil {
+		r.onError(err)
 	}
-	r.lastSuccess.Store(r.now().UnixNano())
+	if completed {
+		r.lastSuccess.Store(r.now().UnixNano())
+	}
 }
 
-// LastSuccess is when a reconciliation pass last completed without error,
-// zero before the first.
+// LastSuccess is when a reconciliation pass last reached every unresolved
+// order, zero before the first.
 func (r *Reconciler) LastSuccess() time.Time {
 	if n := r.lastSuccess.Load(); n != 0 {
 		return time.Unix(0, n)
@@ -133,12 +138,19 @@ func (r *Reconciler) SetEventPublisher(publisher protocol.ExecutionEventPublishe
 func (r *Reconciler) Close(context.Context) error { return nil }
 
 func (r *Reconciler) Reconcile(ctx context.Context) error {
+	_, err := r.reconcile(ctx)
+	return err
+}
+
+// reconcile reports whether the pass reached every unresolved order, along
+// with the errors of the pass.
+func (r *Reconciler) reconcile(ctx context.Context) (bool, error) {
 	// A fill the store cannot apply must not stall order reconciliation. Order
 	// state comes from REST order lookups, not from fills, and an order left
 	// unresolved keeps its reservation and never reports a terminal result.
 	orders, err := r.store.OpenOrders(ctx)
 	if err != nil {
-		return fmt.Errorf("load unresolved orders: %w", err)
+		return false, fmt.Errorf("load unresolved orders: %w", err)
 	}
 	reconcileErr := r.replayTrades(ctx, oldestCreated(orders))
 	fillsCurrent := reconcileErr == nil
@@ -147,7 +159,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("reconcile %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
 	}
-	return reconcileErr
+	return true, reconcileErr
 }
 
 // replayTrades replays account trades newer than the max trade age. The

@@ -216,6 +216,15 @@ func (e *Executor) Run(ctx context.Context) error {
 	}()
 	wg.Wait()
 	e.watchCancels.Wait()
+	// Cancels that finished after the last deadline pass have no next pass
+	// to report them; an order they failed to cancel may still be live.
+	e.watchErrMu.Lock()
+	err := e.watchErrs
+	e.watchErrs = nil
+	e.watchErrMu.Unlock()
+	if err != nil {
+		e.reportError(fmt.Errorf("watched cancels at shutdown: %w", err))
+	}
 	return nil
 }
 

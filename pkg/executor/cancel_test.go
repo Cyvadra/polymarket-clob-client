@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -821,5 +822,25 @@ func TestDeadlinePassDoesNotWaitForASlowCancel(t *testing.T) {
 	}
 	if storer.orders[1].State == statemachine.StateLive {
 		t.Fatal("order never moved off LIVE")
+	}
+}
+
+// A watched cancel that fails after the last deadline pass has no next pass
+// to report it, so Run reports it on the way out.
+func TestRunReportsWatchedCancelErrorsLeftAtShutdown(t *testing.T) {
+	exec, err := New(&fakeStore{inserted: true}, &fakeCLOB{}, time.Now)
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	var reported []error
+	exec.SetErrorHandler(func(err error) { reported = append(reported, err) })
+	exec.watchErrs = errors.New("cancel order-1: context canceled")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := exec.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(reported) != 1 || !strings.Contains(reported[0].Error(), "order-1") {
+		t.Fatalf("want the leftover cancel error reported, got %v", reported)
 	}
 }

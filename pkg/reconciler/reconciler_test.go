@@ -537,3 +537,17 @@ func TestReconcileReplaysOldTradesOfAnUnresolvedOrder(t *testing.T) {
 		t.Fatalf("expected the old fill of an unresolved order replayed, got %+v", repository.fills)
 	}
 }
+
+func TestPassWithAFailingOrderStillCountsAsSuccess(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
+	reconciler, _ := New(repository, &fakeCLOB{err: errors.New("network failure")}, nil, "", time.Now, time.Second)
+	var reported error
+	reconciler.SetErrorHandler(func(err error) { reported = err })
+	reconciler.pass(context.Background())
+	if reported == nil {
+		t.Fatal("expected the order error to be reported")
+	}
+	if reconciler.LastSuccess().IsZero() {
+		t.Fatal("a pass that reached every order must stamp its success")
+	}
+}

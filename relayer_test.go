@@ -3,6 +3,7 @@ package clobclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,5 +72,31 @@ func TestRelayerHostCheckedOnUse(t *testing.T) {
 	}
 	if _, err := c.RelayerTransactionStatus(context.Background(), "x"); err == nil || !strings.Contains(err.Error(), "invalid relayer host") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestRelayerSubmitOutcome(t *testing.T) {
+	const key = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	for _, tc := range []struct {
+		status  int
+		unknown bool
+	}{{http.StatusBadRequest, false}, {http.StatusUnauthorized, false}, {http.StatusRequestTimeout, true}, {http.StatusBadGateway, true}} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/submit" {
+				http.Error(w, `{"error":"no"}`, tc.status)
+				return
+			}
+			w.Write([]byte(`{"address":"0x1","nonce":"7"}`))
+		}))
+		c, err := New(Config{PrivateKey: key, MakerAddress: "0x3333333333333333333333333333333333333333", SignatureType: SignatureTypePoly1271,
+			Relayer: &RelayerCredentials{APIKey: "rk"}, RelayerHost: srv.URL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.ExecuteWalletBatch(context.Background(), []WalletCall{{Target: PUSDAddress, Value: "0", Data: "0x1234"}}, "test", time.Now().Add(time.Minute))
+		srv.Close()
+		if err == nil || errors.Is(err, ErrSubmitOutcomeUnknown) != tc.unknown {
+			t.Errorf("HTTP %d: want unknown=%v, got %v", tc.status, tc.unknown, err)
+		}
 	}
 }

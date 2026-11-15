@@ -202,9 +202,10 @@ func (m *metrics) observeSweep(s settlement.Sweep, at time.Time) {
 	// A pass that reached every lane is a success for health even if some
 	// lanes errored: one lane that keeps failing shows on
 	// executiond_errors_total and the "partial" outcome, and must not mark
-	// a sweeper that settles every other lane as stale.
+	// a sweeper that settles every other lane as stale. A pass where every
+	// lane errored settled nothing, so it is a failure.
 	switch {
-	case s.Aborted:
+	case s.Aborted, s.Checked > 0 && s.Errored == s.Checked:
 		m.sweeps.WithLabelValues("failed").Inc()
 		return
 	case s.Failed:

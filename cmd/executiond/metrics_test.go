@@ -90,3 +90,15 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 
 // fakeEquityStore satisfies store.EquityStore; observeGuard never reads it.
 type fakeEquityStore struct{ store.EquityStore }
+
+func TestSweepWhereEveryLaneErroredIsNotASuccess(t *testing.T) {
+	m := newMetrics()
+	m.observeSweep(settlement.Sweep{Checked: 3, Errored: 3, Failed: true}, time.Unix(100, 0))
+	if got := m.lastSuccess.get("sweep"); !got.IsZero() {
+		t.Fatalf("all lanes errored, want no success, got %v", got)
+	}
+	m.observeSweep(settlement.Sweep{Checked: 3, Errored: 1, Failed: true}, time.Unix(200, 0))
+	if got := m.lastSuccess.get("sweep"); !got.Equal(time.Unix(200, 0)) {
+		t.Fatalf("a partial pass is a success, got %v", got)
+	}
+}

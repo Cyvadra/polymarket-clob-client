@@ -100,6 +100,28 @@ func TestObserverSkipsSuspendAlreadyStoredBeforeRestart(t *testing.T) {
 	}
 }
 
+func TestObserverRecordsResumeThatHappenedAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	history := &fakeHistory{events: []store.RiskEvent{{Kind: store.RiskSuspend, Subject: "wallet"}}}
+	equities := &indexStore{}
+	guard, err := equity.NewDrawdownGuard(equities, time.Unix(0, 0), equity.FractionLimit(0.2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each run starts a fresh observer, as a restart does.
+	for _, index := range []string{"0.95", "0.7"} {
+		obs := newObserver(newMetrics(), history, func() time.Time { return time.Unix(200, 0) })
+		equities.index = index
+		if _, err := guard.Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		obs.guard(ctx, guard)
+	}
+	if len(history.events) != 3 || history.events[1].Kind != store.RiskResume || history.events[2].Kind != store.RiskSuspend {
+		t.Fatalf("want the resume and the new suspend recorded, got %+v", history.events)
+	}
+}
+
 func TestObserverRecordsDeferralOnlyWhenHeldChanges(t *testing.T) {
 	ctx := context.Background()
 	history := &fakeHistory{}

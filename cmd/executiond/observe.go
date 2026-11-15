@@ -131,8 +131,7 @@ func (o *observer) sweep(ctx context.Context, s settlement.Sweep) {
 }
 
 // guard records a guard's reading, and a risk event when it starts or stops
-// holding back opens. The first reading of a guard that is not suspended is
-// not an event.
+// holding back opens.
 func (o *observer) guard(ctx context.Context, guard *equity.DrawdownGuard) {
 	o.observeGuard(guard)
 	suspended, reason := guard.Suspended()
@@ -141,12 +140,18 @@ func (o *observer) guard(ctx context.Context, guard *equity.DrawdownGuard) {
 	was, seen := o.suspended[label]
 	o.suspended[label] = suspended
 	o.mu.Unlock()
-	if suspended == was && (seen || !suspended) {
+	if seen && suspended == was {
 		return
 	}
-	// A guard already suspended before a restart is not a new suspension.
-	if !seen && suspended && o.lastGuardEvent(ctx, label) == store.RiskSuspend {
-		return
+	// The first reading after a restart is an event only when it differs
+	// from the last one stored: a guard still suspended is not a new
+	// suspension, and one that resumed while executiond was down needs its
+	// resume recorded, or a later suspension would look like a repeat.
+	if !seen {
+		last := o.lastGuardEvent(ctx, label)
+		if suspended && last == store.RiskSuspend || !suspended && last != store.RiskSuspend {
+			return
+		}
 	}
 	kind := store.RiskResume
 	if suspended {

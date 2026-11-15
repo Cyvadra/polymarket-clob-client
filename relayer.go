@@ -63,9 +63,9 @@ var (
 )
 
 // ErrSubmitOutcomeUnknown marks an ExecuteWalletBatch error from the submit
-// request itself: the relayer may have accepted the batch before the answer
-// was lost. Every other ExecuteWalletBatch error happens before anything is
-// sent.
+// request itself, other than a 4xx refusal: the relayer may have accepted the
+// batch before the answer was lost. Every other ExecuteWalletBatch error
+// either happens before anything is sent or is a definite refusal.
 var ErrSubmitOutcomeUnknown = errors.New("the relayer may have accepted the batch")
 
 // CheckRelayer reports whether the client can submit wallet batches: a deposit
@@ -123,6 +123,12 @@ func (c *Client) ExecuteWalletBatch(ctx context.Context, calls []WalletCall, met
 	// No retry: a resend after a lost answer could not double-spend, since the
 	// nonce is spent, but it would report a confusing failure.
 	if err := relayer.Do(ctx, transport.Request{Method: "POST", Path: "/submit", Body: body, Headers: headers, NoRetry: true}, &out); err != nil {
+		// A 4xx answer is a definite refusal; only a lost answer, a timeout
+		// or a server error leaves the outcome open.
+		var httpErr *transport.HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 && httpErr.StatusCode != http.StatusRequestTimeout {
+			return nil, fmt.Errorf("submit wallet batch: relayer refused it: %w", err)
+		}
 		return nil, fmt.Errorf("submit wallet batch: %w: %w", ErrSubmitOutcomeUnknown, err)
 	}
 	tx := out.transaction("")
