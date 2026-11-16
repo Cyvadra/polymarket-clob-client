@@ -14,6 +14,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -34,7 +35,7 @@ func TestMetricsServeEveryHookSeries(t *testing.T) {
 
 	m.observeOrderHTTP(transport.Timing{Method: "POST", Path: "/orders", FirstByte: 90 * time.Millisecond, Total: 100 * time.Millisecond})
 	m.observeOrderHTTP(transport.Timing{Method: "DELETE", Path: "/orders", Reused: true, Total: time.Second, Err: &clobclient.APIError{StatusCode: 503}})
-	m.observePrePost(protocol.ExecutionIntent{Kind: protocol.IntentOpen, TimeInForce: protocol.TimeInForceGTC, PostOnly: true}, 3*time.Millisecond)
+	m.observePrePost(protocol.ExecutionIntent{Kind: protocol.IntentOpen, TimeInForce: protocol.TimeInForceGTC, PostOnly: true}, 3*time.Millisecond, executor.PrePostStages{Sign: time.Millisecond})
 	m.observeCancel(3, 70*time.Millisecond, nil)
 	m.observeCancel(1, 500*time.Millisecond, &clobclient.CancelRefusedError{Reason: "matched"})
 	m.observePass("deadline", 1200*time.Millisecond, true)

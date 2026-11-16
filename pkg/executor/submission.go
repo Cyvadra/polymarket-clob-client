@@ -80,7 +80,9 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 			return err
 		}
 	}
+	sizeStart := time.Now()
 	release, err := e.sizeEntry(ctx, req, &intent)
+	stage(ctx, sizeStart, stageSize)
 	if err != nil {
 		e.publishOpenRejection(intent, err)
 		return err
@@ -123,7 +125,10 @@ func (e *Executor) Execute(ctx context.Context, intent protocol.ExecutionIntent)
 // without nesting a second lock transaction on a second pool connection.
 func (e *Executor) persistAndSubmit(ctx context.Context, intent protocol.ExecutionIntent) error {
 	createdAt := e.now().UTC()
-	if _, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, createdAt)); err != nil {
+	insertStart := time.Now()
+	_, err := e.store.InsertIntent(ctx, mapping.IntentRecord(intent, createdAt))
+	stage(ctx, insertStart, stageInsert)
+	if err != nil {
 		return fmt.Errorf("persist intent: %w", err)
 	}
 	// The order is watched once live, its complete_within_ms counted from
@@ -190,7 +195,9 @@ func (e *Executor) prepareAndSubmit(ctx context.Context, intent protocol.Executi
 	if intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit {
 		return e.placeLadder(ctx, intent)
 	}
+	planStart := time.Now()
 	child, err := e.planInitialChild(ctx, intent)
+	stage(ctx, planStart, stagePlan)
 	if err != nil {
 		return err
 	}
@@ -225,6 +232,7 @@ func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.Execu
 		return err
 	}
 	now := e.now().UTC()
+	persistStart := time.Now()
 	// Persisting and marking the order SUBMITTING commit together: the row
 	// still exists before the exchange sees the order, with one fewer
 	// database round trip on the way there.
@@ -234,6 +242,7 @@ func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.Execu
 		OrderType: store.TimeInForce(child.TimeInForce), PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
 		MatchedShares: "0", CreatedAt: now, UpdatedAt: now,
 	}, "submit requested")
+	stage(ctx, persistStart, stagePersist)
 	if err != nil {
 		return fmt.Errorf("persist signed order: %w", err)
 	}
@@ -252,6 +261,7 @@ type signedChild struct {
 // signChild signs one child. A new signature has a new salt, hash and exchange
 // order ID, so signing again is how a retry avoids reposting a rejected hash.
 func (e *Executor) signChild(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild) (signedChild, error) {
+	defer stage(ctx, time.Now(), stageSign)
 	order, err := userOrder(intent, child)
 	if err != nil {
 		return signedChild{}, err
@@ -271,6 +281,7 @@ func (e *Executor) signChild(ctx context.Context, intent protocol.ExecutionInten
 // reserveChild locks the child's exposure, tolerating a reservation this same
 // intent already owns from an interrupted attempt.
 func (e *Executor) reserveChild(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild, reservationID string) error {
+	defer stage(ctx, time.Now(), stageReserve)
 	err := e.store.Reserve(ctx, reservationRecord(intent, child, reservationID, e.now().UTC()))
 	switch {
 	case err == nil:
@@ -407,7 +418,9 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 // sendOrder posts an order already marked SUBMITTING and records what the
 // exchange answered.
 func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, updated store.SignedOrderRecord) error {
+	publishStart := time.Now()
 	e.publishTransition(updated, intent, "submit requested")
+	stage(ctx, publishStart, stagePublish)
 	// Register the POST so a CANCEL_OPEN arriving before its answer can fire
 	// cancels at it; once the answer is recorded, honour such a cancel.
 	post := e.inflight.start(signed.OrderID)
@@ -424,8 +437,8 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 	// hook's logging never delays the order. Deferred after the cancel
 	// follow-up so that runs after the hook, not before it.
 	if received, ok := ctx.Value(receivedAtKey{}).(time.Time); ok && e.onSubmit != nil {
-		prePost := time.Since(received)
-		defer e.onSubmit(intent, prePost)
+		prePost, stages := time.Since(received), stagesOf(ctx)
+		defer e.onSubmit(intent, prePost, stages)
 	}
 	response, submitErr := e.submit(ctx, signed, child)
 	if submitErr != nil {

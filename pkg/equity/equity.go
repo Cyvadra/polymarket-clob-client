@@ -67,6 +67,14 @@ type Tracker struct {
 	mu     sync.Mutex
 	cash   float64
 	cashAt time.Time
+	// gen counts invalidations, so a read that was in flight when a fill
+	// invalidated the cache is not stored as though it followed the fill.
+	gen uint64
+	// reading serializes exchange reads, so callers that find the cache
+	// stale share one round trip without holding mu across it.
+	reading sync.Mutex
+	// wake asks RunCashRefresh to read now, after an invalidation.
+	wake chan struct{}
 }
 
 func New(balances BalanceReader, positions store.PositionStore, quotes QuoteSource, now func() time.Time) (*Tracker, error) {
@@ -76,7 +84,7 @@ func New(balances BalanceReader, positions store.PositionStore, quotes QuoteSour
 	if now == nil {
 		now = time.Now
 	}
-	return &Tracker{balances: balances, positions: positions, quotes: quotes, now: now, cashTTL: DefaultCashTTL}, nil
+	return &Tracker{balances: balances, positions: positions, quotes: quotes, now: now, cashTTL: DefaultCashTTL, wake: make(chan struct{}, 1)}, nil
 }
 
 // SetCashTTL sets how long a balance read is reused; 0 reads on every call.
@@ -94,8 +102,44 @@ func (t *Tracker) SetMaxQuoteAge(age time.Duration) {
 // Invalidate drops the cached balance so the next read goes to the exchange.
 func (t *Tracker) Invalidate() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.cashAt = time.Time{}
+	t.gen++
+	t.mu.Unlock()
+	select {
+	case t.wake <- struct{}{}:
+	default:
+	}
+}
+
+// RunCashRefresh keeps the balance fresh off the order path until ctx ends:
+// it reads again at half the TTL, so a cached value never expires under an
+// entry, and at once after an invalidation, so the read that follows a fill
+// is usually done before the next entry sizes. Entries still read the
+// exchange themselves when this has not caught up, so the cache is never
+// trusted past its TTL or across a fill. onErr, if set, sees failed reads.
+func (t *Tracker) RunCashRefresh(ctx context.Context, onErr func(error)) {
+	t.mu.Lock()
+	ttl := t.cashTTL
+	t.mu.Unlock()
+	if ttl <= 0 {
+		return
+	}
+	ticker := time.NewTicker(ttl / 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-t.wake:
+		}
+		readCtx, cancel := context.WithTimeout(ctx, ttl)
+		_, _, err := t.read(readCtx, ttl/2)
+		cancel()
+		if err != nil && ctx.Err() == nil && onErr != nil {
+			onErr(err)
+		}
+	}
 }
 
 // Cash returns the wallet's USDC balance in dollars and when it was read.
@@ -103,21 +147,55 @@ func (t *Tracker) Invalidate() {
 // as cash until it fills.
 func (t *Tracker) Cash(ctx context.Context) (float64, time.Time, error) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.now()
-	if !t.cashAt.IsZero() && now.Sub(t.cashAt) < t.cashTTL {
-		return t.cash, t.cashAt, nil
+	ttl := t.cashTTL
+	if cash, at, ok := t.freshLocked(ttl); ok {
+		t.mu.Unlock()
+		return cash, at, nil
 	}
-	balance, err := t.balances.BalanceAllowance(ctx, "COLLATERAL", "")
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("read collateral balance: %w", err)
+	t.mu.Unlock()
+	return t.read(ctx, ttl)
+}
+
+// freshLocked returns the cached balance if it is younger than maxAge. t.mu
+// must be held.
+func (t *Tracker) freshLocked(maxAge time.Duration) (float64, time.Time, bool) {
+	if !t.cashAt.IsZero() && t.now().Sub(t.cashAt) < maxAge {
+		return t.cash, t.cashAt, true
 	}
-	cash, err := decimal.FromBaseUnits(balance.Balance)
-	if err != nil {
-		return 0, time.Time{}, fmt.Errorf("collateral balance: %w", err)
+	return 0, time.Time{}, false
+}
+
+// read fetches the balance from the exchange unless one younger than maxAge
+// is cached by the time it gets its turn. A read overtaken by an
+// invalidation is done again, since it may predate the fill.
+func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time.Time, error) {
+	t.reading.Lock()
+	defer t.reading.Unlock()
+	for attempt := 0; ; attempt++ {
+		t.mu.Lock()
+		if cash, at, ok := t.freshLocked(maxAge); ok {
+			t.mu.Unlock()
+			return cash, at, nil
+		}
+		gen := t.gen
+		t.mu.Unlock()
+		balance, err := t.balances.BalanceAllowance(ctx, "COLLATERAL", "")
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("read collateral balance: %w", err)
+		}
+		cash, err := decimal.FromBaseUnits(balance.Balance)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("collateral balance: %w", err)
+		}
+		now := t.now()
+		t.mu.Lock()
+		if t.gen == gen || attempt >= 2 {
+			t.cash, t.cashAt = cash, now
+			t.mu.Unlock()
+			return cash, now, nil
+		}
+		t.mu.Unlock()
 	}
-	t.cash, t.cashAt = cash, now
-	return cash, now, nil
 }
 
 // Snapshot values the wallet now. It fails rather than guess when the cash

@@ -18,12 +18,13 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/settlement"
 )
 
 // latencyBuckets span a warm keep-alive round trip (a few ms) to a stalled
 // cancel (seconds): the cancel p90 was 533ms and its max 1.4s on 2026-11-09.
-var latencyBuckets = []float64{.0025, .005, .01, .025, .05, .075, .1, .15, .2, .3, .5, .75, 1, 1.5, 2.5, 5}
+var latencyBuckets = []float64{.001, .002, .003, .005, .0075, .01, .015, .025, .05, .075, .1, .15, .2, .3, .5, .75, 1, 1.5, 2.5, 5}
 
 // metrics is what executiond exposes on /metrics. Every series is fed by a
 // hook the client or executor already calls, alongside the log lines those
@@ -35,6 +36,7 @@ type metrics struct {
 	orderTTFB     *prometheus.HistogramVec
 	orderColdConn *prometheus.CounterVec // requests that paid for a new connection
 	prePost       *prometheus.HistogramVec
+	prePostStage  *prometheus.HistogramVec // pre-post latency by stage
 	cancel        *prometheus.HistogramVec // exchange cancel calls, single or batch
 	cancelOrders  prometheus.Histogram     // orders per cancel call
 	pass          *prometheus.HistogramVec
@@ -61,7 +63,7 @@ type metrics struct {
 var errorComponents = []string{
 	"nats_handler", "position_publish", "account_stream", "fills", "order_results", "lifecycle",
 	"reconcile", "sweep", "refresh_sizing", "cash_flow", "equity_record", "drawdown_refresh",
-	"warm_fees", "warm_metadata", "metrics_server", "history",
+	"warm_fees", "warm_metadata", "metrics_server", "history", "cash_refresh",
 }
 
 func newMetrics() *metrics {
@@ -79,6 +81,9 @@ func newMetrics() *metrics {
 		prePost: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "executiond_order_prepost_seconds", Help: "Request arrival to order POST: sizing, locks, persistence and signing.", Buckets: latencyBuckets,
 		}, []string{"kind", "tif", "post_only"}),
+		prePostStage: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "executiond_order_prepost_stage_seconds", Help: "Pre-post latency by stage; stages an order skipped are not observed.", Buckets: latencyBuckets,
+		}, []string{"stage"}),
 		cancel: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "executiond_cancel_seconds", Help: "Exchange cancel calls, from send to answer.", Buckets: latencyBuckets,
 		}, []string{"batch", "outcome"}),
@@ -134,7 +139,7 @@ func newMetrics() *metrics {
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		m.orderHTTP, m.orderTTFB, m.orderColdConn, m.prePost, m.cancel, m.cancelOrders, m.pass, m.passOverruns, m.keepWarm, m.keepWarmFails,
+		m.orderHTTP, m.orderTTFB, m.orderColdConn, m.prePost, m.prePostStage, m.cancel, m.cancelOrders, m.pass, m.passOverruns, m.keepWarm, m.keepWarmFails,
 		m.quoteLevels, m.quoteFill, m.errors,
 		m.lastSuccess, m.equity, m.sizingBase, m.drawdown, m.drawdownLimit, m.suspended, m.sweepLanes, m.sweeps,
 	)
@@ -153,8 +158,16 @@ func (m *metrics) observeOrderHTTP(t transport.Timing) {
 	}
 }
 
-func (m *metrics) observePrePost(intent protocol.ExecutionIntent, prePost time.Duration) {
+func (m *metrics) observePrePost(intent protocol.ExecutionIntent, prePost time.Duration, s executor.PrePostStages) {
 	m.prePost.WithLabelValues(string(intent.Kind), string(intent.TimeInForce), strconv.FormatBool(intent.PostOnly)).Observe(prePost.Seconds())
+	for _, st := range []struct {
+		name string
+		took time.Duration
+	}{{"size", s.Size}, {"insert", s.Insert}, {"plan", s.Plan}, {"reserve", s.Reserve}, {"sign", s.Sign}, {"persist", s.Persist}, {"publish", s.Publish}} {
+		if st.took > 0 {
+			m.prePostStage.WithLabelValues(st.name).Observe(st.took.Seconds())
+		}
+	}
 }
 
 func (m *metrics) observeCancel(orders int, took time.Duration, err error) {

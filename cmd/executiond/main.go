@@ -169,9 +169,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	execution.SetSubmitLatencyHook(func(intent protocol.ExecutionIntent, prePost time.Duration) {
-		logPrePost(intent, prePost)
-		stats.observePrePost(intent, prePost)
+	execution.SetSubmitLatencyHook(func(intent protocol.ExecutionIntent, prePost time.Duration, stages executor.PrePostStages) {
+		logPrePost(intent, prePost, stages)
+		stats.observePrePost(intent, prePost, stages)
 	})
 	execution.SetCancelLatencyHook(stats.observeCancel)
 	execution.SetPassLatencyHook(stats.observePass)
@@ -245,6 +245,12 @@ func run() error {
 		return err
 	}
 	wallet.SetCashTTL(cfg.BalanceCacheTTL)
+	// Keep the balance read off the order path: a stale cache otherwise
+	// costs a sized entry a round trip to the exchange before its POST.
+	go wallet.RunCashRefresh(ctx, func(err error) {
+		log.Printf("refresh cash balance: %v", err)
+		stats.countError("cash_refresh")
+	})
 	wallet.SetMaxQuoteAge(cfg.EquityMaxQuoteAge)
 	resolver, err := settlement.NewResolver(clob, clob, time.Now)
 	if err != nil {

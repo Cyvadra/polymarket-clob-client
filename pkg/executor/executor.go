@@ -80,7 +80,7 @@ type Executor struct {
 	multipliers map[string]string
 	// onSubmit sees how long each order spent between its request arriving
 	// and its POST starting: sizing, locking, persistence and signing.
-	onSubmit func(intent protocol.ExecutionIntent, prePost time.Duration)
+	onSubmit func(intent protocol.ExecutionIntent, prePost time.Duration, stages PrePostStages)
 	// onCancel sees each exchange cancel call: how many orders it carried,
 	// how long it took and how it ended (see SetCancelLatencyHook).
 	onCancel func(orders int, took time.Duration, err error)
@@ -318,8 +318,9 @@ func (e *Executor) Close(context.Context) error {
 }
 
 // SetSubmitLatencyHook reports, per order, the time from the request arriving
-// to the POST starting. Set it before the executor handles requests.
-func (e *Executor) SetSubmitLatencyHook(hook func(intent protocol.ExecutionIntent, prePost time.Duration)) {
+// to the POST starting, split by stage. Set it before the executor handles
+// requests.
+func (e *Executor) SetSubmitLatencyHook(hook func(intent protocol.ExecutionIntent, prePost time.Duration, stages PrePostStages)) {
 	e.onSubmit = hook
 }
 
@@ -346,9 +347,9 @@ type intentCreatedAtKey struct{}
 // an open that is sized before Execute is timed from its true start.
 func withReceivedAt(ctx context.Context) context.Context {
 	if _, ok := ctx.Value(receivedAtKey{}).(time.Time); ok {
-		return ctx
+		return withStages(ctx)
 	}
-	return context.WithValue(ctx, receivedAtKey{}, time.Now())
+	return withStages(context.WithValue(ctx, receivedAtKey{}, time.Now()))
 }
 
 func (e *Executor) SetErrorHandler(handler func(error)) {

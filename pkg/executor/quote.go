@@ -344,7 +344,7 @@ func (e *Executor) drainQuote(ctx context.Context, lane *quoteLane) {
 			return
 		}
 		lane.mu.Unlock()
-		applyCtx := context.WithValue(ctx, receivedAtKey{}, next.receivedAt)
+		applyCtx := context.WithValue(resetStages(ctx), receivedAtKey{}, next.receivedAt)
 		if err := e.applyQuote(applyCtx, lane, next.req, next.want); err != nil {
 			e.reportError(fmt.Errorf("quote %s seq %d for %s: %w", next.req.RequestID, next.req.Seq, next.req.UniqueTag, err))
 		}
@@ -843,7 +843,7 @@ func (e *Executor) repostQuoteLevels(ctx context.Context, lane *quoteLane, inten
 		member := members[i]
 		wg.Go(func() {
 			defer member.leave()
-			ctx := context.WithValue(context.WithValue(ctx, receivedAtKey{}, time.Now()), placeMemberKey{}, member)
+			ctx := context.WithValue(context.WithValue(resetStages(ctx), receivedAtKey{}, time.Now()), placeMemberKey{}, member)
 			next, result, err := e.repostLevel(ctx, intent, level.order)
 			results[i] = outcome{level, next, result, err}
 		})

@@ -4,12 +4,14 @@ import (
 	"context"
 	"log"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/internal/transport"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
 )
 
 // logOrderTiming prints the network phases of one order submission. A
@@ -28,10 +30,15 @@ func logOrderTiming(t transport.Timing) {
 // an order's latency into ours and the network's. tif and post_only split the
 // http line's ttfb by whether the exchange's taker delay (250ms on crypto
 // up/down markets) could hold the order before it answers.
-func logPrePost(intent protocol.ExecutionIntent, prePost time.Duration) {
-	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s",
-		intent.Kind, intent.Side, intent.Strategy, intent.IntentID, intent.TimeInForce, intent.PostOnly, ms(prePost))
+// The stage figures are plain milliseconds so the line is easy to aggregate.
+func logPrePost(intent protocol.ExecutionIntent, prePost time.Duration, s executor.PrePostStages) {
+	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s size=%s insert=%s plan=%s reserve=%s sign=%s persist=%s publish=%s",
+		intent.Kind, intent.Side, intent.Strategy, intent.IntentID, intent.TimeInForce, intent.PostOnly, ms(prePost),
+		plainMS(s.Size), plainMS(s.Insert), plainMS(s.Plan), plainMS(s.Reserve), plainMS(s.Sign), plainMS(s.Persist), plainMS(s.Publish))
 }
+
+// plainMS formats d as milliseconds with two decimals and no unit.
+func plainMS(d time.Duration) string { return strconv.FormatFloat(d.Seconds()*1000, 'f', 2, 64) }
 
 // warmExchangeConnections opens the order and read pools before any intent
 // is subscribed, so the first signal already rides a warm connection, then

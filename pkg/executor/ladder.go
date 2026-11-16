@@ -184,7 +184,9 @@ func (e *Executor) placeLadder(ctx context.Context, intent protocol.ExecutionInt
 	if err != nil {
 		return err
 	}
+	planStart := time.Now()
 	children, err := e.planLadder(ctx, intent, spec)
+	stage(ctx, planStart, stagePlan)
 	if err != nil {
 		return err
 	}
@@ -320,7 +322,7 @@ func (e *Executor) postLevels(stop, ctx context.Context, intent protocol.Executi
 			// A level that fails before its post leaves the batch, so the
 			// others are not held waiting for it.
 			defer member.leave()
-			err := e.placeReservedChild(context.WithValue(ctx, placeMemberKey{}, member), intent, child)
+			err := e.placeReservedChild(context.WithValue(forkStages(ctx), placeMemberKey{}, member), intent, child)
 			var wait *parkedError
 			var unresolved unresolvedSubmission
 			mu.Lock()
@@ -439,7 +441,7 @@ func (e *Executor) repostParked(stop, ctx context.Context, intent protocol.Execu
 			defer member.leave()
 			// Each repost is timed from now, not from the request, and
 			// goes out in one batch with the other parked levels.
-			ctx := context.WithValue(context.WithValue(ctx, receivedAtKey{}, time.Now()), placeMemberKey{}, member)
+			ctx := context.WithValue(context.WithValue(resetStages(ctx), receivedAtKey{}, time.Now()), placeMemberKey{}, member)
 			next, outcome, err := e.repostLevel(ctx, intent, order)
 			results <- result{sequence, next, outcome, err}
 		})
