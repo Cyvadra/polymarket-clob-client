@@ -192,7 +192,8 @@ func (e *Executor) fireInflightCancel(ctx context.Context, policy protocol.Execu
 // inflightCancelInterval, until the exchange accepts or the cancel timeout
 // passes. It serves orders whose POST outcome is unknown: a refusal may only
 // mean the exchange does not have the order yet, so none ends the attempt.
-func (e *Executor) cancelUntilAccepted(ctx context.Context, policy protocol.ExecutionPolicy, orderID string) {
+// It reports whether the exchange accepted the cancel.
+func (e *Executor) cancelUntilAccepted(ctx context.Context, policy protocol.ExecutionPolicy, orderID string) bool {
 	ctx, cancel := context.WithTimeout(ctx, cancelTimeout(policy))
 	defer cancel()
 	ticker := time.NewTicker(inflightCancelInterval)
@@ -206,7 +207,7 @@ func (e *Executor) cancelUntilAccepted(ctx context.Context, policy protocol.Exec
 				last = err.Error()
 			}
 		case result.Has(orderID):
-			return
+			return true
 		default:
 			if reason, refused := result.Refused(orderID); refused {
 				last = reason
@@ -217,7 +218,7 @@ func (e *Executor) cancelUntilAccepted(ctx context.Context, policy protocol.Exec
 			if last != "" {
 				e.reportError(fmt.Errorf("cancel of order %s not accepted within %s: %s", orderID, cancelTimeout(policy), last))
 			}
-			return
+			return false
 		case <-ticker.C:
 		}
 	}

@@ -63,7 +63,7 @@ type metrics struct {
 var errorComponents = []string{
 	"nats_handler", "position_publish", "account_stream", "fills", "order_results", "lifecycle",
 	"reconcile", "sweep", "refresh_sizing", "cash_flow", "equity_record", "drawdown_refresh",
-	"warm_fees", "warm_metadata", "metrics_server", "history", "cash_refresh",
+	"warm_fees", "warm_metadata", "metrics_server", "history", "cash_refresh", "orphan_order",
 }
 
 func newMetrics() *metrics {
@@ -163,7 +163,7 @@ func (m *metrics) observePrePost(intent protocol.ExecutionIntent, prePost time.D
 	for _, st := range []struct {
 		name string
 		took time.Duration
-	}{{"size", s.Size}, {"insert", s.Insert}, {"plan", s.Plan}, {"reserve", s.Reserve}, {"sign", s.Sign}, {"persist", s.Persist}, {"publish", s.Publish}} {
+	}{{"size", s.Size}, {"insert", s.Insert}, {"plan", s.Plan}, {"reserve", s.Reserve}, {"sign", s.Sign}, {"publish", s.Publish}, {"persist_wait", s.PersistWait}} {
 		if st.took > 0 {
 			m.prePostStage.WithLabelValues(st.name).Observe(st.took.Seconds())
 		}

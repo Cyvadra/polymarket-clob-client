@@ -491,7 +491,7 @@ func (e *Executor) repostLevel(ctx context.Context, intent protocol.ExecutionInt
 	case err != nil:
 		return order, repostLater, fmt.Errorf("re-sign parked order: %w", err)
 	}
-	err = e.sendOrder(ctx, intent, signed.order, child, submitting)
+	err = e.sendOrder(ctx, intent, signed.order, child, submitting, nil)
 	var wait *parkedError
 	switch {
 	case err == nil:

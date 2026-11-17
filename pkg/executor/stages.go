@@ -14,8 +14,10 @@ type PrePostStages struct {
 	Plan    time.Duration // market rules, drift check and planning
 	Reserve time.Duration // reserving exposure
 	Sign    time.Duration // signing, with its metadata lookups
-	Persist time.Duration // committing the signed order as SUBMITTING
 	Publish time.Duration // publishing the submit-requested transition
+	// PersistWait is not pre-post: the signed order commits alongside the
+	// POST, and this is how long the answer then waited for that commit.
+	PersistWait time.Duration
 }
 
 type stagesKey struct{}
@@ -59,10 +61,10 @@ func stagesOf(ctx context.Context) PrePostStages {
 	return PrePostStages{}
 }
 
-func stageSize(s *PrePostStages) *time.Duration    { return &s.Size }
-func stageInsert(s *PrePostStages) *time.Duration  { return &s.Insert }
-func stagePlan(s *PrePostStages) *time.Duration    { return &s.Plan }
-func stageReserve(s *PrePostStages) *time.Duration { return &s.Reserve }
-func stageSign(s *PrePostStages) *time.Duration    { return &s.Sign }
-func stagePersist(s *PrePostStages) *time.Duration { return &s.Persist }
-func stagePublish(s *PrePostStages) *time.Duration { return &s.Publish }
+func stageSize(s *PrePostStages) *time.Duration        { return &s.Size }
+func stageInsert(s *PrePostStages) *time.Duration      { return &s.Insert }
+func stagePlan(s *PrePostStages) *time.Duration        { return &s.Plan }
+func stageReserve(s *PrePostStages) *time.Duration     { return &s.Reserve }
+func stageSign(s *PrePostStages) *time.Duration        { return &s.Sign }
+func stagePersistWait(s *PrePostStages) *time.Duration { return &s.PersistWait }
+func stagePublish(s *PrePostStages) *time.Duration     { return &s.Publish }

@@ -214,7 +214,15 @@ func run() error {
 	fills.SetErrorHandler(stats.errorHandler("fills", "account fill error"))
 	orders.SetErrorHandler(stats.errorHandler("order_results", "account order result error"))
 	orders.SetPriceWait(cfg.ResultPriceWait)
-	execution.SetErrorHandler(stats.errorHandler("lifecycle", "execution lifecycle error"))
+	lifecycleError := stats.errorHandler("lifecycle", "execution lifecycle error")
+	execution.SetErrorHandler(func(err error) {
+		// A posted order with no stored row is invisible to every observer;
+		// it gets its own counter so an alert can find it.
+		if errors.Is(err, executor.ErrOrphanOrder) {
+			stats.countError("orphan_order")
+		}
+		lifecycleError(err)
+	})
 	repair.SetErrorHandler(stats.errorHandler("reconcile", "reconciliation error"))
 	execution.SetEventPublisher(events)
 	orders.SetEventPublisher(events)

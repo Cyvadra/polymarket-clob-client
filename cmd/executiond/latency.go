@@ -32,9 +32,9 @@ func logOrderTiming(t transport.Timing) {
 // up/down markets) could hold the order before it answers.
 // The stage figures are plain milliseconds so the line is easy to aggregate.
 func logPrePost(intent protocol.ExecutionIntent, prePost time.Duration, s executor.PrePostStages) {
-	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s size=%s insert=%s plan=%s reserve=%s sign=%s persist=%s publish=%s",
+	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s size=%s insert=%s plan=%s reserve=%s sign=%s publish=%s persist_wait=%s",
 		intent.Kind, intent.Side, intent.Strategy, intent.IntentID, intent.TimeInForce, intent.PostOnly, ms(prePost),
-		plainMS(s.Size), plainMS(s.Insert), plainMS(s.Plan), plainMS(s.Reserve), plainMS(s.Sign), plainMS(s.Persist), plainMS(s.Publish))
+		plainMS(s.Size), plainMS(s.Insert), plainMS(s.Plan), plainMS(s.Reserve), plainMS(s.Sign), plainMS(s.Publish), plainMS(s.PersistWait))
 }
 
 // plainMS formats d as milliseconds with two decimals and no unit.

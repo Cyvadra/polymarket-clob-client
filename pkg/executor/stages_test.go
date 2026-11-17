@@ -30,11 +30,11 @@ func TestSubmitHookReportsStagesWithinTotal(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("hook calls = %d, want 1", calls)
 	}
-	sum := stages.Size + stages.Insert + stages.Plan + stages.Reserve + stages.Sign + stages.Persist + stages.Publish
+	sum := stages.Size + stages.Insert + stages.Plan + stages.Reserve + stages.Sign + stages.Publish
 	if sum > total {
 		t.Fatalf("stage sum %v exceeds total %v", sum, total)
 	}
-	for name, d := range map[string]time.Duration{"size": stages.Size, "insert": stages.Insert, "plan": stages.Plan, "reserve": stages.Reserve, "sign": stages.Sign, "persist": stages.Persist} {
+	for name, d := range map[string]time.Duration{"size": stages.Size, "insert": stages.Insert, "plan": stages.Plan, "reserve": stages.Reserve, "sign": stages.Sign, "persist_wait": stages.PersistWait} {
 		if d <= 0 {
 			t.Errorf("stage %s not recorded", name)
 		}

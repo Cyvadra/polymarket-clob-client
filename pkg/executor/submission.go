@@ -216,8 +216,15 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 }
 
 // placeReservedChild is placeChild once the child's exposure is reserved:
-// it signs, persists and submits, and releases the reservation if it fails
-// before the order is persisted.
+// it signs, then persists and submits at once, and releases the reservation
+// if it fails before the POST.
+//
+// The commit and the POST run side by side: the row's content does not depend
+// on the exchange's answer, and the commit is done long before the answer
+// lands. sendOrder waits for it before recording anything about that answer.
+// An account-stream event that beats the commit is dropped, as any event for
+// an unknown order is; the reconciler's trade replay applies a fill it
+// carried once the row exists.
 func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild) error {
 	reservationID := reservationID(intent.IntentID, child.Sequence)
 	releaseCashHold(ctx)
@@ -232,22 +239,93 @@ func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.Execu
 		return err
 	}
 	now := e.now().UTC()
-	persistStart := time.Now()
-	// Persisting and marking the order SUBMITTING commit together: the row
-	// still exists before the exchange sees the order, with one fewer
-	// database round trip on the way there.
-	submitting, err := e.store.PersistSubmittingOrder(ctx, store.SignedOrderRecord{
+	record := store.SignedOrderRecord{
 		IntentID: intent.IntentID, ChildSequence: child.Sequence, SignedPayload: signed.payload, SignedOrderHash: signed.hash,
 		Salt: signed.salt, ExchangeOrderID: signed.order.OrderID, RequestedShares: child.Shares, Price: child.Price,
 		OrderType: store.TimeInForce(child.TimeInForce), PostOnly: child.PostOnly, State: statemachine.StateSigned, Revision: 1,
 		MatchedShares: "0", CreatedAt: now, UpdatedAt: now,
-	}, "submit requested")
-	stage(ctx, persistStart, stagePersist)
-	if err != nil {
-		return fmt.Errorf("persist signed order: %w", err)
 	}
+	submitting, err := submittingRecord(record)
+	if err != nil {
+		return err
+	}
+	// Persisting and marking the order SUBMITTING commit together, in the
+	// background, on a context the request's cancellation cannot abandon.
+	done := make(chan persistResult, 1)
+	go func() {
+		stored, err := e.store.PersistSubmittingOrder(context.WithoutCancel(ctx), record, "submit requested")
+		done <- persistResult{stored, err}
+	}()
+	// From here a failure is the POST's or the commit's, which sendOrder
+	// settles, releasing the reservation only once no order can be live.
 	releaseOnFailure = false
-	return e.sendOrder(ctx, intent, signed.order, child, submitting)
+	return e.sendOrder(ctx, intent, signed.order, child, submitting, func() (store.SignedOrderRecord, error) {
+		return e.awaitPersist(ctx, done, record)
+	})
+}
+
+type persistResult struct {
+	order store.SignedOrderRecord
+	err   error
+}
+
+// submittingRecord is what PersistSubmittingOrder stores for a signed order,
+// built locally so the POST need not wait for the commit. The store's own
+// answer replaces it before any later transition.
+func submittingRecord(signed store.SignedOrderRecord) (store.SignedOrderRecord, error) {
+	transition, _, err := statemachine.Apply(signed.State, statemachine.EventSubmitStarted)
+	if err != nil {
+		return store.SignedOrderRecord{}, fmt.Errorf("plan submitting order: %w", err)
+	}
+	submitting := signed
+	submitting.State, submitting.Revision, submitting.MatchedShares = transition.To, signed.Revision+1, "0"
+	return submitting, nil
+}
+
+// awaitPersist waits for the background commit. A failed one is tried once
+// more; a duplicate on that retry means the first did land after all.
+func (e *Executor) awaitPersist(ctx context.Context, done <-chan persistResult, record store.SignedOrderRecord) (store.SignedOrderRecord, error) {
+	defer stage(ctx, time.Now(), stagePersistWait)
+	first := <-done
+	if first.err == nil {
+		return first.order, nil
+	}
+	retryCtx := context.WithoutCancel(ctx)
+	stored, err := e.store.PersistSubmittingOrder(retryCtx, record, "submit requested")
+	switch {
+	case err == nil:
+		return stored, nil
+	case errors.Is(err, store.ErrDuplicate):
+		if stored, loadErr := e.store.OrderByIntent(retryCtx, record.IntentID, record.ChildSequence); loadErr == nil {
+			return stored, nil
+		}
+	}
+	return store.SignedOrderRecord{}, fmt.Errorf("persist signed order: %w (retry: %v)", first.err, err)
+}
+
+// ErrOrphanOrder marks an order that was posted but whose row could not be
+// committed: no observer can see it, so it is cancelled by ID.
+var ErrOrphanOrder = errors.New("order posted without a stored row")
+
+// settleOrphan handles a POST whose order row never committed. A rejected
+// order never existed, so its reservation goes. Any other answer may have
+// left it live: it is cancelled by ID, and its reservation is released only
+// once the exchange accepts the cancel, so unseen exposure stays counted.
+func (e *Executor) settleOrphan(ctx context.Context, intent protocol.ExecutionIntent, orderID string, child plannedChild, submitErr, persistErr error) error {
+	reservationID := reservationID(intent.IntentID, child.Sequence)
+	ctx = context.WithoutCancel(ctx)
+	if submitErr != nil && isOrderRejected(submitErr) {
+		_ = e.store.Release(ctx, reservationID, "order rejected and never stored")
+		return fmt.Errorf("%w (order rejected: %v)", persistErr, submitErr)
+	}
+	err := fmt.Errorf("%w: order %s for intent %s: %w", ErrOrphanOrder, orderID, intent.IntentID, persistErr)
+	e.reportError(err)
+	if orderID != "" && e.cancelUntilAccepted(ctx, intent.Policy, orderID) {
+		_ = e.store.Release(ctx, reservationID, "unstored order canceled")
+	} else {
+		e.reportError(fmt.Errorf("%w: order %s may still be live; its reservation is kept", ErrOrphanOrder, orderID))
+	}
+	return err
 }
 
 // signedChild is a child order signed and ready to persist.
@@ -412,12 +490,16 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 	if err != nil {
 		return fmt.Errorf("mark submitting: %w", err)
 	}
-	return e.sendOrder(ctx, intent, signed, child, updated)
+	return e.sendOrder(ctx, intent, signed, child, updated, nil)
 }
 
 // sendOrder posts an order already marked SUBMITTING and records what the
 // exchange answered.
-func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, updated store.SignedOrderRecord) error {
+//
+// persisted, if set, waits for the order's commit, started alongside the
+// POST; updated is then the locally built row, and the stored one replaces it
+// before anything about the answer is recorded.
+func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, updated store.SignedOrderRecord, persisted func() (store.SignedOrderRecord, error)) error {
 	publishStart := time.Now()
 	e.publishTransition(updated, intent, "submit requested")
 	stage(ctx, publishStart, stagePublish)
@@ -437,10 +519,19 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 	// hook's logging never delays the order. Deferred after the cancel
 	// follow-up so that runs after the hook, not before it.
 	if received, ok := ctx.Value(receivedAtKey{}).(time.Time); ok && e.onSubmit != nil {
-		prePost, stages := time.Since(received), stagesOf(ctx)
-		defer e.onSubmit(intent, prePost, stages)
+		prePost := time.Since(received)
+		// Stages are read when the hook runs, so the commit wait after the
+		// POST is included; it is not part of prePost.
+		defer func() { e.onSubmit(intent, prePost, stagesOf(ctx)) }()
 	}
 	response, submitErr := e.submit(ctx, signed, child)
+	if persisted != nil {
+		stored, err := persisted()
+		if err != nil {
+			return e.settleOrphan(ctx, intent, signed.OrderID, child, submitErr, err)
+		}
+		updated = stored
+	}
 	if submitErr != nil {
 		if isOrderRejected(submitErr) {
 			return e.markSubmitRejected(ctx, updated, intent, submitErr)
