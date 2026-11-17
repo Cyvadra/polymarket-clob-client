@@ -34,6 +34,7 @@ type FillConsumer struct {
 	onFill  func()
 	onQuote QuoteFillHook
 	fees    FeeSchedules
+	pending *PendingOrders
 	// started is when the consumer was created. An out-of-band fill matched
 	// before it was already seen by an earlier run, since the reconciler
 	// replays recent trade history on every start.
@@ -85,7 +86,20 @@ func (c *FillConsumer) SetFeeSchedules(fees FeeSchedules) {
 
 // Consume stores a fill exactly once. The caller may safely retry a delivery
 // whose acknowledgement was lost because FillID is the durable idempotency key.
+// SetPendingOrders holds fills of orders whose row is still committing,
+// instead of dropping them as unknown.
+func (c *FillConsumer) SetPendingOrders(pending *PendingOrders) {
+	c.pending = pending
+}
+
 func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, error) {
+	return c.consume(ctx, fill, true)
+}
+
+// consume stores fill. holdable is false on a replay from PendingOrders, which
+// must not queue the fill again. A held fill reports false: it is applied
+// later, by the replay.
+func (c *FillConsumer) consume(ctx context.Context, fill AccountFill, holdable bool) (bool, error) {
 	if err := validateFill(fill); err != nil {
 		return false, err
 	}
@@ -93,6 +107,13 @@ func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, err
 		return false, fmt.Errorf("exchange order ID is required for an account fill")
 	}
 	order, err := c.store.OrderByExchangeID(ctx, fill.ExchangeOrderID)
+	if err == store.ErrNotFound && holdable && c.pending.Hold(fill.ExchangeOrderID, func(ctx context.Context) {
+		if _, err := c.consume(ctx, fill, false); err != nil && c.onError != nil {
+			c.onError(fmt.Errorf("replay held fill: %w", err))
+		}
+	}) {
+		return false, nil
+	}
 	if err == store.ErrNotFound {
 		// A fill for an order this executiond never signed means the wallet was
 		// traded outside the runtime, or a fill raced ahead of order

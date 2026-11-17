@@ -190,6 +190,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Orders are posted while their row commits; account events that beat
+	// the commit wait here and replay once it lands.
+	pendingOrders := accountfeed.NewPendingOrders(ctx, stats.errorHandler("account_stream", "pending order events"))
+	fills.SetPendingOrders(pendingOrders)
+	orders.SetPendingOrders(pendingOrders)
+	execution.SetPendingOrders(pendingOrders)
 	accountStream, err := accountfeed.NewUserStream(accountfeed.UserStreamConfig{Credentials: *credentials, ProxyURL: clob.ProxyURL()}, orders, fills)
 	if err != nil {
 		return err

@@ -12,6 +12,7 @@ import (
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/mapping"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
@@ -81,6 +82,9 @@ type Executor struct {
 	// onSubmit sees how long each order spent between its request arriving
 	// and its POST starting: sizing, locking, persistence and signing.
 	onSubmit func(intent protocol.ExecutionIntent, prePost time.Duration, stages PrePostStages)
+	// pending holds account events for orders posted before their row
+	// committed (SetPendingOrders).
+	pending *accountfeed.PendingOrders
 	// onCancel sees each exchange cancel call: how many orders it carried,
 	// how long it took and how it ended (see SetCancelLatencyHook).
 	onCancel func(orders int, took time.Duration, err error)
@@ -315,6 +319,13 @@ func (e *Executor) Close(context.Context) error {
 	e.ladders.closeAll()
 	e.quoteLanes.closeAll()
 	return nil
+}
+
+// SetPendingOrders shares the registry the account consumers hold early
+// events in: each order is expected before its POST and resolved once its
+// commit returns. Set it before the executor handles requests.
+func (e *Executor) SetPendingOrders(pending *accountfeed.PendingOrders) {
+	e.pending = pending
 }
 
 // SetSubmitLatencyHook reports, per order, the time from the request arriving

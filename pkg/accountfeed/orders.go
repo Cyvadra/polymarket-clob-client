@@ -32,6 +32,13 @@ type OrderConsumer struct {
 	priceWait  time.Duration
 	onError    func(error)
 	onQuote    QuoteFillHook
+	pending    *PendingOrders
+}
+
+// SetPendingOrders holds events for orders whose row is still committing,
+// instead of dropping them.
+func (c *OrderConsumer) SetPendingOrders(pending *PendingOrders) {
+	c.pending = pending
 }
 
 func NewOrderConsumer(repository store.AccountOrderStore, now func() time.Time) (*OrderConsumer, error) {
@@ -68,11 +75,26 @@ func (c *OrderConsumer) SetPriceWait(wait time.Duration) {
 }
 
 func (c *OrderConsumer) Consume(ctx context.Context, observation AccountOrderEvent) error {
+	return c.consume(ctx, observation, true)
+}
+
+// consume applies observation. holdable is false on a replay from
+// PendingOrders, which must not queue the event again.
+func (c *OrderConsumer) consume(ctx context.Context, observation AccountOrderEvent, holdable bool) error {
 	if err := validateOrderEvent(observation); err != nil {
 		return err
 	}
 	order, err := c.store.OrderByExchangeID(ctx, observation.ExchangeOrderID)
 	if errors.Is(err, store.ErrNotFound) {
+		// An order posted before its row committed: replay the event once
+		// the row exists. Anything else unknown is not ours to track.
+		if holdable {
+			c.pending.Hold(observation.ExchangeOrderID, func(ctx context.Context) {
+				if err := c.consume(ctx, observation, false); err != nil && c.onError != nil {
+					c.onError(fmt.Errorf("replay held order event: %w", err))
+				}
+			})
+		}
 		return nil
 	}
 	if err != nil {

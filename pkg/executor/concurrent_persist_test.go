@@ -9,6 +9,7 @@ import (
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/statemachine"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/store"
 )
@@ -224,4 +225,36 @@ func (s *dupOnRetryStore) PersistSubmittingOrder(ctx context.Context, record sto
 		return store.SignedOrderRecord{}, errors.New("connection reset")
 	}
 	return store.SignedOrderRecord{}, store.ErrDuplicate
+}
+
+func TestStreamEventBeforeCommitReplaysAfterIt(t *testing.T) {
+	exec, storer, client, _ := newConcurrentFixture(t, &clobclient.OrderResponse{Success: true, OrderID: "order-1"}, nil)
+	pending := accountfeed.NewPendingOrders(context.Background(), nil)
+	exec.SetPendingOrders(pending)
+	storer.release = make(chan struct{})
+	posted := make(chan struct{})
+	client.posted = posted
+	done := make(chan error, 1)
+	go func() { done <- exec.ExecuteOpen(context.Background(), openRequest()) }()
+	<-posted
+	// The stream reports the order while its row is still committing.
+	var orderID string
+	exec.inflight.mu.Lock()
+	for id := range exec.inflight.posts {
+		orderID = id
+	}
+	exec.inflight.mu.Unlock()
+	replayed := make(chan struct{})
+	if !pending.Hold(orderID, func(context.Context) { close(replayed) }) {
+		t.Fatalf("order %q not expected while its commit runs", orderID)
+	}
+	close(storer.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-replayed:
+	default:
+		t.Fatal("held event not replayed once the row committed")
+	}
 }

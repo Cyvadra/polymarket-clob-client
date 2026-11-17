@@ -251,6 +251,9 @@ func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.Execu
 	}
 	// Persisting and marking the order SUBMITTING commit together, in the
 	// background, on a context the request's cancellation cannot abandon.
+	// The exchange may report the order before the row exists: account
+	// events for it wait until sendOrder resolves it.
+	e.pending.Expect(signed.order.OrderID)
 	done := make(chan persistResult, 1)
 	go func() {
 		stored, err := e.store.PersistSubmittingOrder(context.WithoutCancel(ctx), record, "submit requested")
@@ -528,8 +531,13 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 	if persisted != nil {
 		stored, err := persisted()
 		if err != nil {
+			e.pending.Forget(signed.OrderID)
 			return e.settleOrphan(ctx, intent, signed.OrderID, child, submitErr, err)
 		}
+		// Apply what the stream said before the row existed, then the answer.
+		// A held event that moved the order on makes the transitions below
+		// conflict, which they handle as when the stream wins a race.
+		e.pending.Stored(signed.OrderID)
 		updated = stored
 	}
 	if submitErr != nil {
