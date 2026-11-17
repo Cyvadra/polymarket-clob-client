@@ -129,11 +129,43 @@ func TerminalResult(order store.SignedOrderRecord, intent store.OrderIntentRecor
 	if err != nil {
 		return protocol.ExecutionOpenResult{}, false
 	}
-	return protocol.ExecutionOpenResult{
+	result := protocol.ExecutionOpenResult{
 		RequestID: intent.RequestID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome,
 		Side: protocol.Side(intent.Side), Status: status, ReasonCode: reasonCode, Reason: reason,
 		FilledShares: filledShares, AveragePrice: resultPrice(averagePrice, filledShares), OccurredAt: occurredAt,
-	}, true
+	}
+	return PreserveOpenResult(result, intentPolicy(intent)), true
+}
+
+func intentPolicy(intent store.OrderIntentRecord) protocol.ExecutionPolicy {
+	var policy protocol.ExecutionPolicy
+	if len(intent.Policy) > 0 {
+		_ = json.Unmarshal(intent.Policy, &policy)
+	}
+	return policy
+}
+
+// PreserveOpenResult reports a SPLIT_PRESERVE open as the BUY the strategy
+// asked for. Its order sold the complement token off the inventory lane: the
+// shares it sold are the shares bought, at one minus the price sold. An open
+// the inventory cut short says so with INVENTORY_CAPPED. Any other result
+// passes through.
+func PreserveOpenResult(result protocol.ExecutionOpenResult, policy protocol.ExecutionPolicy) protocol.ExecutionOpenResult {
+	leg := policy.Preserve
+	if policy.Style != protocol.ExecutionStyleSplitPreserve || leg == nil {
+		return result
+	}
+	result.UniqueTag, result.TokenID, result.Outcome, result.Side = leg.UniqueTag, leg.TokenID, leg.Outcome, protocol.SideBuy
+	if result.AveragePrice > 0 {
+		result.AveragePrice = 1 - result.AveragePrice
+	}
+	if result.Status == protocol.ResultSucceeded && result.ReasonCode == "" && decimal.Compare(leg.Shares, leg.RequestedShares) < 0 {
+		result.ReasonCode = protocol.ReasonInventoryCapped
+		if result.Reason == "" {
+			result.Reason = fmt.Sprintf("inventory backed %s of the %s shares asked for", leg.Shares, leg.RequestedShares)
+		}
+	}
+	return result
 }
 
 // LadderChild is one child order of a multi-level intent with the

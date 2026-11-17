@@ -32,6 +32,12 @@ const (
 	// first fill that ends the quote (ExecutionQuoteResult).
 	SubjectStrategyExecutionQuote = "strategy.execution.quote"
 	SubjectExecutionQuoteResult   = "execution.quote.result"
+	// SubjectStrategyExecutionInventory carries a split_preserve lane's
+	// inventory requests (ExecutionInventoryRequest: SPLIT tops the paired
+	// inventory up to a target, MERGE returns it to pUSD), and
+	// SubjectExecutionInventoryResult each one's outcome.
+	SubjectStrategyExecutionInventory = "strategy.execution.inventory"
+	SubjectExecutionInventoryResult   = "execution.inventory.result"
 )
 
 type Side = clobclient.Side
@@ -70,7 +76,39 @@ const (
 	// post-only GTC buy levels follow ExecutionQuoteRequest. No request
 	// carries it: it is never accepted on strategy.execution.open.
 	ExecutionStyleQuote ExecutionStyle = "QUOTE"
+	// ExecutionStyleSplitPreserve opens a BUY of one outcome by selling the
+	// other outcome out of the lane's split inventory at 1 - limit_price. The
+	// request and its result read as an ordinary BUY of the requested token;
+	// see docs/protocol/nats-v1.md.
+	ExecutionStyleSplitPreserve ExecutionStyle = "SPLIT_PRESERVE"
 )
+
+// InventoryTagSuffix marks the lane that holds a strategy lane's split
+// inventory: unique_tag + InventoryTagSuffix.
+const InventoryTagSuffix = "|inv"
+
+// InventoryTag is the inventory lane of a strategy lane.
+func InventoryTag(uniqueTag string) string { return uniqueTag + InventoryTagSuffix }
+
+// IsInventoryTag reports whether a lane holds split inventory rather than a
+// strategy's position.
+func IsInventoryTag(uniqueTag string) bool {
+	return len(uniqueTag) > len(InventoryTagSuffix) && uniqueTag[len(uniqueTag)-len(InventoryTagSuffix):] == InventoryTagSuffix
+}
+
+// PreserveLeg is what executiond records on a SPLIT_PRESERVE intent, whose
+// stored token, side and lane are those of the complement SELL it places:
+// the BUY the strategy asked for, so fills and results map back to it. No
+// request may carry it.
+type PreserveLeg struct {
+	UniqueTag       string `json:"unique_tag"`
+	TokenID         string `json:"token_id"`
+	Outcome         string `json:"outcome"`
+	LimitPrice      string `json:"limit_price"`
+	SignalPrice     string `json:"signal_price,omitempty"`
+	RequestedShares string `json:"requested_shares"`
+	Shares          string `json:"shares"`
+}
 
 // ScalingModeFlat sizes every level of a multi-level intent at the full
 // target_usd. It is the only scaling mode.
@@ -98,6 +136,9 @@ type ExecutionPolicy struct {
 	SoftCloseAfterMillis       int64          `json:"soft_close_after_ms,omitempty"`
 	ForceCloseAfterMillis      int64          `json:"force_close_after_ms,omitempty"`
 	CancelReplaceTimeoutMillis int64          `json:"cancel_replace_timeout_ms,omitempty"`
+	// Preserve is set by executiond on a SPLIT_PRESERVE intent; a request
+	// carrying it is refused.
+	Preserve *PreserveLeg `json:"preserve,omitempty"`
 }
 
 type ExecutionIntent struct {
@@ -237,6 +278,66 @@ func PublishExecutionQuoteResult(publisher ExecutionEventPublisher, result Execu
 	return publisher.PublishJSON(SubjectExecutionQuoteResult, result)
 }
 
+type InventoryAction string
+
+const (
+	InventorySplit InventoryAction = "SPLIT"
+	InventoryMerge InventoryAction = "MERGE"
+)
+
+// ExecutionInventoryRequest manages the split inventory of a strategy lane
+// (unique_tag, condition_id). Shares are outcome-token shares, one per pUSD.
+//
+// SPLIT tops the lane's remaining inventory - the pairs still free to back a
+// SPLIT_PRESERVE open - up to TargetShares, splitting only the shortfall, so
+// a resent request splits nothing and a later one refills what entries used.
+// It never shrinks inventory. MERGE cancels the lane's resting preserves and
+// merges Shares pairs back into pUSD, all of them when Shares is empty; after
+// it the lane takes no further SPLIT.
+type ExecutionInventoryRequest struct {
+	SchemaVersion string          `json:"schema_version"`
+	RequestID     string          `json:"request_id,omitempty"`
+	UniqueTag     string          `json:"unique_tag"`
+	Strategy      string          `json:"strategy"`
+	MarketID      string          `json:"market_id,omitempty"`
+	ConditionID   string          `json:"condition_id"`
+	Action        InventoryAction `json:"action"`
+	TargetShares  string          `json:"target_shares,omitempty"`
+	Shares        string          `json:"shares,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	ExpiresAt     time.Time       `json:"expires_at,omitzero"`
+}
+
+// ExecutionInventoryResult reports one inventory request. Shares is how many
+// pairs it split or merged (0 for a SPLIT already at target) and
+// RemainingShares the lane's remaining inventory afterwards.
+type ExecutionInventoryResult struct {
+	SchemaVersion   string          `json:"schema_version"`
+	RequestID       string          `json:"request_id,omitempty"`
+	UniqueTag       string          `json:"unique_tag"`
+	Strategy        string          `json:"strategy,omitempty"`
+	WalletAddress   string          `json:"wallet_address,omitempty"`
+	SignerAddress   string          `json:"signer_address,omitempty"`
+	ConditionID     string          `json:"condition_id"`
+	Action          InventoryAction `json:"action"`
+	Status          ResultStatus    `json:"status"`
+	ReasonCode      string          `json:"reason_code,omitempty"`
+	Reason          string          `json:"reason,omitempty"`
+	Shares          float64         `json:"shares"`
+	RemainingShares float64         `json:"remaining_shares"`
+	TxHash          string          `json:"tx_hash,omitempty"`
+	OccurredAt      time.Time       `json:"occurred_at"`
+}
+
+func PublishExecutionInventoryResult(publisher ExecutionEventPublisher, result ExecutionInventoryResult) error {
+	if publisher == nil {
+		return nil
+	}
+	result.SchemaVersion = SchemaVersionV1
+	result.OccurredAt = result.OccurredAt.UTC()
+	return publisher.PublishJSON(SubjectExecutionInventoryResult, result)
+}
+
 type ExecutionCloseMode string
 
 const (
@@ -292,6 +393,21 @@ const (
 	// the strategy withdrew it, a force close superseded it, or the exchange
 	// cancelled it on its own.
 	ReasonCanceled = "CANCELED"
+	// ReasonInsufficientInventory fails a SPLIT_PRESERVE open that found no
+	// free inventory before its deadline.
+	ReasonInsufficientInventory = "INSUFFICIENT_INVENTORY"
+	// ReasonInventoryCapped marks a SPLIT_PRESERVE open, or a SPLIT, cut
+	// short by the inventory or the free cash. Its status is still SUCCEEDED
+	// when anything filled or split.
+	ReasonInventoryCapped = "INVENTORY_CAPPED"
+	// ReasonInventoryClosed refuses a SPLIT on a lane already merged, or on a
+	// market that has closed.
+	ReasonInventoryClosed = "INVENTORY_CLOSED"
+	// ReasonRelayerFailed fails an inventory request the relayer refused or
+	// failed. ReasonRelayerUnknown fails one whose submission outcome is
+	// unknown: it may still land, and executiond resolves it from the chain.
+	ReasonRelayerFailed  = "RELAYER_FAILED"
+	ReasonRelayerUnknown = "RELAYER_UNKNOWN"
 )
 
 type ResultStatus string

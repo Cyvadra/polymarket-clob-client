@@ -57,7 +57,8 @@ func (e *Executor) maintainCloses(ctx context.Context) error {
 	settled := e.settledLanes(positions)
 	for _, position := range positions {
 		lane := laneOf(position.ConditionID, position.TokenID, position.UniqueTag)
-		if !decimal.Positive(position.ActualShares) {
+		// Split inventory is never closed: its pairs are merged.
+		if !decimal.Positive(position.ActualShares) || protocol.IsInventoryTag(position.UniqueTag) {
 			continue
 		}
 		current, held := resting[lane]

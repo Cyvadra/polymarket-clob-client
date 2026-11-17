@@ -16,6 +16,11 @@ var (
 	ErrNotFound              = errors.New("record not found")
 	ErrActiveSellReservation = errors.New("active sell reservation already exists")
 	ErrExposureLimit         = errors.New("reservation exceeds the configured open exposure limit")
+	// ErrInventoryClosed refuses a split on a lane that has merged.
+	ErrInventoryClosed = errors.New("inventory lane has merged")
+	// ErrInsufficientInventory refuses a preserve reservation the lane's
+	// remaining inventory cannot back.
+	ErrInsufficientInventory = errors.New("not enough split inventory")
 )
 
 // Side is the store-local order side. It is deliberately independent of the
@@ -544,4 +549,105 @@ type RiskEvent struct {
 	Subject string
 	Reason  string
 	Details map[string]any
+}
+
+// CTFAction is a split or a merge of a binary condition's outcome tokens.
+type CTFAction string
+
+const (
+	CTFSplit CTFAction = "SPLIT"
+	CTFMerge CTFAction = "MERGE"
+)
+
+// CTFOpState is where a split or merge is on its way through the relayer.
+type CTFOpState string
+
+const (
+	CTFPending   CTFOpState = "PENDING"
+	CTFSubmitted CTFOpState = "SUBMITTED"
+	CTFConfirmed CTFOpState = "CONFIRMED"
+	CTFFailed    CTFOpState = "FAILED"
+	// CTFUnknown is a submission whose outcome is unknown: it may still land,
+	// so it counts as in flight until the chain says otherwise.
+	CTFUnknown CTFOpState = "UNKNOWN"
+)
+
+// Fill sources (fills.source).
+const (
+	FillSourceCLOB     = "CLOB"
+	FillSourceSplit    = "SPLIT"
+	FillSourceMerge    = "MERGE"
+	FillSourceTransfer = "TRANSFER"
+)
+
+// CTFOperationRecord is one split or merge. UniqueTag is the strategy lane;
+// the tokens are booked on its inventory lane, InventoryTag.
+type CTFOperationRecord struct {
+	OpID         string
+	RequestID    string
+	Strategy     string
+	UniqueTag    string
+	InventoryTag string
+	MarketID     string
+	ConditionID  string
+	Action       CTFAction
+	TargetShares string
+	Shares       string
+	Tokens       []string
+	Outcomes     []string
+	State        CTFOpState
+	RelayerTxID  string
+	TxHash       string
+	Error        string
+	// Baseline is each token's wallet balance in base units just before
+	// submission, and Deadline the signed batch's deadline (ArmCTFOperation).
+	Baseline  []string
+	Deadline  time.Time
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// InventoryLevel is the split inventory of one lane. Remaining is the pairs
+// free to back a new SPLIT_PRESERVE open: the smaller side held, less what
+// resting preserves have reserved. InFlight is the pairs of splits not yet
+// booked, an unknown submission included. Merged means the lane has merged
+// and takes no further split.
+type InventoryLevel struct {
+	Remaining string
+	// Reserved is the shares resting preserves hold across both tokens.
+	Reserved string
+	InFlight string
+	Merged   bool
+}
+
+// InventoryStore books split inventory. Every write takes the inventory
+// lane's lock, so a split sized from the level never counts the same gap
+// twice and a preserve never reserves a pair another one holds.
+type InventoryStore interface {
+	// BeginSplit records a split of the pairs that close the gap between the
+	// lane's remaining-plus-in-flight inventory and op.TargetShares, at most
+	// maxShares when it is set. It returns the recorded operation, or
+	// recorded=false when the lane is already at target.
+	// gap is the shortfall before the maxShares cap.
+	BeginSplit(ctx context.Context, op CTFOperationRecord, maxShares string) (recorded CTFOperationRecord, gap string, ok bool, err error)
+	// CloseInventory records a merge of no shares yet (PENDING), so the lane
+	// is merged at once: splits are refused and preserves reserve nothing.
+	CloseInventory(ctx context.Context, op CTFOperationRecord) (CTFOperationRecord, error)
+	// BeginMerge records a merge of op.Shares pairs, all remaining when it is
+	// empty, and marks the lane merged. ok is false when nothing is left.
+	BeginMerge(ctx context.Context, op CTFOperationRecord) (recorded CTFOperationRecord, ok bool, err error)
+	// ArmCTFOperation records the balances and deadline an operation is
+	// submitted against, before it is submitted.
+	ArmCTFOperation(ctx context.Context, opID string, baseline []string, deadline time.Time) error
+	MarkCTFOperation(ctx context.Context, opID string, state CTFOpState, relayerTxID, txHash, errText string) error
+	// ConfirmCTFOperation books a landed operation's fills and marks it
+	// CONFIRMED in one transaction; booking it again changes nothing.
+	ConfirmCTFOperation(ctx context.Context, opID, txHash string, at time.Time) error
+	// OpenCTFOperations lists the operations still PENDING, SUBMITTED or
+	// UNKNOWN, for recovery.
+	OpenCTFOperations(ctx context.Context) ([]CTFOperationRecord, error)
+	InventoryLevel(ctx context.Context, uniqueTag, conditionID string) (InventoryLevel, error)
+	// CTFOperationsSettling reports whether any operation is in flight or
+	// was confirmed after since: cash may not reflect it yet.
+	CTFOperationsSettling(ctx context.Context, since time.Time) (bool, error)
 }

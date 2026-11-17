@@ -937,6 +937,14 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		return false, fmt.Errorf("begin apply fill: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if isInventoryTag(record.UniqueTag) {
+		// A fill on an inventory lane moves both of its token rows (the sold
+		// token, then the transfer off the other); take the lane's lock first
+		// so the rows are locked in the order every split and merge uses.
+		if err := lockInventory(ctx, tx, record.UniqueTag, record.ConditionID); err != nil {
+			return false, err
+		}
+	}
 	tradeStatus := record.TradeStatus
 	if tradeStatus == "" {
 		tradeStatus = "CONFIRMED"
@@ -965,6 +973,9 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 			if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, tradeStatus); err != nil {
 				return false, err
 			}
+			if err := settlePreserveTransfer(ctx, tx, record, tradeStatus, receivedAt); err != nil {
+				return false, err
+			}
 			if err := tx.Commit(ctx); err != nil {
 				return false, fmt.Errorf("commit fill settlement: %w", err)
 			}
@@ -975,6 +986,9 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		}
 		if _, err := tx.Exec(ctx, `UPDATE fills SET trade_status = 'FAILED' WHERE fill_id = $1`, record.FillID); err != nil {
 			return false, fmt.Errorf("mark failed fill: %w", err)
+		}
+		if err := settlePreserveTransfer(ctx, tx, record, "FAILED", receivedAt); err != nil {
+			return false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return false, fmt.Errorf("commit failed fill rollback: %w", err)
@@ -1011,6 +1025,9 @@ func (s *Store) ApplyFill(ctx context.Context, record store.FillRecord) (bool, e
 		return false, err
 	}
 	if err := setPositionSettlementState(ctx, tx, record.ConditionID, record.TokenID, record.UniqueTag, tradeStatus); err != nil {
+		return false, err
+	}
+	if err := applyPreserveTransfer(ctx, tx, record, tradeStatus, receivedAt); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1222,6 +1239,11 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 		return fmt.Errorf("begin reserve: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if record.Side == "SELL" && isInventoryTag(record.UniqueTag) {
+		if err := reserveInventory(ctx, tx, record.UniqueTag, record.ConditionID, record.Shares); err != nil {
+			return err
+		}
+	}
 	if record.Side == "SELL" {
 		commandTag, err := tx.Exec(ctx, `
 			UPDATE positions
@@ -1476,10 +1498,13 @@ func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, unique
 		return false, fmt.Errorf("settle position: %w", err)
 	}
 	// A winner pays $1 a share; a loser pays nothing but is recorded as lost,
-	// so the snapshot that counts it is tagged as after a loss.
+	// so the snapshot that counts it is tagged as after a loss. An inventory
+	// lane's loser is not: it is half of a pair whose winner pays the pUSD the
+	// split cost, so the pair nets to zero.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO settlement_payouts (condition_id, token_id, unique_tag, shares, payout_usd, lost)
-		SELECT $1, $2, $3, $4::numeric - $5::numeric, CASE WHEN $6 THEN $4::numeric - $5::numeric ELSE 0 END, NOT $6
+		SELECT $1, $2, $3, $4::numeric - $5::numeric, CASE WHEN $6 THEN $4::numeric - $5::numeric ELSE 0 END,
+			NOT $6 AND $3 NOT LIKE '%`+inventorySuffix+`'
 		WHERE $4::numeric > $5::numeric
 	`, conditionID, tokenID, uniqueTag, before, after, winner); err != nil {
 		return false, fmt.Errorf("record settlement payout: %w", err)
@@ -1923,11 +1948,18 @@ func (s *Store) StrategyEquity(ctx context.Context, snapshotID int64) ([]store.S
 // given the columns that hold its condition, token, and tag. It is NULL for a
 // lane nothing opened, such as one adopted from the exchange. A close or
 // reconciler intent is no evidence of who built the position.
+//
+// A lane built from split inventory - the inventory lane itself, or a
+// strategy lane filled only by SPLIT_PRESERVE transfers, whose intents sit on
+// the inventory lane - falls back to the strategy that split for it.
 func laneStrategySQL(conditionID, tokenID, tag string) string {
-	return `(SELECT oi.strategy FROM order_intents oi
+	return `COALESCE((SELECT oi.strategy FROM order_intents oi
 		WHERE oi.condition_id = ` + conditionID + ` AND oi.token_id = ` + tokenID + ` AND oi.unique_tag = ` + tag + `
 			AND oi.kind = 'OPEN' AND oi.strategy <> ''
-		ORDER BY oi.created_at, oi.intent_id LIMIT 1)`
+		ORDER BY oi.created_at, oi.intent_id LIMIT 1),
+		(SELECT c.strategy FROM ctf_operations c
+		WHERE c.condition_id = ` + conditionID + ` AND c.unique_tag = CASE WHEN ` + tag + ` LIKE '%` + inventorySuffix + `' THEN left(` + tag + `, -length('` + inventorySuffix + `')) ELSE ` + tag + ` END
+		ORDER BY c.created_at, c.op_id LIMIT 1))`
 }
 
 // LaneStrategies maps each lane holding shares to its strategy. It is read

@@ -45,6 +45,8 @@ Every instance answers `strategy.execution.position.query` and `strategy.executi
 | `execution.close.result` | executiond -> strategy | `ExecutionCloseResult` | Success or failure for a close request. |
 | `strategy.execution.quote` | strategy -> executiond | `ExecutionQuoteRequest` | State which cents a quote lane wants a post-only buy resting at. |
 | `execution.quote.result` | executiond -> strategy | `ExecutionQuoteResult` | The first fill that ended a quote lane; nothing else is published for a quote. |
+| `strategy.execution.inventory` | strategy -> executiond | `ExecutionInventoryRequest` | Top a lane's split inventory up to a target (`SPLIT`), or merge it back to pUSD (`MERGE`). |
+| `execution.inventory.result` | executiond -> strategy | `ExecutionInventoryResult` | Outcome of one inventory request. |
 | `execution.order.event` | executiond -> observers | `ExecutionOrderEvent` | Durable order-state transition. |
 | `pmm.market.quotes` | market data -> executiond | `marketquotes.Snapshot` | Cached quote snapshot for tactics. |
 | `pmm.market.levels` | market data -> executiond | pmm `messaging.MarketLevels` | Top of each market's maintained book, when the collector publishes it (`clob.levels: publish`); read by the drift check before the quote. |
@@ -212,6 +214,43 @@ With several wallets, every allowed instance applies a quote for its own wallet.
 
 Stored per lane in `quote_lanes`: the last `seq`, the deadline, `done`, and whether the result is owed. The working levels are child orders of the lane's `QUOTE` intent, and `quote_levels` keeps the request that posted each one. A restarted executiond adopts resting levels and keeps applying the deadline, and the strategy re-states the quote within a second. Until it does, no drift bound applies, because the stored one is the lane's first request's. If two open orders are found at one price, the older is cancelled. A level whose fill arrived while the process was down still ends the quote, and an owed result is published once.
 
+## Split inventory and SPLIT_PRESERVE
+
+A strategy may open a buy by selling the other outcome instead. It splits pUSD into pairs of the condition's two outcome tokens, and an open with `policy.style` `SPLIT_PRESERVE` sells the complement out of those pairs, which leaves the strategy holding exactly the token it asked to buy. Needs `EXECUTION_INVENTORY_ENABLED=true` and the relayer credentials; without them the style is rejected with `UNSUPPORTED_EXECUTION_STYLE`. Both subjects are allowed under `EXECUTION_ALLOWED_STRATEGIES`, as opens are.
+
+The **inventory** belongs to the strategy lane `unique_tag` + `condition_id`. Shares are outcome-token shares; a pair costs and merges back to exactly 1 pUSD. The lane's **remaining** inventory is the pairs still free to back an open: the smaller side held, less the shares resting preserves have reserved.
+
+### ExecutionInventoryRequest
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version`, `request_id`, `unique_tag`, `strategy`, `market_id`, `condition_id` | As for an open. `unique_tag` names the strategy lane. |
+| `action` | `SPLIT` or `MERGE`. |
+| `target_shares` | `SPLIT`, required: the remaining inventory wanted. executiond splits only the shortfall, `target_shares - remaining - pairs still being split`, so a resent request splits nothing and a later one refills what entries used. A target below the remaining inventory shrinks nothing. A split is capped by the wallet's free cash (its pUSD less what working buys have committed), reported as `INVENTORY_CAPPED`. |
+| `shares` | `MERGE`, optional: pairs to merge; all remaining when empty. |
+| `created_at`, `expires_at` | `expires_at` is optional; a request past it fails `EXPIRED`. |
+
+A `MERGE` first cancels the lane's resting preserves, waits briefly for their reservations to clear, then merges. Once a lane has merged it takes no further `SPLIT` (`INVENTORY_CLOSED`), even when nothing was free to merge; pairs a merge in flight will burn are not free to preserves. Send `MERGE` once the market's window has ended. Pairs never merged are settled with the market and net to zero.
+
+A lane's requests apply in the order they arrived. Every split and merge on one wallet is submitted to the relayer one at a time, since each is signed at the wallet's next nonce.
+
+### ExecutionInventoryResult
+
+`request_id`, `unique_tag`, `strategy`, `wallet_address`, `signer_address`, `condition_id`, `action`, `status` (`SUCCEEDED` or `FAILED`), `reason_code`, `reason`, `shares` (pairs this request split or merged, `0` when already at target), `remaining_shares` (the lane's remaining inventory afterwards), `tx_hash`, `occurred_at`.
+
+`RELAYER_UNKNOWN` means the relayer did not confirm the operation in time, or its submission's outcome is unknown. executiond never submits it twice. With a relayer transaction ID it follows that transaction until it confirms, fails, or its signed deadline passes. Without one (the submit answer was lost) it reads the wallet's token balances, books the operation if both moved by its shares, and fails it once the deadline has passed without them moving; until then no other split or merge on that condition is submitted (they too get `RELAYER_UNKNOWN`), since it would move the same balances. Until it resolves the operation counts as in flight, so a top-up does not split the same shortfall again.
+
+### SPLIT_PRESERVE opens
+
+The open request is an ordinary `BUY` of the wanted token: `target_usd` (or `target_equity_fraction`) at `limit_price`, plus the usual `expires_at`, `time_in_force`, `post_only`, `signal_price` and `max_signal_drift`. executiond turns it into a `SELL` of the complement token on the lane's inventory:
+
+- **Size:** `target_usd / limit_price` shares, capped by the remaining inventory. A capped open reports `INVENTORY_CAPPED` on its result. With no inventory free it fails `INSUFFICIENT_INVENTORY`. When the inventory is short and a split is still in flight, the open waits for it until its deadline; otherwise it goes at once.
+- **Price:** `1 - limit_price`, rounded up onto the tick grid as any sell is. The drift bound reads the complement's mid against `1 - signal_price`.
+- **Result:** reported as the `BUY` that was asked for: `token_id`, `outcome` and `unique_tag` of the request, `side` `BUY`, `filled_shares` the shares sold, `average_price` one minus the average sell price.
+- **Position:** as the sell fills, the bought shares move to the strategy lane at one minus the sell price plus the fee per share. `position.features` shows only the strategy lane, which reads as an ordinary buy. A `CANCEL_OPEN` or close on the strategy lane withdraws its resting preserves.
+
+Several preserves may rest against one lane at once. Closes are ordinary: they sell the bought token.
+
 ## ExecutionOpenRequest
 
 Required fields are `schema_version`, `unique_tag`, `strategy`, `condition_id`, `token_id`, `outcome`, `side`, `limit_price`, and `time_in_force`. `bottom_price` and `scaling_mode` are required for, and only meaningful with, `policy.style: MULTI_LEVEL_LIMIT`. `target_usd` sizes the open request, or `target_equity_fraction` sizes it from wallet equity (see Equity-fraction sizing). A future `expires_at` or positive `policy.complete_within_ms` is required. `unique_tag` is the strategy lane key: it separates concurrent open/close signals on the same asset. executiond assigns the execution identity server-side; `unique_tag` is not an idempotency key.
@@ -282,7 +321,9 @@ Order events use the same numeric representation for `matched_shares` when the f
 
 ## Reason codes
 
-`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `DRAWDOWN_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`, `SIGNAL_DRIFT`, `EXPIRED`, `CANCELED`.
+`INVALID_INTENT`, `UNSUPPORTED_EXECUTION_STYLE`, `UNIMPLEMENTED_POLICY`, `NO_POSITION`, `ACTIVE_SELL_RESERVATION`, `EXPOSURE_LIMIT`, `DRAWDOWN_LIMIT`, `BELOW_MIN_ORDER_SIZE`, `UNPLANNABLE`, `ORDER_REJECTED`, `EXECUTION_FAILED`, `SIGNAL_DRIFT`, `EXPIRED`, `CANCELED`, `INSUFFICIENT_INVENTORY`, `INVENTORY_CAPPED`, `INVENTORY_CLOSED`, `RELAYER_FAILED`, `RELAYER_UNKNOWN`.
+
+The last five belong to split inventory; see [Split inventory and SPLIT_PRESERVE](#split-inventory-and-split_preserve).
 
 `DRAWDOWN_LIMIT` means opens are suspended by the wallet's drawdown limit, which applies to every strategy, or by the request's own strategy limit, which leaves other strategies trading. Closes are never rejected with it.
 

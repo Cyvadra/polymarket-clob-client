@@ -134,6 +134,9 @@ type Executor struct {
 	// quoteLanes are the quote lanes this process knows (quote.go).
 	quoteLanes   quoteRegistry
 	quoteMetrics QuoteMetrics
+
+	// inventory backs SPLIT_PRESERVE opens; nil refuses them (preserve.go).
+	inventory Inventory
 }
 
 // orderKey names one child order of an intent.

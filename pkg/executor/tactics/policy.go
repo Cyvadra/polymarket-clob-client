@@ -40,7 +40,8 @@ func parsePolicyPrices(intent protocol.ExecutionIntent) (policyPrices, error) {
 	parsed.limit = limit
 
 	switch policy.Style {
-	case protocol.ExecutionStyleLimit:
+	case protocol.ExecutionStyleLimit, protocol.ExecutionStyleSplitPreserve:
+		// A SPLIT_PRESERVE order is a limit order on the complement token.
 		parsed.signal = limit
 		return parsed, nil
 	case protocol.ExecutionStyleMakerPostOnly, protocol.ExecutionStyleTakerAggressive:

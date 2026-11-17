@@ -78,6 +78,11 @@ func (p *PublisherModule) Publish(ctx context.Context) error {
 	publishedAt := p.now().UTC()
 	var errs error
 	for _, position := range positions {
+		// Split inventory is executiond's own: the strategy sees its lane's
+		// position, and its inventory through execution.inventory.result.
+		if protocol.IsInventoryTag(position.UniqueTag) {
+			continue
+		}
 		key := position.ConditionID + ":" + position.TokenID + ":" + position.UniqueTag
 		if p.wasPublished(key, position.SourceRevision) {
 			continue

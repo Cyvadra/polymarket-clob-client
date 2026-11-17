@@ -66,6 +66,9 @@ func validateCloseRequest(req protocol.ExecutionCloseRequest) error {
 	if strings.TrimSpace(req.UniqueTag) == "" || strings.TrimSpace(req.Strategy) == "" || strings.TrimSpace(req.ConditionID) == "" || strings.TrimSpace(req.AssetID) == "" || strings.TrimSpace(req.Outcome) == "" {
 		return fmt.Errorf("close request unique tag, strategy, condition ID, asset ID, and outcome are required")
 	}
+	if protocol.IsInventoryTag(req.UniqueTag) {
+		return fmt.Errorf("unique tag %q names an inventory lane; its pairs are merged, not closed", req.UniqueTag)
+	}
 	switch req.Mode {
 	case protocol.ExecutionCloseModeLimit, protocol.ExecutionCloseModeForce, protocol.ExecutionCloseModeCancelOpen:
 	default:
@@ -428,6 +431,14 @@ func (e *Executor) laneActiveOrders(ctx context.Context, conditionID, tokenID, u
 		}
 		if intent.ConditionID == conditionID && intent.TokenID == tokenID && intent.UniqueTag == uniqueTag {
 			lane = append(lane, closeableOrder{intent: intent, order: order})
+			continue
+		}
+		// A SPLIT_PRESERVE entry rests on the inventory lane, selling the
+		// complement, but it is the strategy lane's working buy.
+		if intent.ConditionID == conditionID && protocol.IsInventoryTag(intent.UniqueTag) {
+			if leg := mapping.ExecutionIntent(intent).Policy.Preserve; leg != nil && leg.TokenID == tokenID && leg.UniqueTag == uniqueTag {
+				lane = append(lane, closeableOrder{intent: intent, order: order})
+			}
 		}
 	}
 	return lane, nil

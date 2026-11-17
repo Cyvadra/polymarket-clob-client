@@ -78,6 +78,15 @@ func Plan(request Request) (Decision, error) {
 func plannedShares(request Request, price float64, timeInForce protocol.TimeInForce) (string, error) {
 	intent := request.Intent
 	digits := clobclient.SharePrecisionDigits(intent.Side, timeInForce)
+	if preserve := intent.Policy.Preserve; preserve != nil && intent.Policy.Style == protocol.ExecutionStyleSplitPreserve {
+		// Sized in shares by the inventory that backs it, not by notional:
+		// selling s of the complement buys s of the requested token.
+		shares, ok := decimal.FloorTo(preserve.Shares, digits)
+		if !ok {
+			return "", fmt.Errorf("preserved shares %q round to zero at %d decimal places", preserve.Shares, digits)
+		}
+		return shares, nil
+	}
 	if intent.Side == protocol.SideSell && intent.Kind == protocol.IntentClose {
 		shares, ok := decimal.FloorTo(request.AvailableShares, digits)
 		if !ok {
@@ -122,7 +131,7 @@ func checkMinOrderSize(shares string, minOrderSize float64) error {
 
 func targetPrice(intent protocol.ExecutionIntent, policy policyPrices, request Request) (float64, error) {
 	switch policy.style {
-	case protocol.ExecutionStyleLimit:
+	case protocol.ExecutionStyleLimit, protocol.ExecutionStyleSplitPreserve:
 		return clamp(intent, policy, policy.limit, request.Market.TickSize)
 	case protocol.ExecutionStyleTakerAggressive:
 		return clamp(intent, policy, takerPrice(intent, policy), request.Market.TickSize)

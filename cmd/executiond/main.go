@@ -22,6 +22,7 @@ import (
 	"github.com/Cyvadra/polymarket-clob-client/pkg/accountfeed"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
+	"github.com/Cyvadra/polymarket-clob-client/pkg/inventory"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/marketquotes"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/natsbus"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/positionfeatures"
@@ -59,6 +60,9 @@ type config struct {
 	// same host uses 9090-9096 and 9099, so the default sits apart.
 	MetricsAddr         string
 	ShutdownGracePeriod time.Duration
+	// InventoryEnabled takes split inventory requests and SPLIT_PRESERVE
+	// opens, which need the relayer credentials (POLYMARKET_RELAYER_*).
+	InventoryEnabled bool
 }
 
 // maxLadderLevelsCeiling is the most levels a ladder can have at all: one for
@@ -330,6 +334,25 @@ func run() error {
 		return err
 	}
 	equityDue, anchorStale := len(pending.PayoutIDs) > 0, false
+	splits := newSplitDeferral(store.CTFOperationsSettling)
+	splitSettling := func(ctx context.Context) bool {
+		if !cfg.InventoryEnabled {
+			return false
+		}
+		switch outcome, err := splits.check(ctx); {
+		case err != nil:
+			log.Printf("check split inventory operations: %v", err)
+			stats.countError("inventory")
+			return false
+		case outcome == deferExpired:
+			log.Printf("equity snapshot recorded with a split or merge still settling after %s; its cash may read as external flow", splits.max)
+			return false
+		case outcome == deferWait:
+			log.Printf("equity snapshot deferred: a split or merge is still settling")
+			return true
+		}
+		return false
+	}
 	sweeper.SetSweepHandler(func(s settlement.Sweep) {
 		obs.sweep(ctx, s)
 		// A failed refresh would leave sizing on the pre-loss base until
@@ -368,6 +391,9 @@ func run() error {
 		if held := s.WinnersHeld(); held > 0 {
 			log.Printf("equity snapshot deferred: %d winning lanes not yet settled", held)
 			obs.snapshotDeferred(ctx, held)
+			return
+		}
+		if splitSettling(ctx) {
 			return
 		}
 		obs.snapshotDeferred(ctx, 0)
@@ -412,6 +438,14 @@ func run() error {
 	for prefix, multiplier := range cfg.SizeMultipliers {
 		log.Printf("strategy %s opens at %sx the size it asks for", prefix, multiplier)
 	}
+	var inventoryWork nats.Drainer
+	var inventoryManager *inventory.Manager
+	if cfg.InventoryEnabled {
+		inventoryManager, inventoryWork, err = startInventory(ctx, clob, store, execution, wallet, events, limits, cfg, bus, stats)
+		if err != nil {
+			return err
+		}
+	}
 	modules := []namedModule{
 		{name: "nats", module: bus},
 		{name: "executor", module: execution},
@@ -442,9 +476,22 @@ func run() error {
 	// Opens and closes run off the NATS delivery goroutine, so draining the
 	// bus does not wait for them. Wait here, before the store closes, so an
 	// order being placed is not cut off between persisting and its POST.
-	for name, work := range map[string]nats.Drainer{"opens": openWork, "closes": closeWork} {
+	drainers := map[string]nats.Drainer{"opens": openWork, "closes": closeWork}
+	if inventoryWork != nil {
+		drainers["inventory requests"] = inventoryWork
+	}
+	for name, work := range drainers {
 		if err := work.Wait(shutdownCtx); err != nil {
 			closeErr = errors.Join(closeErr, fmt.Errorf("wait for in-flight %s: %w", name, err))
+		}
+	}
+	// Resolutions still running stop here, rather than run on against a closing store.
+	if inventoryManager != nil {
+		// An operation still unresolved stays recorded; the next start
+		// resumes it (Recover).
+		inventoryManager.Stop()
+		if err := inventoryManager.Wait(shutdownCtx); err != nil {
+			closeErr = errors.Join(closeErr, fmt.Errorf("wait for split inventory resolutions: %w", err))
 		}
 	}
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
@@ -659,6 +706,13 @@ func configFromEnv() (config, error) {
 			}
 			cfg.SizeAfterLossOnly = enabled
 		}
+	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_INVENTORY_ENABLED")); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_INVENTORY_ENABLED must be true or false")
+		}
+		cfg.InventoryEnabled = enabled
 	}
 	if cfg.FeatureInterval <= 0 || cfg.ReconcileInterval <= 0 || cfg.SettlementInterval <= 0 || cfg.MissingOrderGrace <= 0 || cfg.MaxTradeAge <= 0 || cfg.ResultPriceWait < 0 || cfg.BalanceCacheTTL < 0 || cfg.EquityMaxQuoteAge < 0 || cfg.ConnectTimeout <= 0 || cfg.KeepWarmInterval < 0 || cfg.ShutdownGracePeriod <= 0 {
 		return config{}, fmt.Errorf("execution durations must be positive")

@@ -23,6 +23,10 @@ func (f *fakeSizer) Size(_ context.Context, fraction string) (equity.Entry, erro
 	return f.entry, f.err
 }
 
+func (f *fakeSizer) SizeUncapped(ctx context.Context, fraction string) (equity.Entry, error) {
+	return f.Size(ctx, fraction)
+}
+
 func equityOpenRequest() protocol.ExecutionOpenRequest {
 	req := openRequest()
 	req.TargetUSD = ""
@@ -126,5 +130,30 @@ func TestExecuteOpenRejectsWhileTheGateIsShut(t *testing.T) {
 	}
 	if sizer.fraction != "" || len(storer.insertedIntents) != 0 || client.submissions != 0 {
 		t.Fatal("a suspended open was sized, stored, or submitted")
+	}
+}
+
+type uncappedFakeSizer struct {
+	fakeSizer
+	uncapped bool
+}
+
+func (f *uncappedFakeSizer) SizeUncapped(_ context.Context, fraction string) (equity.Entry, error) {
+	f.uncapped, f.fraction = true, fraction
+	return equity.Entry{TargetUSD: "3", EquityUSD: 100}, nil
+}
+
+func TestPreserveOpenIsSizedWithoutFreeCash(t *testing.T) {
+	exec, _ := New(&fakeStore{inserted: true}, &fakeCLOB{}, time.Now)
+	sizer := &uncappedFakeSizer{fakeSizer: fakeSizer{err: fmt.Errorf("%w: short", equity.ErrInsufficientCash)}}
+	exec.SetEntrySizer(sizer)
+	req := equityOpenRequest()
+	req.Policy.Style = protocol.ExecutionStyleSplitPreserve
+	intent := protocol.ExecutionIntent{}
+	if _, err := exec.sizeEntry(context.Background(), req, &intent); err != nil || !sizer.uncapped || intent.TargetUSD != "3" {
+		t.Fatalf("preserve sizing: err=%v uncapped=%v target=%q", err, sizer.uncapped, intent.TargetUSD)
+	}
+	if _, err := exec.sizeEntry(context.Background(), equityOpenRequest(), &intent); !errors.Is(err, equity.ErrInsufficientCash) {
+		t.Fatalf("a plain open skipped the free-cash check: %v", err)
 	}
 }

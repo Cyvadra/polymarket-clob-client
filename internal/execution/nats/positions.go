@@ -78,6 +78,10 @@ func positionQueryResponse(ctx context.Context, positions PositionStore, payload
 		if request.UniqueTag != "" && record.UniqueTag != request.UniqueTag {
 			continue
 		}
+		// Split inventory is executiond's own, as on the position stream.
+		if protocol.IsInventoryTag(record.UniqueTag) {
+			continue
+		}
 		// Empty rows (no current holding) are not positions.
 		if !decimal.Positive(record.PositionSize) {
 			continue

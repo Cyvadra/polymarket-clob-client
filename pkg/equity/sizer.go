@@ -99,12 +99,9 @@ func (s *Sizer) SetLossAnchor(anchor *LossAnchor) {
 // buys came before its reservation, it is counted nowhere. Size then reads
 // again, and after maxSizeAttempts holds the lock across the read.
 func (s *Sizer) Size(ctx context.Context, fraction string) (Entry, error) {
-	f, err := strconv.ParseFloat(fraction, 64)
-	s.mu.Lock()
-	maxFraction, anchor := s.maxFraction, s.anchor
-	s.mu.Unlock()
-	if err != nil || math.IsNaN(f) || f <= 0 || f > maxFraction {
-		return Entry{}, fmt.Errorf("%w %q: must be in (0, %g]", ErrInvalidFraction, fraction, maxFraction)
+	f, anchor, err := s.fraction(fraction)
+	if err != nil {
+		return Entry{}, err
 	}
 	for attempt := 1; ; attempt++ {
 		locked := attempt >= maxSizeAttempts
@@ -125,6 +122,48 @@ func (s *Sizer) Size(ctx context.Context, fraction string) (Entry, error) {
 		s.mu.Unlock()
 		return entry, err
 	}
+}
+
+// SizeUncapped resolves fraction × equity into a target in USD for an entry
+// that spends no cash, such as a SPLIT_PRESERVE open selling out of
+// inventory already paid for. It neither checks nor holds free cash.
+func (s *Sizer) SizeUncapped(ctx context.Context, fraction string) (Entry, error) {
+	f, anchor, err := s.fraction(fraction)
+	if err != nil {
+		return Entry{}, err
+	}
+	equityUSD, _, err := s.base(ctx, anchor)
+	if err != nil {
+		return Entry{}, err
+	}
+	target, err := entryTarget(f, equityUSD)
+	if err != nil {
+		return Entry{}, err
+	}
+	return Entry{TargetUSD: strconv.FormatFloat(target, 'f', -1, 64), EquityUSD: equityUSD}, nil
+}
+
+// fraction parses and bounds an entry's equity fraction, returning it with
+// the loss anchor to size against.
+func (s *Sizer) fraction(fraction string) (float64, *LossAnchor, error) {
+	f, err := strconv.ParseFloat(fraction, 64)
+	s.mu.Lock()
+	maxFraction, anchor := s.maxFraction, s.anchor
+	s.mu.Unlock()
+	if err != nil || math.IsNaN(f) || f <= 0 || f > maxFraction {
+		return 0, nil, fmt.Errorf("%w %q: must be in (0, %g]", ErrInvalidFraction, fraction, maxFraction)
+	}
+	return f, anchor, nil
+}
+
+// entryTarget is fraction × equity floored to USDC precision, so the entry
+// never exceeds its share.
+func entryTarget(f, equityUSD float64) (float64, error) {
+	target := math.Floor(f*equityUSD*1e6) / 1e6
+	if target <= 0 {
+		return 0, fmt.Errorf("%w: equity %.6f gives no entry at fraction %g", ErrInsufficientCash, equityUSD, f)
+	}
+	return target, nil
 }
 
 // read loads the base equity, the wallet's cash and the USD in working buys.
@@ -150,10 +189,9 @@ func (s *Sizer) hold(f, equityUSD, cash, openBuys float64, readErr error) (Entry
 		return Entry{}, readErr
 	}
 	free := cash - openBuys - s.pending
-	// Floor to USDC precision so the entry never exceeds its share.
-	target := math.Floor(f*equityUSD*1e6) / 1e6
-	if target <= 0 {
-		return Entry{}, fmt.Errorf("%w: equity %.6f gives no entry at fraction %g", ErrInsufficientCash, equityUSD, f)
+	target, err := entryTarget(f, equityUSD)
+	if err != nil {
+		return Entry{}, err
 	}
 	if target > free {
 		return Entry{}, fmt.Errorf("%w: entry needs %.6f, free cash is %.6f", ErrInsufficientCash, target, math.Max(free, 0))

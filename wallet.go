@@ -28,12 +28,15 @@ const (
 var pusd = common.HexToAddress(PUSDAddress)
 
 var (
-	approveSelector          = selector("approve(address,uint256)")
-	allowanceSelector        = selector("allowance(address,address)")
-	erc20BalanceSelector     = selector("balanceOf(address)")
-	transferSelector         = selector("transfer(address,uint256)")
-	safeTransferFromSelector = selector("safeTransferFrom(address,address,uint256,uint256,bytes)")
-	splitPositionSelector    = selector("splitPosition(address,bytes32,bytes32,uint256[],uint256)")
+	approveSelector           = selector("approve(address,uint256)")
+	allowanceSelector         = selector("allowance(address,address)")
+	erc20BalanceSelector      = selector("balanceOf(address)")
+	transferSelector          = selector("transfer(address,uint256)")
+	safeTransferFromSelector  = selector("safeTransferFrom(address,address,uint256,uint256,bytes)")
+	splitPositionSelector     = selector("splitPosition(address,bytes32,bytes32,uint256[],uint256)")
+	mergePositionsSelector    = selector("mergePositions(address,bytes32,bytes32,uint256[],uint256)")
+	setApprovalForAllSelector = selector("setApprovalForAll(address,bool)")
+	isApprovedForAllSelector  = selector("isApprovedForAll(address,address)")
 )
 
 // SplitCalls builds the deposit wallet calls that turn amount pUSD (base
@@ -46,16 +49,9 @@ func (c *Client) SplitCalls(ctx context.Context, conditionID string, amount *big
 	if err != nil {
 		return nil, nil, err
 	}
-	id := common.FromHex(conditionID)
-	if len(id) != 32 {
-		if len(id) == 31 {
-			return nil, nil, fmt.Errorf("condition %s is a V2 market, which is not supported yet", conditionID)
-		}
-		return nil, nil, fmt.Errorf("invalid condition id %q", conditionID)
-	}
-	market, err := c.Market(ctx, conditionID)
+	id, market, adapter, err := c.binaryMarket(ctx, conditionID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read market %s: %w", conditionID, err)
+		return nil, nil, err
 	}
 	if market.Closed {
 		return nil, nil, fmt.Errorf("market %s is closed; its tokens are worth only their payout", conditionID)
@@ -71,17 +67,6 @@ func (c *Client) SplitCalls(ctx context.Context, conditionID string, amount *big
 			return nil, nil, fmt.Errorf("condition %s is resolved; its tokens are worth only their payout", conditionID)
 		}
 	}
-	if len(market.Tokens) != 2 {
-		return nil, nil, fmt.Errorf("market %s has %d outcome tokens, want 2", conditionID, len(market.Tokens))
-	}
-	negRisk, err := c.NegRisk(ctx, market.Tokens[0].TokenID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read neg-risk flag: %w", err)
-	}
-	adapter := common.HexToAddress(CtfCollateralAdapter)
-	if negRisk {
-		adapter = common.HexToAddress(NegRiskCtfCollateralAdapter)
-	}
 	if err := c.requirePUSD(ctx, wallet, amount, "split needs"); err != nil {
 		return nil, nil, err
 	}
@@ -94,15 +79,90 @@ func (c *Client) SplitCalls(ctx context.Context, conditionID string, amount *big
 		calls = append(calls, walletCall(pusd, approveSelector, word(adapter), uintWord(amount)))
 	}
 	// splitPosition(collateral, parentCollectionId=0, conditionId, partition=[1,2], amount)
-	calls = append(calls, walletCall(adapter, splitPositionSelector,
+	calls = append(calls, binaryPositionCall(adapter, splitPositionSelector, id, amount))
+	return calls, market, nil
+}
+
+// MergeCalls builds the deposit wallet calls that turn amount (base units) of
+// each outcome token of a binary CTF market back into amount pUSD: an
+// ERC-1155 approval when the adapter may not yet move the wallet's tokens,
+// then the merge. Unlike a split it works on a closed or resolved market, so
+// leftover pairs can always be merged.
+func (c *Client) MergeCalls(ctx context.Context, conditionID string, amount *big.Int) ([]WalletCall, *Market, error) {
+	wallet, err := c.walletAndAmount(amount, "merge")
+	if err != nil {
+		return nil, nil, err
+	}
+	id, market, adapter, err := c.binaryMarket(ctx, conditionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctf := common.HexToAddress(ConditionalTokensAddress)
+	for _, token := range market.Tokens {
+		tokenID, err := parseTokenID(token.TokenID)
+		if err != nil {
+			return nil, nil, err
+		}
+		balance, err := c.callUint(ctx, ctf, balanceOfSelector, word(wallet), uintWord(tokenID))
+		if err != nil {
+			return nil, nil, fmt.Errorf("read token %s balance: %w", token.TokenID, err)
+		}
+		if balance.Cmp(amount) < 0 {
+			return nil, nil, fmt.Errorf("deposit wallet holds %s of token %s, merge needs %s", FormatUnits(balance), token.TokenID, FormatUnits(amount))
+		}
+	}
+	approved, err := c.callUint(ctx, ctf, isApprovedForAllSelector, word(wallet), word(adapter))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read token approval: %w", err)
+	}
+	var calls []WalletCall
+	if approved.Sign() == 0 {
+		calls = append(calls, walletCall(ctf, setApprovalForAllSelector, word(adapter), uintWord(big.NewInt(1))))
+	}
+	calls = append(calls, binaryPositionCall(adapter, mergePositionsSelector, id, amount))
+	return calls, market, nil
+}
+
+// binaryMarket reads a binary market and picks the collateral adapter that
+// splits and merges it. Only a 32-byte condition ID (Gamma version "v1") is
+// supported; V2 markets go through Polymarket's Router instead.
+func (c *Client) binaryMarket(ctx context.Context, conditionID string) ([]byte, *Market, common.Address, error) {
+	id := common.FromHex(conditionID)
+	if len(id) != 32 {
+		if len(id) == 31 {
+			return nil, nil, common.Address{}, fmt.Errorf("condition %s is a V2 market, which is not supported yet", conditionID)
+		}
+		return nil, nil, common.Address{}, fmt.Errorf("invalid condition id %q", conditionID)
+	}
+	market, err := c.Market(ctx, conditionID)
+	if err != nil {
+		return nil, nil, common.Address{}, fmt.Errorf("read market %s: %w", conditionID, err)
+	}
+	if len(market.Tokens) != 2 {
+		return nil, nil, common.Address{}, fmt.Errorf("market %s has %d outcome tokens, want 2", conditionID, len(market.Tokens))
+	}
+	negRisk, err := c.NegRisk(ctx, market.Tokens[0].TokenID)
+	if err != nil {
+		return nil, nil, common.Address{}, fmt.Errorf("read neg-risk flag: %w", err)
+	}
+	adapter := common.HexToAddress(CtfCollateralAdapter)
+	if negRisk {
+		adapter = common.HexToAddress(NegRiskCtfCollateralAdapter)
+	}
+	return id, market, adapter, nil
+}
+
+// binaryPositionCall encodes splitPosition or mergePositions on an adapter:
+// (collateral=pUSD, parentCollectionId=0, conditionId, partition=[1,2], amount).
+func binaryPositionCall(adapter common.Address, sel, conditionID []byte, amount *big.Int) WalletCall {
+	return walletCall(adapter, sel,
 		word(pusd),
 		make([]byte, 32),
-		id,
+		conditionID,
 		uintWord(big.NewInt(5*32)), // offset of the partition array
 		uintWord(amount),
 		uintWord(big.NewInt(2)), uintWord(big.NewInt(1)), uintWord(big.NewInt(2)),
-	))
-	return calls, market, nil
+	)
 }
 
 // SendCollateralCalls builds the call that sends amount pUSD (base units)

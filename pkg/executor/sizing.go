@@ -12,6 +12,9 @@ import (
 // EntrySizer resolves a fraction of wallet equity into a dollar target.
 type EntrySizer interface {
 	Size(ctx context.Context, fraction string) (equity.Entry, error)
+	// SizeUncapped sizes an entry that spends no cash, without a free-cash
+	// check or hold.
+	SizeUncapped(ctx context.Context, fraction string) (equity.Entry, error)
 }
 
 // sizeEntry fills intent.TargetUSD for an open sized by
@@ -33,7 +36,12 @@ func (e *Executor) sizeEntry(ctx context.Context, req protocol.ExecutionOpenRequ
 	// The multiplier scales the fraction, not the dollar target, so the
 	// sizer's fraction cap and free-cash hold see the entry actually placed.
 	fraction := scaleSize(req.TargetEquityFraction, e.sizeMultiplier(req.Strategy), fractionDigits)
-	entry, err := e.sizer.Size(ctx, fraction)
+	size := e.sizer.Size
+	if req.Policy.Style == protocol.ExecutionStyleSplitPreserve {
+		// A preserve sells inventory already paid for: it needs no free cash.
+		size = e.sizer.SizeUncapped
+	}
+	entry, err := size(ctx, fraction)
 	switch {
 	case errors.Is(err, equity.ErrInvalidFraction):
 		return nil, rejection{code: protocol.ReasonInvalidIntent, reason: err.Error(), cause: err}

@@ -54,6 +54,17 @@ func validateIntentAt(intent protocol.ExecutionIntent, now time.Time) error {
 			return invalid("invalid target usd %q", intent.TargetUSD)
 		}
 	}
+	if intent.Policy.Style == protocol.ExecutionStyleSplitPreserve && intent.Kind != protocol.IntentOpen {
+		return invalid("%s applies only to an open", protocol.ExecutionStyleSplitPreserve)
+	}
+	// An inventory lane is traded only by the preserve sells executiond
+	// places on it; its pairs leave through merges.
+	if protocol.IsInventoryTag(intent.UniqueTag) && intent.Policy.Preserve == nil {
+		return invalid("unique tag %q names an inventory lane", intent.UniqueTag)
+	}
+	if intent.Policy.Preserve != nil && intent.Policy.Style != protocol.ExecutionStyleSplitPreserve {
+		return invalid("policy.preserve is set by executiond only")
+	}
 	if intent.Policy.Style == protocol.ExecutionStyleMultiLevelLimit {
 		if _, err := parseLadder(intent); err != nil {
 			return err

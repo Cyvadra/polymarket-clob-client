@@ -92,6 +92,11 @@ func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRe
 	// releases it as soon as the reservation exists, so the entry is not
 	// counted twice while the order is signed and submitted.
 	defer release()
+	if intent.Policy.Style == protocol.ExecutionStyleSplitPreserve {
+		// It sells out of inventory already paid for: no cash to hold.
+		release()
+		return e.executePreserve(ctx, intent)
+	}
 	if err := e.Execute(withCashHold(ctx, release), intent); err != nil {
 		var unresolved unresolvedSubmission
 		if !errors.As(err, &unresolved) {
@@ -161,11 +166,11 @@ func (e *Executor) publishOpenResult(intent protocol.ExecutionIntent, status pro
 	if err != nil {
 		average = 0
 	}
-	if err := protocol.PublishExecutionOpenResult(e.publish, protocol.ExecutionOpenResult{
+	if err := protocol.PublishExecutionOpenResult(e.publish, mapping.PreserveOpenResult(protocol.ExecutionOpenResult{
 		RequestID: intent.RequestID, UniqueTag: intent.UniqueTag, Strategy: intent.Strategy, ConditionID: intent.ConditionID, TokenID: intent.TokenID, Outcome: intent.Outcome, Side: intent.Side,
 		Status: status, ReasonCode: code, Reason: reason,
 		FilledShares: filled, AveragePrice: average, OccurredAt: e.now(),
-	}); err != nil && e.onError != nil {
+	}, intent.Policy)); err != nil && e.onError != nil {
 		e.onError(fmt.Errorf("publish open result: %w", err))
 	}
 }
@@ -430,6 +435,8 @@ func (e *Executor) reserveChild(ctx context.Context, intent protocol.ExecutionIn
 		return rejection{code: protocol.ReasonActiveSellReservation, reason: "active sell reservation already exists", cause: err}
 	case errors.Is(err, store.ErrExposureLimit):
 		return rejection{code: protocol.ReasonExposureLimit, reason: "order exceeds the configured open exposure limit", cause: err}
+	case errors.Is(err, store.ErrInsufficientInventory):
+		return rejection{code: protocol.ReasonInsufficientInventory, reason: "split inventory no longer backs this order", cause: err}
 	default:
 		return fmt.Errorf("reserve order exposure: %w", err)
 	}

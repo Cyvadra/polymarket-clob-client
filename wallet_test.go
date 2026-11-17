@@ -18,7 +18,9 @@ const testABI = `[
 {"name":"approve","type":"function","inputs":[{"type":"address"},{"type":"uint256"}]},
 {"name":"transfer","type":"function","inputs":[{"type":"address"},{"type":"uint256"}]},
 {"name":"safeTransferFrom","type":"function","inputs":[{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"bytes"}]},
-{"name":"splitPosition","type":"function","inputs":[{"type":"address"},{"type":"bytes32"},{"type":"bytes32"},{"type":"uint256[]"},{"type":"uint256"}]}
+{"name":"splitPosition","type":"function","inputs":[{"type":"address"},{"type":"bytes32"},{"type":"bytes32"},{"type":"uint256[]"},{"type":"uint256"}]},
+{"name":"mergePositions","type":"function","inputs":[{"type":"address"},{"type":"bytes32"},{"type":"bytes32"},{"type":"uint256[]"},{"type":"uint256"}]},
+{"name":"setApprovalForAll","type":"function","inputs":[{"type":"address"},{"type":"bool"}]}
 ]`
 
 func TestWalletCallEncodingMatchesABI(t *testing.T) {
@@ -39,7 +41,12 @@ func TestWalletCallEncodingMatchesABI(t *testing.T) {
 		{"transfer", walletCall(a, transferSelector, word(b), uintWord(amount)), func() ([]byte, error) { return parsed.Pack("transfer", b, amount) }},
 		{"safeTransferFrom", walletCall(a, safeTransferFromSelector, word(a), word(b), uintWord(big.NewInt(77)), uintWord(amount), uintWord(big.NewInt(160)), make([]byte, 32)),
 			func() ([]byte, error) { return parsed.Pack("safeTransferFrom", a, b, big.NewInt(77), amount, []byte{}) }},
-		{"splitPosition", walletCall(a, splitPositionSelector, word(common.HexToAddress(PUSDAddress)), make([]byte, 32), cond.Bytes(), uintWord(big.NewInt(160)), uintWord(amount), uintWord(big.NewInt(2)), uintWord(big.NewInt(1)), uintWord(big.NewInt(2))),
+		{"mergePositions", binaryPositionCall(a, mergePositionsSelector, cond.Bytes(), amount),
+			func() ([]byte, error) {
+				return parsed.Pack("mergePositions", common.HexToAddress(PUSDAddress), [32]byte{}, [32]byte(cond), []*big.Int{big.NewInt(1), big.NewInt(2)}, amount)
+			}},
+		{"setApprovalForAll", walletCall(a, setApprovalForAllSelector, word(b), uintWord(big.NewInt(1))), func() ([]byte, error) { return parsed.Pack("setApprovalForAll", b, true) }},
+		{"splitPosition", binaryPositionCall(a, splitPositionSelector, cond.Bytes(), amount),
 			func() ([]byte, error) {
 				return parsed.Pack("splitPosition", common.HexToAddress(PUSDAddress), [32]byte{}, [32]byte(cond), []*big.Int{big.NewInt(1), big.NewInt(2)}, amount)
 			}},
