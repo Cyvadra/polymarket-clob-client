@@ -56,6 +56,8 @@ func TestWarmupFailsWithoutSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
+	// Released before the deferred Close, which waits for every connection.
+	defer conn.Release()
 	if _, err := conn.Exec(ctx, `CREATE TEMP TABLE order_intents (intent_id text)`); err != nil {
 		t.Fatalf("shadow table: %v", err)
 	}
@@ -65,5 +67,4 @@ func TestWarmupFailsWithoutSchema(t *testing.T) {
 	if status := conn.Conn().PgConn().TxStatus(); status != 'I' {
 		t.Fatalf("expected the connection left outside a transaction, got status %c", status)
 	}
-	conn.Release()
 }

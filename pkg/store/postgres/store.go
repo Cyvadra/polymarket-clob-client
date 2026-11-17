@@ -81,7 +81,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if !strings.Contains(cfg.URL, "pool_max_conn_lifetime") {
 		poolConfig.MaxConnLifetime = connLifetime
 	}
-	poolConfig.AfterConnect = prepareHotStatements
+	poolConfig.AfterConnect = warmConnection
 	if cfg.ConnectTimeout > 0 {
 		poolConfig.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
 	}
@@ -164,19 +164,45 @@ var hotStatements = []string{
 	insertIntentSQL, insertReservationSQL, insertOrderSQL, orderEventSQL, intentStatusSQL,
 }
 
-// It is best effort: before Migrate has created the tables, or if a statement
-// will not prepare, the connection is still handed out and pgx prepares the
-// statement on its first use, as it would without this.
-func prepareHotStatements(ctx context.Context, conn *pgx.Conn) error {
-	for _, sql := range hotStatements {
-		if _, err := conn.Prepare(ctx, sql, sql); err != nil {
-			if ctx.Err() != nil || conn.IsClosed() {
-				return err
-			}
-			return nil
+// warmConnection readies each new pool connection for an open: it prepares
+// the hot statements, then rehearses an open's writes (rehearseOpen) so the
+// backend has loaded its tables' catalog entries. Connections are replaced
+// every connLifetime, and the pool opens more under load; each one comes up
+// warm. Like the prepare, the rehearsal is best effort: a failure hands the
+// connection out anyway unless it was left unusable.
+func warmConnection(ctx context.Context, conn *pgx.Conn) error {
+	prepared, err := prepareHotStatements(ctx, conn)
+	if err != nil || !prepared {
+		return err
+	}
+	if err := rehearseOpen(ctx, conn); err != nil {
+		if ctx.Err() != nil || conn.IsClosed() || conn.PgConn().TxStatus() != 'I' {
+			return err
 		}
 	}
 	return nil
+}
+
+// reservationArgs are insertReservationSQL's arguments for record.
+func reservationArgs(r store.ReservationRecord) []any {
+	return []any{r.ReservationID, r.IntentID, r.ChildSequence, r.UniqueTag, r.MarketID, r.ConditionID, r.TokenID,
+		r.Outcome, r.Side, r.Shares, r.Notional, r.State, r.Reason, r.CreatedAt, r.UpdatedAt}
+}
+
+// prepareHotStatements reports whether every statement prepared.
+// It is best effort: before Migrate has created the tables, or if a statement
+// will not prepare, the connection is still handed out and pgx prepares the
+// statement on its first use, as it would without this.
+func prepareHotStatements(ctx context.Context, conn *pgx.Conn) (bool, error) {
+	for _, sql := range hotStatements {
+		if _, err := conn.Prepare(ctx, sql, sql); err != nil {
+			if ctx.Err() != nil || conn.IsClosed() {
+				return false, err
+			}
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // execAsync runs one statement in its own transaction committed
@@ -1173,8 +1199,9 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	insert := func(execer interface {
 		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	}) error {
-		_, err := execer.Exec(ctx, insertReservationSQL, record.ReservationID, record.IntentID, record.ChildSequence, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
-			record.Outcome, record.Side, record.Shares, record.Notional, state, record.Reason, createdAt, updatedAt)
+		row := record
+		row.State, row.CreatedAt, row.UpdatedAt = state, createdAt, updatedAt
+		_, err := execer.Exec(ctx, insertReservationSQL, reservationArgs(row)...)
 		switch {
 		case err == nil:
 			return nil

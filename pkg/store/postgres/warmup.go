@@ -17,11 +17,14 @@ import (
 // rollbackSQL ends a warm-up batch: nothing it wrote is kept.
 const rollbackSQL = `ROLLBACK`
 
+// rollbackTimeout bounds the cleanup of a failed rehearsal.
+const rollbackTimeout = 2 * time.Second
+
 // Warmup rehearses an open's writes on every connection the pool keeps idle,
-// in a transaction it rolls back. A fresh backend loads its tables' catalog
-// entries on its first real write, so without this the first order after a
-// restart pays for them. It is also the startup check that those writes
-// work: an error means an order would fail the same way. It returns how many
+// in a transaction it rolls back. Each new connection already rehearsed them
+// when it connected (warmConnection), but there a failure is ignored; this is
+// the startup check that those writes work: an error means an order would
+// fail the same way. It returns how many
 // connections it warmed.
 func (s *Store) Warmup(ctx context.Context) (int, error) {
 	conns := int(max(s.pool.Config().MinConns, 1))
@@ -86,17 +89,18 @@ func rehearseOpen(ctx context.Context, conn *pgx.Conn) error {
 	batch.Queue(beginSQL)
 	batch.Queue(asyncCommitSQL)
 	batch.Queue(insertIntentSQL, intentArgs(intent)...)
-	batch.Queue(insertReservationSQL, reservation.ReservationID, reservation.IntentID, reservation.ChildSequence, reservation.UniqueTag, reservation.MarketID,
-		reservation.ConditionID, reservation.TokenID, reservation.Outcome, reservation.Side, reservation.Shares, reservation.Notional,
-		reservation.State, reservation.Reason, reservation.CreatedAt, reservation.UpdatedAt)
+	batch.Queue(insertReservationSQL, reservationArgs(reservation)...)
 	var exchangeOrderID *string
 	queueSubmittingOrder(batch, signed, &submitting, submitting.State, "warmup", &exchangeOrderID)
 	batch.Queue(rollbackSQL)
 	err = conn.SendBatch(ctx, batch).Close()
 	if err != nil && conn.PgConn().TxStatus() != 'I' {
 		// A failed statement leaves the transaction open and aborted, and the
-		// rollback queued after it was skipped.
-		_, _ = conn.Exec(ctx, rollbackSQL)
+		// rollback queued after it was skipped. ctx may be what expired, so
+		// the cleanup gets its own short deadline.
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), rollbackTimeout)
+		defer cancel()
+		_, _ = conn.Exec(cleanup, rollbackSQL)
 	}
 	return err
 }
