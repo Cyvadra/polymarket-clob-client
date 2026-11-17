@@ -141,11 +141,15 @@ const minMarketableNotional = 1.0
 // the exchange rejects. A preserve sells the complement, so an aggressive buy
 // of a favourite becomes a cheap sell: 5 Up at 0.90 is a $0.50 sell of Down at
 // 0.10. A sell that rests is held only to the share minimum, and one priced
-// without a fresh quote is left to the exchange.
+// without a fresh quote is left to the exchange. Freshness is the intent's
+// quote_max_age_ms, or DefaultDriftQuoteMaxAge, so an old bid never decides.
 func checkMarketableNotional(request Request, price float64, shares string) error {
 	intent := request.Intent
 	if intent.Policy.Style != protocol.ExecutionStyleSplitPreserve || intent.Side != protocol.SideSell {
 		return nil
+	}
+	if request.Intent.Policy.QuoteMaxAgeMillis <= 0 {
+		request.Intent.Policy.QuoteMaxAgeMillis = DefaultDriftQuoteMaxAge.Milliseconds()
 	}
 	quote, ok := freshQuoteForToken(request)
 	if !ok || quote.Bid <= 0 || price > quote.Bid {
