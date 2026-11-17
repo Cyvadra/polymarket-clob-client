@@ -50,6 +50,7 @@ func TestRunCashRefreshReadsAfterInvalidate(t *testing.T) {
 	balances := &steppedBalances{balances: []string{"1000000", "3000000"}}
 	tracker, _ := New(balances, fakePositions{}, fakeQuotes{}, time.Now)
 	tracker.SetCashTTL(time.Hour)
+	tracker.SetFillSettle(20 * time.Millisecond)
 	if _, _, err := tracker.Cash(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -71,5 +72,31 @@ func TestRunCashRefreshReadsAfterInvalidate(t *testing.T) {
 	}
 	if got := balances.calls.Load(); got != 2 {
 		t.Fatalf("reads = %d, want 2: the entry should not read itself", got)
+	}
+}
+
+func TestReadSoonAfterFillIsNotCached(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	balances := &steppedBalances{balances: []string{"1000000", "5000000", "3000000", "9000000"}}
+	tracker, _ := New(balances, fakePositions{}, fakeQuotes{}, func() time.Time { return now })
+	if _, _, err := tracker.Cash(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	tracker.Invalidate()
+	// Inside the settle window the exchange may still show pre-fill cash:
+	// it is used, but the next read goes to the exchange again.
+	if cash, _, _ := tracker.Cash(context.Background()); cash != 5 {
+		t.Fatalf("cash = %v, want 5", cash)
+	}
+	now = now.Add(DefaultFillSettle)
+	if cash, _, _ := tracker.Cash(context.Background()); cash != 3 {
+		t.Fatalf("cash = %v, want the re-read 3", cash)
+	}
+	// Past the window the read is cached again.
+	if cash, _, _ := tracker.Cash(context.Background()); cash != 3 {
+		t.Fatalf("cash = %v, want cached 3", cash)
+	}
+	if got := balances.calls.Load(); got != 3 {
+		t.Fatalf("reads = %d, want 3", got)
 	}
 }

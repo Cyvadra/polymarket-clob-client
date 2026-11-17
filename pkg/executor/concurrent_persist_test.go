@@ -84,6 +84,9 @@ func newConcurrentFixture(t *testing.T, response *clobclient.OrderResponse, subm
 	if err != nil {
 		t.Fatal(err)
 	}
+	saved := persistRetryDelays
+	persistRetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { persistRetryDelays = saved })
 	var mu sync.Mutex
 	reported := &[]error{}
 	exec.SetErrorHandler(func(err error) {
@@ -103,7 +106,7 @@ func shortCancelOpen() protocol.ExecutionOpenRequest {
 
 func hasOrphan(errs []error) bool {
 	for _, err := range errs {
-		if errors.Is(err, ErrOrphanOrder) {
+		if errors.Is(err, ErrOrphanAlert) {
 			return true
 		}
 	}
@@ -139,7 +142,7 @@ func TestPostStartsBeforeCommitAndAnswerWaitsForIt(t *testing.T) {
 func TestCommitFailureWithRejectedPostReleasesWithoutCancel(t *testing.T) {
 	rejected := &clobclient.APIError{StatusCode: 400, Method: "POST", Path: "/order", Body: []byte(`{"error":"invalid order"}`)}
 	exec, storer, client, reported := newConcurrentFixture(t, nil, rejected)
-	storer.persistErrs = []error{errors.New("db down"), errors.New("db down")}
+	storer.persistErrs = dbDown(len(persistRetryDelays) + 1)
 	if err := exec.ExecuteOpen(context.Background(), shortCancelOpen()); err == nil {
 		t.Fatal("want an error")
 	}
@@ -156,7 +159,7 @@ func TestCommitFailureWithRejectedPostReleasesWithoutCancel(t *testing.T) {
 
 func TestCommitFailureWithLivePostCancelsThenReleases(t *testing.T) {
 	exec, storer, client, reported := newConcurrentFixture(t, &clobclient.OrderResponse{Success: true, OrderID: "order-1"}, nil)
-	storer.persistErrs = []error{errors.New("db down"), errors.New("db down")}
+	storer.persistErrs = dbDown(len(persistRetryDelays) + 1)
 	client.accept = true
 	err := exec.ExecuteOpen(context.Background(), shortCancelOpen())
 	if !errors.Is(err, ErrOrphanOrder) {
@@ -175,7 +178,7 @@ func TestCommitFailureWithLivePostCancelsThenReleases(t *testing.T) {
 
 func TestOrphanKeepsReservationWhenCancelNeverAccepted(t *testing.T) {
 	exec, storer, client, reported := newConcurrentFixture(t, &clobclient.OrderResponse{Success: true, OrderID: "order-1"}, nil)
-	storer.persistErrs = []error{errors.New("db down"), errors.New("db down")}
+	storer.persistErrs = dbDown(len(persistRetryDelays) + 1)
 	err := exec.ExecuteOpen(context.Background(), shortCancelOpen())
 	if !errors.Is(err, ErrOrphanOrder) {
 		t.Fatalf("err = %v, want ErrOrphanOrder", err)
@@ -245,7 +248,7 @@ func TestStreamEventBeforeCommitReplaysAfterIt(t *testing.T) {
 	}
 	exec.inflight.mu.Unlock()
 	replayed := make(chan struct{})
-	if !pending.Hold(orderID, func(context.Context) { close(replayed) }) {
+	if !pending.Hold(orderID, func(context.Context) error { close(replayed); return nil }) {
 		t.Fatalf("order %q not expected while its commit runs", orderID)
 	}
 	close(storer.release)
@@ -256,5 +259,92 @@ func TestStreamEventBeforeCommitReplaysAfterIt(t *testing.T) {
 	case <-replayed:
 	default:
 		t.Fatal("held event not replayed once the row committed")
+	}
+}
+
+func dbDown(n int) []error {
+	errs := make([]error, n)
+	for i := range errs {
+		errs[i] = errors.New("db down")
+	}
+	return errs
+}
+
+func TestCommitBlipShorterThanRetriesIsNoOrphan(t *testing.T) {
+	exec, storer, client, reported := newConcurrentFixture(t, &clobclient.OrderResponse{Success: true, OrderID: "order-1"}, nil)
+	storer.persistErrs = dbDown(len(persistRetryDelays))
+	if err := exec.ExecuteOpen(context.Background(), openRequest()); err != nil {
+		t.Fatal(err)
+	}
+	if hasOrphan(*reported) || len(client.canceled) != 0 {
+		t.Fatalf("orphaned after a blip: reported=%v canceled=%v", *reported, client.canceled)
+	}
+	if storer.order.State != statemachine.StateLive {
+		t.Fatalf("order state = %s, want LIVE", storer.order.State)
+	}
+}
+
+func TestDuplicateFromEarlierAttemptCancelsNewOrderAndKeepsReservation(t *testing.T) {
+	exec, storer, client, reported := newConcurrentFixture(t, &clobclient.OrderResponse{Success: true, OrderID: "order-1"}, nil)
+	client.accept = true
+	exec.store = &foreignRowStore{gatedStore: storer}
+	err := exec.ExecuteOpen(context.Background(), openRequest())
+	if !errors.Is(err, ErrOrphanOrder) {
+		t.Fatalf("err = %v, want ErrOrphanOrder", err)
+	}
+	if len(client.canceled) == 0 {
+		t.Fatal("the newly posted order was not cancelled")
+	}
+	if len(storer.released) != 0 {
+		t.Fatalf("released %v, but the earlier attempt's order owns the reservation", storer.released)
+	}
+	if storer.order.ExchangeOrderID != "earlier-order" {
+		t.Fatalf("the earlier attempt's row was touched: %+v", storer.order)
+	}
+	if !hasOrphan(*reported) {
+		t.Fatal("orphan not reported")
+	}
+}
+
+// foreignRowStore holds a row an earlier attempt left for the same child, so
+// every commit is a duplicate of a different signed order.
+type foreignRowStore struct {
+	*gatedStore
+}
+
+func (s *foreignRowStore) PersistSubmittingOrder(_ context.Context, record store.SignedOrderRecord, _ string) (store.SignedOrderRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.order.IntentID == "" {
+		s.order = record
+		s.order.SignedOrderHash, s.order.ExchangeOrderID = "earlier-hash", "earlier-order"
+	}
+	return store.SignedOrderRecord{}, store.ErrDuplicate
+}
+
+func TestOrphanMatchedOnArrivalSkipsCancelAndKeepsReservation(t *testing.T) {
+	exec, storer, client, reported := newConcurrentFixture(t, &clobclient.OrderResponse{Success: true, OrderID: "order-1", Status: "matched", MakingAmount: "5", TakingAmount: "10"}, nil)
+	storer.persistErrs = dbDown(len(persistRetryDelays) + 1)
+	client.accept = true
+	req := openRequest()
+	req.TimeInForce = protocol.TimeInForceFAK
+	err := exec.ExecuteOpen(context.Background(), req)
+	if !errors.Is(err, ErrOrphanOrder) {
+		t.Fatalf("err = %v, want ErrOrphanOrder", err)
+	}
+	if len(client.canceled) != 0 {
+		t.Fatalf("cancelled a FAK that already matched: %v", client.canceled)
+	}
+	if len(storer.released) != 0 {
+		t.Fatalf("released %v while its fills are unrecorded", storer.released)
+	}
+	alerts := 0
+	for _, err := range *reported {
+		if errors.Is(err, ErrOrphanAlert) {
+			alerts++
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("orphan alerts = %d, want 1: %v", alerts, *reported)
 	}
 }

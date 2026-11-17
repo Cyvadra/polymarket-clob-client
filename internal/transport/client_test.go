@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -103,5 +104,24 @@ func TestTraceReportsConnectionReuse(t *testing.T) {
 	}
 	if !timings[1].Reused || timings[1].TLS != 0 || timings[1].Total <= 0 {
 		t.Fatalf("second request should reuse the warm connection: %+v", timings[1])
+	}
+}
+
+func TestErrNotSentOnlyBeforeTheRequestLeaves(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	client := New(server.URL, nil, time.Second, 1, time.Millisecond, 0)
+	failHeaders := func(string, string, []byte) (http.Header, error) { return nil, errors.New("sign") }
+	err := client.Do(context.Background(), Request{Method: "POST", Path: "/x", Headers: failHeaders}, nil)
+	if !errors.Is(err, ErrNotSent) || calls.Load() != 0 {
+		t.Fatalf("header failure: err=%v calls=%d", err, calls.Load())
+	}
+	err = client.Do(context.Background(), Request{Method: "POST", Path: "/x"}, nil)
+	if err == nil || errors.Is(err, ErrNotSent) {
+		t.Fatalf("server failure must not be ErrNotSent: %v", err)
 	}
 }

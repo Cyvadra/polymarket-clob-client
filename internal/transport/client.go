@@ -22,6 +22,10 @@ import (
 // callers that need to tell "missing" from "broken" match on this sentinel.
 var ErrEmptyResponse = errors.New("empty response")
 
+// ErrNotSent marks a Do error raised before any request left the process:
+// the server cannot have seen it, so its outcome is not in doubt.
+var ErrNotSent = errors.New("request not sent")
+
 type HTTPError struct {
 	StatusCode   int
 	Method, Path string
@@ -86,18 +90,18 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 	}
 	if c.limiter != nil && !spec.SkipRateLimit {
 		if err := c.limiter.Wait(ctx); err != nil {
-			return fmt.Errorf("wait for rate limit: %w", err)
+			return fmt.Errorf("%w: wait for rate limit: %w", ErrNotSent, err)
 		}
 	}
 	if spec.Method == "" || !strings.HasPrefix(spec.Path, "/") {
-		return fmt.Errorf("invalid request %q %q", spec.Method, spec.Path)
+		return fmt.Errorf("%w: invalid request %q %q", ErrNotSent, spec.Method, spec.Path)
 	}
 	var body []byte
 	var err error
 	if spec.Body != nil {
 		body, err = json.Marshal(spec.Body)
 		if err != nil {
-			return fmt.Errorf("marshal request body: %w", err)
+			return fmt.Errorf("%w: marshal request body: %w", ErrNotSent, err)
 		}
 	}
 	requestURL := *c.base
@@ -122,12 +126,12 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 		if spec.Headers != nil {
 			headers, err = spec.Headers(spec.Method, requestPath, body)
 			if err != nil {
-				return err
+				return notSent(attempt, err)
 			}
 		}
 		req, err := http.NewRequestWithContext(ctx, spec.Method, requestURL.String(), bytes.NewReader(body))
 		if err != nil {
-			return fmt.Errorf("create request: %w", err)
+			return notSent(attempt, fmt.Errorf("create request: %w", err))
 		}
 		req.Header = headers
 		if body != nil {
@@ -180,6 +184,14 @@ func (c *Client) Do(ctx context.Context, spec Request, out any) error {
 		return nil
 	}
 	return last
+}
+
+// notSent marks err as ErrNotSent when no earlier attempt went out.
+func notSent(attempt int, err error) error {
+	if attempt > 0 {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrNotSent, err)
 }
 
 func wait(ctx context.Context, delay time.Duration) error {

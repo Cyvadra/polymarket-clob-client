@@ -123,8 +123,11 @@ func (c *Client) ExecuteWalletBatch(ctx context.Context, calls []WalletCall, met
 	// No retry: a resend after a lost answer could not double-spend, since the
 	// nonce is spent, but it would report a confusing failure.
 	if err := relayer.Do(ctx, transport.Request{Method: "POST", Path: "/submit", Body: body, Headers: headers, NoRetry: true}, &out); err != nil {
-		// A 4xx answer is a definite refusal; only a lost answer, a timeout
-		// or a server error leaves the outcome open.
+		// A request never sent or a 4xx answer is a definite failure; only a
+		// lost answer, a timeout or a server error leaves the outcome open.
+		if errors.Is(err, transport.ErrNotSent) {
+			return nil, fmt.Errorf("submit wallet batch: %w", err)
+		}
 		var httpErr *transport.HTTPError
 		if errors.As(err, &httpErr) && httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 && httpErr.StatusCode != http.StatusRequestTimeout {
 			return nil, fmt.Errorf("submit wallet batch: relayer refused it: %w", err)

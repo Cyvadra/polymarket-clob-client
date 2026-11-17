@@ -19,7 +19,7 @@ func TestPendingReplaysHeldInArrivalOrder(t *testing.T) {
 	p.Expect("o1")
 	var got []int
 	for i := range 3 {
-		if !p.Hold("o1", func(context.Context) { got = append(got, i) }) {
+		if !p.Hold("o1", func(context.Context) error { got = append(got, i); return nil }) {
 			t.Fatal("expected order not held")
 		}
 	}
@@ -27,7 +27,7 @@ func TestPendingReplaysHeldInArrivalOrder(t *testing.T) {
 	if !reflect.DeepEqual(got, []int{0, 1, 2}) {
 		t.Fatalf("replayed %v, want 0 1 2", got)
 	}
-	if p.Hold("o1", func(context.Context) {}) {
+	if p.Hold("o1", func(context.Context) error { return nil }) {
 		t.Fatal("stored order still held")
 	}
 }
@@ -36,12 +36,13 @@ func TestPendingQueuesEventsArrivingDuringReplay(t *testing.T) {
 	p := NewPendingOrders(context.Background(), nil)
 	p.Expect("o1")
 	var got []string
-	p.Hold("o1", func(context.Context) {
+	p.Hold("o1", func(context.Context) error {
 		got = append(got, "first")
 		// An event the stream delivers while the replay runs waits behind it.
-		if !p.Hold("o1", func(context.Context) { got = append(got, "late") }) {
+		if !p.Hold("o1", func(context.Context) error { got = append(got, "late"); return nil }) {
 			t.Error("event during replay was not held")
 		}
+		return nil
 	})
 	p.Stored("o1")
 	if !reflect.DeepEqual(got, []string{"first", "late"}) {
@@ -53,7 +54,7 @@ func TestPendingForgetDropsHeld(t *testing.T) {
 	p := NewPendingOrders(context.Background(), nil)
 	p.Expect("o1")
 	ran := false
-	p.Hold("o1", func(context.Context) { ran = true })
+	p.Hold("o1", func(context.Context) error { ran = true; return nil })
 	p.Forget("o1")
 	p.Stored("o1")
 	if ran {
@@ -63,12 +64,12 @@ func TestPendingForgetDropsHeld(t *testing.T) {
 
 func TestPendingIgnoresUnexpectedAndNil(t *testing.T) {
 	p := NewPendingOrders(context.Background(), nil)
-	if p.Hold("other", func(context.Context) {}) {
+	if p.Hold("other", func(context.Context) error { return nil }) {
 		t.Fatal("unexpected order held")
 	}
 	var none *PendingOrders
 	none.Expect("o1")
-	if none.Hold("o1", func(context.Context) {}) {
+	if none.Hold("o1", func(context.Context) error { return nil }) {
 		t.Fatal("nil registry held an event")
 	}
 	none.Stored("o1")
@@ -81,15 +82,44 @@ func TestPendingExpiresUnresolvedOrder(t *testing.T) {
 	p := NewPendingOrders(context.Background(), func(err error) { mu.Lock(); reports = append(reports, err); mu.Unlock() })
 	p.timeout = 20 * time.Millisecond
 	p.Expect("o1")
-	p.Hold("o1", func(context.Context) { t.Error("expired event replayed") })
-	time.Sleep(60 * time.Millisecond)
+	replayed := make(chan struct{})
+	p.Hold("o1", func(context.Context) error { close(replayed); return nil })
+	select {
+	case <-replayed:
+	case <-time.After(time.Second):
+		t.Fatal("expired event was dropped, not replayed")
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(reports) != 1 || !strings.Contains(reports[0].Error(), "dropped 1") {
+	if len(reports) != 1 || !strings.Contains(reports[0].Error(), "replaying 1") {
 		t.Fatalf("reports = %v", reports)
 	}
-	if p.Hold("o1", func(context.Context) {}) {
+	if p.Hold("o1", func(context.Context) error { return nil }) {
 		t.Fatal("expired order still held")
+	}
+}
+
+func TestPendingRetriesFailedReplay(t *testing.T) {
+	var reports []error
+	p := NewPendingOrders(context.Background(), func(err error) { reports = append(reports, err) })
+	p.Expect("o1")
+	calls := 0
+	p.Hold("o1", func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return errors.New("db blip")
+		}
+		return nil
+	})
+	p.Expect("o2")
+	p.Hold("o2", func(context.Context) error { return errors.New("db down") })
+	p.Stored("o1")
+	p.Stored("o2")
+	if calls != 2 {
+		t.Fatalf("replay ran %d times, want a retry after the failure", calls)
+	}
+	if len(reports) != 1 || !strings.Contains(reports[0].Error(), "o2") {
+		t.Fatalf("reports = %v, want only the replay that kept failing", reports)
 	}
 }
 

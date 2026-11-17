@@ -8,9 +8,16 @@ import (
 )
 
 // DefaultPendingTimeout bounds how long events wait for an order's row. The
-// executor always resolves an order (Stored or Forget) once its commit
-// returns, so this only catches a bug.
+// executor resolves an order (Stored or Forget) once its commit and retries
+// return, well inside this. Past it the held events are replayed anyway: the
+// row may exist by now, and an event that still finds none is reported by
+// its consumer as unknown rather than dropped here.
 const DefaultPendingTimeout = 10 * time.Second
+
+// replayRetryDelays space the retries of a held event whose replay failed,
+// such as on a transient database error. Its stream delivery was already
+// acknowledged, so this is its only retry short of a reconciler pass.
+var replayRetryDelays = []time.Duration{50 * time.Millisecond, 250 * time.Millisecond}
 
 // PendingOrders holds account events for orders posted before their row
 // committed. The executor commits an order's row alongside its POST, so the
@@ -31,12 +38,12 @@ type PendingOrders struct {
 }
 
 type pendingOrder struct {
-	held  []func(context.Context)
+	held  []func(context.Context) error
 	timer *time.Timer
 }
 
 // NewPendingOrders replays held events on ctx. onError, if set, hears of an
-// order left unresolved past the timeout.
+// order left unresolved past the timeout and of a replay that kept failing.
 func NewPendingOrders(ctx context.Context, onError func(error)) *PendingOrders {
 	return &PendingOrders{ctx: ctx, timeout: DefaultPendingTimeout, onError: onError, pending: map[string]*pendingOrder{}}
 }
@@ -59,7 +66,7 @@ func (p *PendingOrders) Expect(orderID string) {
 // Hold queues fn for orderID if the order is expected, reporting whether it
 // did. A false answer means the order is not awaited and the caller handles
 // the event as it would any unknown order.
-func (p *PendingOrders) Hold(orderID string, fn func(context.Context)) bool {
+func (p *PendingOrders) Hold(orderID string, fn func(context.Context) error) bool {
 	if p == nil || orderID == "" {
 		return false
 	}
@@ -97,9 +104,7 @@ func (p *PendingOrders) Stored(orderID string) {
 		batch := entry.held
 		entry.held = nil
 		p.mu.Unlock()
-		for _, fn := range batch {
-			fn(p.ctx)
-		}
+		p.replay(orderID, batch)
 	}
 }
 
@@ -123,9 +128,26 @@ func (p *PendingOrders) expire(orderID string, entry *pendingOrder) {
 		return
 	}
 	delete(p.pending, orderID)
-	dropped := len(entry.held)
+	batch := entry.held
+	entry.held = nil
 	p.mu.Unlock()
 	if p.onError != nil {
-		p.onError(fmt.Errorf("order %s was never stored or forgotten within %s; dropped %d held account events", orderID, p.timeout, dropped))
+		p.onError(fmt.Errorf("order %s was never stored or forgotten within %s; replaying %d held account events anyway", orderID, p.timeout, len(batch)))
+	}
+	p.replay(orderID, batch)
+}
+
+// replay runs held events in order, retrying each failed one before moving
+// on, and reports one that keeps failing.
+func (p *PendingOrders) replay(orderID string, batch []func(context.Context) error) {
+	for _, fn := range batch {
+		err := fn(p.ctx)
+		for attempt := 0; err != nil && attempt < len(replayRetryDelays) && p.ctx.Err() == nil; attempt++ {
+			time.Sleep(replayRetryDelays[attempt])
+			err = fn(p.ctx)
+		}
+		if err != nil && p.onError != nil {
+			p.onError(fmt.Errorf("replay held account event for order %s: %w", orderID, err))
+		}
 	}
 }

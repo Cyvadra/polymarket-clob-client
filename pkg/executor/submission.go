@@ -284,52 +284,98 @@ func submittingRecord(signed store.SignedOrderRecord) (store.SignedOrderRecord, 
 	return submitting, nil
 }
 
-// awaitPersist waits for the background commit. A failed one is tried once
-// more; a duplicate on that retry means the first did land after all.
+// persistRetryDelays space the retries of a failed background commit, so a
+// short database blip does not orphan an order that is already posted. The
+// total stays well inside accountfeed.DefaultPendingTimeout, which holds the
+// order's early account events meanwhile.
+var persistRetryDelays = []time.Duration{50 * time.Millisecond, 250 * time.Millisecond, time.Second}
+
+// errForeignRow marks a commit that met a row for the same intent and child
+// left by an earlier attempt. That row is a different signed order, and it
+// owns the reservation both share.
+var errForeignRow = errors.New("an earlier attempt's order holds this child's row")
+
+// awaitPersist waits for the background commit and retries a failed one. A
+// duplicate is the commit having landed only if the stored row is this very
+// signed order; any other row belongs to an earlier attempt.
 func (e *Executor) awaitPersist(ctx context.Context, done <-chan persistResult, record store.SignedOrderRecord) (store.SignedOrderRecord, error) {
 	defer stage(ctx, time.Now(), stagePersistWait)
-	first := <-done
-	if first.err == nil {
-		return first.order, nil
-	}
+	result := <-done
 	retryCtx := context.WithoutCancel(ctx)
-	stored, err := e.store.PersistSubmittingOrder(retryCtx, record, "submit requested")
-	switch {
-	case err == nil:
-		return stored, nil
-	case errors.Is(err, store.ErrDuplicate):
-		if stored, loadErr := e.store.OrderByIntent(retryCtx, record.IntentID, record.ChildSequence); loadErr == nil {
-			return stored, nil
+	var errs error
+	for attempt := 0; ; attempt++ {
+		if result.err == nil {
+			return result.order, nil
 		}
+		if errors.Is(result.err, store.ErrDuplicate) {
+			stored, err := e.store.OrderByIntent(retryCtx, record.IntentID, record.ChildSequence)
+			switch {
+			case err == nil && stored.SignedOrderHash == record.SignedOrderHash:
+				return stored, nil
+			case err == nil:
+				return store.SignedOrderRecord{}, fmt.Errorf("persist signed order: %w (stored order %s)", errForeignRow, stored.ExchangeOrderID)
+			}
+			result.err = fmt.Errorf("%w; load it: %w", result.err, err)
+		}
+		errs = errors.Join(errs, result.err)
+		if attempt >= len(persistRetryDelays) {
+			return store.SignedOrderRecord{}, fmt.Errorf("persist signed order: %w", errs)
+		}
+		time.Sleep(persistRetryDelays[attempt])
+		result.order, result.err = e.store.PersistSubmittingOrder(retryCtx, record, "submit requested")
 	}
-	return store.SignedOrderRecord{}, fmt.Errorf("persist signed order: %w (retry: %v)", first.err, err)
 }
 
 // ErrOrphanOrder marks an order that was posted but whose row could not be
-// committed: no observer can see it, so it is cancelled by ID.
+// committed: no observer can see it, so it is cancelled by ID. Callers get
+// it back; it is reported once, as ErrOrphanAlert.
 var ErrOrphanOrder = errors.New("order posted without a stored row")
+
+// ErrOrphanAlert is carried only by the single report settleOrphan makes for
+// an orphan, so a handler counting orphans counts each once however often
+// callers re-report the returned ErrOrphanOrder.
+var ErrOrphanAlert = errors.New("orphan order")
 
 // settleOrphan handles a POST whose order row never committed. A rejected
 // order never existed, so its reservation goes. Any other answer may have
 // left it live: it is cancelled by ID, and its reservation is released only
 // once the exchange accepts the cancel, so unseen exposure stays counted.
-func (e *Executor) settleOrphan(ctx context.Context, intent protocol.ExecutionIntent, orderID string, child plannedChild, submitErr, persistErr error) error {
+//
+// The reservation is never released when the row that blocked the commit is
+// an earlier attempt's, which still owns it, nor when the POST matched: the
+// match's fills have no row to land on, so the exposure stays counted until
+// an operator reconciles the position.
+func (e *Executor) settleOrphan(ctx context.Context, intent protocol.ExecutionIntent, orderID string, child plannedChild, response *clobclient.OrderResponse, submitErr, persistErr error) error {
 	reservationID := reservationID(intent.IntentID, child.Sequence)
 	ctx = context.WithoutCancel(ctx)
+	ownsReservation := !errors.Is(persistErr, errForeignRow)
 	if submitErr != nil && isOrderRejected(submitErr) {
-		_ = e.store.Release(ctx, reservationID, "order rejected and never stored")
+		if ownsReservation {
+			_ = e.store.Release(ctx, reservationID, "order rejected and never stored")
+		}
 		e.reportError(fmt.Errorf("persist rejected order %s for intent %s: %w", orderID, intent.IntentID, persistErr))
 		// The exchange's refusal decides the intent's outcome, as it would
 		// had the row committed.
 		return rejection{code: protocol.ReasonOrderRejected, reason: rejectionReason(submitErr), cause: submitErr}
 	}
 	err := fmt.Errorf("%w: order %s for intent %s: %w", ErrOrphanOrder, orderID, intent.IntentID, persistErr)
-	e.reportError(err)
-	if orderID != "" && e.cancelUntilAccepted(ctx, intent.Policy, orderID) {
-		_ = e.store.Release(ctx, reservationID, "unstored order canceled")
-	} else {
-		e.reportError(fmt.Errorf("%w: order %s may still be live; its reservation is kept", ErrOrphanOrder, orderID))
+	matched := submitErr == nil && response != nil && strings.EqualFold(strings.TrimSpace(response.Status), "matched")
+	var outcome string
+	switch {
+	case matched && statemachine.Immediate(string(child.TimeInForce)):
+		// A FAK or FOK match is final: there is nothing left to cancel.
+		outcome = "it matched on arrival and its fills cannot be recorded; its reservation is kept"
+	case orderID != "" && e.cancelUntilAccepted(ctx, intent.Policy, orderID):
+		outcome = "it was canceled"
+		if matched {
+			outcome += ", but its match on arrival cannot be recorded; its reservation is kept"
+		} else if ownsReservation {
+			_ = e.store.Release(ctx, reservationID, "unstored order canceled")
+		}
+	default:
+		outcome = "it may still be live; its reservation is kept"
 	}
+	e.reportError(fmt.Errorf("%w: %w; %s", ErrOrphanAlert, err, outcome))
 	return err
 }
 
@@ -534,7 +580,7 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 		stored, err := persisted()
 		if err != nil {
 			e.pending.Forget(signed.OrderID)
-			return e.settleOrphan(ctx, intent, signed.OrderID, child, submitErr, err)
+			return e.settleOrphan(ctx, intent, signed.OrderID, child, response, submitErr, err)
 		}
 		// Apply what the stream said before the row existed, then the answer.
 		// A held event that moved the order on makes the transitions below

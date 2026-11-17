@@ -223,8 +223,9 @@ func run() error {
 	lifecycleError := stats.errorHandler("lifecycle", "execution lifecycle error")
 	execution.SetErrorHandler(func(err error) {
 		// A posted order with no stored row is invisible to every observer;
-		// it gets its own counter so an alert can find it.
-		if errors.Is(err, executor.ErrOrphanOrder) {
+		// it gets its own counter so an alert can find it. ErrOrphanAlert
+		// marks the one report per orphan, not callers' re-reports.
+		if errors.Is(err, executor.ErrOrphanAlert) {
 			stats.countError("orphan_order")
 		}
 		lifecycleError(err)

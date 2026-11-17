@@ -47,7 +47,8 @@ func resetStages(ctx context.Context) context.Context {
 }
 
 // stage adds the time since start to the stage field pick selects. Use as
-// defer stage(ctx, time.Now(), func(s *PrePostStages) *time.Duration { return &s.Sign }).
+// defer stage(ctx, time.Now(), stageSign), passing one of the named pickers
+// below so the hot path does not allocate a closure per order.
 func stage(ctx context.Context, start time.Time, pick func(*PrePostStages) *time.Duration) {
 	if stages, ok := ctx.Value(stagesKey{}).(*PrePostStages); ok {
 		*pick(stages) += time.Since(start)

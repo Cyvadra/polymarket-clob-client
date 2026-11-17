@@ -84,14 +84,14 @@ func (c *FillConsumer) SetFeeSchedules(fees FeeSchedules) {
 	c.fees = fees
 }
 
-// Consume stores a fill exactly once. The caller may safely retry a delivery
-// whose acknowledgement was lost because FillID is the durable idempotency key.
 // SetPendingOrders holds fills of orders whose row is still committing,
 // instead of dropping them as unknown.
 func (c *FillConsumer) SetPendingOrders(pending *PendingOrders) {
 	c.pending = pending
 }
 
+// Consume stores a fill exactly once. The caller may safely retry a delivery
+// whose acknowledgement was lost because FillID is the durable idempotency key.
 func (c *FillConsumer) Consume(ctx context.Context, fill AccountFill) (bool, error) {
 	return c.consume(ctx, fill, true)
 }
@@ -107,10 +107,11 @@ func (c *FillConsumer) consume(ctx context.Context, fill AccountFill, holdable b
 		return false, fmt.Errorf("exchange order ID is required for an account fill")
 	}
 	order, err := c.store.OrderByExchangeID(ctx, fill.ExchangeOrderID)
-	if err == store.ErrNotFound && holdable && c.pending.Hold(fill.ExchangeOrderID, func(ctx context.Context) {
-		if _, err := c.consume(ctx, fill, false); err != nil && c.onError != nil {
-			c.onError(fmt.Errorf("replay held fill: %w", err))
+	if err == store.ErrNotFound && holdable && c.pending.Hold(fill.ExchangeOrderID, func(ctx context.Context) error {
+		if _, err := c.consume(ctx, fill, false); err != nil {
+			return fmt.Errorf("replay held fill: %w", err)
 		}
+		return nil
 	}) {
 		return false, nil
 	}

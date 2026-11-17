@@ -88,10 +88,11 @@ func (c *OrderConsumer) consume(ctx context.Context, observation AccountOrderEve
 	if errors.Is(err, store.ErrNotFound) {
 		// An order posted before its row committed: replay the event once
 		// the row exists. Anything else unknown is not ours to track.
-		if !holdable || c.pending.Hold(observation.ExchangeOrderID, func(ctx context.Context) {
-			if err := c.consume(ctx, observation, false); err != nil && c.onError != nil {
-				c.onError(fmt.Errorf("replay held order event: %w", err))
+		if !holdable || c.pending.Hold(observation.ExchangeOrderID, func(ctx context.Context) error {
+			if err := c.consume(ctx, observation, false); err != nil {
+				return fmt.Errorf("replay held order event: %w", err)
 			}
+			return nil
 		}) {
 			return nil
 		}

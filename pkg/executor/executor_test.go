@@ -101,6 +101,7 @@ func (s *fakeStore) PersistSubmittingOrder(ctx context.Context, record store.Sig
 	return s.TransitionOrder(ctx, store.SignedOrderRecord{
 		IntentID: record.IntentID, ChildSequence: record.ChildSequence, State: record.State,
 		Revision: record.Revision, MatchedShares: "0", RequestedShares: record.RequestedShares,
+		SignedOrderHash: record.SignedOrderHash,
 	}, statemachine.EventSubmitStarted, "0", "", reason)
 }
 func (s *fakeStore) PersistSignedOrder(_ context.Context, record store.SignedOrderRecord) error {

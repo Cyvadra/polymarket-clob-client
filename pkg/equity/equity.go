@@ -20,6 +20,11 @@ import (
 // run for many intents a second; the exchange balance moves only on fills.
 const DefaultCashTTL = 5 * time.Second
 
+// DefaultFillSettle is how long after a fill a balance read is not cached:
+// the exchange balance can lag the match, so a read that soon may still
+// count the filled order's cash and must not be reused for a whole TTL.
+const DefaultFillSettle = 2 * time.Second
+
 type BalanceReader interface {
 	BalanceAllowance(ctx context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error)
 }
@@ -59,6 +64,7 @@ type Tracker struct {
 	now       func() time.Time
 
 	cashTTL     time.Duration
+	fillSettle  time.Duration
 	maxQuoteAge time.Duration
 	// settled values positions in markets that have resolved; nil values
 	// them like any other unquoted position (SetSettlements).
@@ -70,6 +76,8 @@ type Tracker struct {
 	// gen counts invalidations, so a read that was in flight when a fill
 	// invalidated the cache is not stored as though it followed the fill.
 	gen uint64
+	// invalidatedAt is when the last fill invalidated the cache.
+	invalidatedAt time.Time
 	// reading serializes exchange reads, so callers that find the cache
 	// stale share one round trip without holding mu across it.
 	reading sync.Mutex
@@ -84,7 +92,7 @@ func New(balances BalanceReader, positions store.PositionStore, quotes QuoteSour
 	if now == nil {
 		now = time.Now
 	}
-	return &Tracker{balances: balances, positions: positions, quotes: quotes, now: now, cashTTL: DefaultCashTTL, wake: make(chan struct{}, 1)}, nil
+	return &Tracker{balances: balances, positions: positions, quotes: quotes, now: now, cashTTL: DefaultCashTTL, fillSettle: DefaultFillSettle, wake: make(chan struct{}, 1)}, nil
 }
 
 // SetCashTTL sets how long a balance read is reused; 0 reads on every call.
@@ -92,6 +100,14 @@ func (t *Tracker) SetCashTTL(ttl time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.cashTTL = ttl
+}
+
+// SetFillSettle sets how long after an invalidation a balance read is used
+// but not cached; 0 caches at once.
+func (t *Tracker) SetFillSettle(settle time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.fillSettle = settle
 }
 
 // SetMaxQuoteAge makes a bid older than age count as missing. 0 accepts any age.
@@ -104,6 +120,7 @@ func (t *Tracker) Invalidate() {
 	t.mu.Lock()
 	t.cashAt = time.Time{}
 	t.gen++
+	t.invalidatedAt = t.now()
 	t.mu.Unlock()
 	select {
 	case t.wake <- struct{}{}:
@@ -113,8 +130,8 @@ func (t *Tracker) Invalidate() {
 
 // RunCashRefresh keeps the balance fresh off the order path until ctx ends:
 // it reads again at half the TTL, so a cached value never expires under an
-// entry, and at once after an invalidation, so the read that follows a fill
-// is usually done before the next entry sizes. Entries still read the
+// entry, and once the fill settle window has passed after an invalidation,
+// so the post-fill balance is cached soon after the exchange shows it. Entries still read the
 // exchange themselves when this has not caught up, so the cache is never
 // trusted past its TTL or across a fill. onErr, if set, sees failed reads.
 func (t *Tracker) RunCashRefresh(ctx context.Context, onErr func(error)) {
@@ -132,6 +149,19 @@ func (t *Tracker) RunCashRefresh(ctx context.Context, onErr func(error)) {
 			return
 		case <-ticker.C:
 		case <-t.wake:
+			// A read inside the settle window would not be cached.
+			t.mu.Lock()
+			wait := t.invalidatedAt.Add(t.fillSettle).Sub(t.now())
+			t.mu.Unlock()
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
 		}
 		readCtx, cancel := context.WithTimeout(ctx, ttl)
 		_, _, err := t.read(readCtx, ttl/2)
@@ -167,7 +197,8 @@ func (t *Tracker) freshLocked(maxAge time.Duration) (float64, time.Time, bool) {
 
 // read fetches the balance from the exchange unless one younger than maxAge
 // is cached by the time it gets its turn. A read overtaken by an
-// invalidation is done again, since it may predate the fill.
+// invalidation is done again, since it may predate the fill. A read begun
+// within the fill settle window is returned but not cached.
 func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time.Time, error) {
 	t.reading.Lock()
 	defer t.reading.Unlock()
@@ -178,6 +209,7 @@ func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time
 			return cash, at, nil
 		}
 		gen := t.gen
+		settling := !t.invalidatedAt.IsZero() && t.now().Sub(t.invalidatedAt) < t.fillSettle
 		t.mu.Unlock()
 		balance, err := t.balances.BalanceAllowance(ctx, "COLLATERAL", "")
 		if err != nil {
@@ -190,7 +222,9 @@ func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time
 		now := t.now()
 		t.mu.Lock()
 		if t.gen == gen {
-			t.cash, t.cashAt = cash, now
+			if !settling {
+				t.cash, t.cashAt = cash, now
+			}
 			t.mu.Unlock()
 			return cash, now, nil
 		}

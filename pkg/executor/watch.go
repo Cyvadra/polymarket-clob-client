@@ -116,13 +116,6 @@ func (e *Executor) unwatch(key orderKey) {
 	delete(e.watched, key)
 }
 
-// checkWatched cancels every watched order past its deadline or drifted past
-// its bound and waits for those cancels. The deadline loop uses
-// startWatchedCancels, which does not wait.
-func (e *Executor) checkWatched(ctx context.Context) error {
-	return <-e.startWatchedCancels(ctx)
-}
-
 // startWatchedCancels finds every watched order past its deadline or drifted
 // past its bound and starts its cancel in the background. Deciding that
 // touches only memory; the database is read only for an order that is due a
