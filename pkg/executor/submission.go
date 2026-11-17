@@ -551,9 +551,12 @@ func (e *Executor) submitOrder(ctx context.Context, intent protocol.ExecutionInt
 // POST; updated is then the locally built row, and the stored one replaces it
 // before anything about the answer is recorded.
 func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionIntent, signed clobclient.SignedOrderV2, child plannedChild, updated store.SignedOrderRecord, persisted func() (store.SignedOrderRecord, error)) error {
-	publishStart := time.Now()
-	e.publishTransition(updated, intent, "submit requested")
-	stage(ctx, publishStart, stagePublish)
+	// A row still committing is announced once it exists, never before.
+	if persisted == nil {
+		publishStart := time.Now()
+		e.publishTransition(updated, intent, "submit requested")
+		stage(ctx, publishStart, stagePublish)
+	}
 	// Register the POST so a CANCEL_OPEN arriving before its answer can fire
 	// cancels at it; once the answer is recorded, honour such a cancel.
 	post := e.inflight.start(signed.OrderID)
@@ -582,13 +585,22 @@ func (e *Executor) sendOrder(ctx context.Context, intent protocol.ExecutionInten
 			e.pending.Forget(signed.OrderID)
 			return e.settleOrphan(ctx, intent, signed.OrderID, child, response, submitErr, err)
 		}
-		// Apply what the stream said before the row existed, then the answer.
-		// A held event that moved the order on makes the transitions below
-		// conflict, which they handle as when the stream wins a race.
-		e.pending.Stored(signed.OrderID)
 		updated = stored
+		publishStart := time.Now()
+		e.publishTransition(updated, intent, "submit requested")
+		stage(ctx, publishStart, stagePublish)
+		// Apply what the stream said before the row existed, then the answer.
+		// A held event that moved the order on makes the acknowledgement
+		// below conflict, which it handles as when the stream wins a race.
+		e.pending.Stored(signed.OrderID)
 	}
 	if submitErr != nil {
+		// The stream may have moved the order on while the POST failed: it
+		// reached the exchange after all. Leave it to the stream and the
+		// reconciler rather than fail a transition from a stale revision.
+		if current, err := e.store.OrderByExchangeID(ctx, signed.OrderID); signed.OrderID != "" && err == nil && current.State != updated.State {
+			return unresolvedSubmission{cause: fmt.Errorf("order submission failed but the order was observed %s: %w", current.State, submitErr)}
+		}
 		if isOrderRejected(submitErr) {
 			return e.markSubmitRejected(ctx, updated, intent, submitErr)
 		}

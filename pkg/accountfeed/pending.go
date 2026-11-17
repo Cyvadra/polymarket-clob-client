@@ -127,14 +127,14 @@ func (p *PendingOrders) expire(orderID string, entry *pendingOrder) {
 		p.mu.Unlock()
 		return
 	}
-	delete(p.pending, orderID)
-	batch := entry.held
-	entry.held = nil
+	held := len(entry.held)
 	p.mu.Unlock()
 	if p.onError != nil {
-		p.onError(fmt.Errorf("order %s was never stored or forgotten within %s; replaying %d held account events anyway", orderID, p.timeout, len(batch)))
+		p.onError(fmt.Errorf("order %s was never stored or forgotten within %s; replaying %d held account events anyway", orderID, p.timeout, held))
 	}
-	p.replay(orderID, batch)
+	// Drain as Stored does, keeping the order expected until the queue is
+	// empty, so an event arriving during the replay queues behind it.
+	p.Stored(orderID)
 }
 
 // replay runs held events in order, retrying each failed one before moving

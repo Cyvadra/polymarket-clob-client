@@ -238,7 +238,11 @@ func run() error {
 	// An order posted just before a crash may have no row; nothing else would
 	// ever see it. Sweep before taking intents, while none can be mid-commit.
 	if err := execution.SweepUnknownOrders(ctx, clob); err != nil {
-		stats.countError("orphan_order")
+		// Only an order actually found without a row is an orphan; a failed
+		// listing or lookup is reported as the error it is.
+		if errors.Is(err, executor.ErrOrphanAlert) {
+			stats.countError("orphan_order")
+		}
 		lifecycleError(err)
 	}
 	openWork, err := nats.SubscribeOpen(ctx, bus, execution, cfg.AllowedStrategies, onHandlerError)

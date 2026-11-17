@@ -81,6 +81,11 @@ type Tracker struct {
 	// reading serializes exchange reads, so callers that find the cache
 	// stale share one round trip without holding mu across it.
 	reading sync.Mutex
+	// last is the latest exchange read, cached or not, with when it began,
+	// so callers queued behind it during the fill settle window share it.
+	last        float64
+	lastStarted time.Time
+	lastGen     uint64
 	// wake asks RunCashRefresh to read now, after an invalidation.
 	wake chan struct{}
 }
@@ -164,7 +169,9 @@ func (t *Tracker) RunCashRefresh(ctx context.Context, onErr func(error)) {
 			}
 		}
 		readCtx, cancel := context.WithTimeout(ctx, ttl)
-		_, _, err := t.read(readCtx, ttl/2)
+		// Read unless the cache is young: a value read just after the last
+		// tick is slightly under ttl/2 old at this one and must not skip it.
+		_, _, err := t.read(readCtx, ttl/4)
 		cancel()
 		if err != nil && ctx.Err() == nil && onErr != nil {
 			onErr(err)
@@ -200,6 +207,7 @@ func (t *Tracker) freshLocked(maxAge time.Duration) (float64, time.Time, bool) {
 // invalidation is done again, since it may predate the fill. A read begun
 // within the fill settle window is returned but not cached.
 func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time.Time, error) {
+	called := t.now()
 	t.reading.Lock()
 	defer t.reading.Unlock()
 	for attempt := 0; ; attempt++ {
@@ -208,8 +216,17 @@ func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time
 			t.mu.Unlock()
 			return cash, at, nil
 		}
+		// A read that began after this call, with no fill since, is as
+		// good as one of its own; uncached settle-window reads are shared
+		// this way instead of each waiter making its own round trip.
+		if attempt == 0 && !t.lastStarted.IsZero() && !t.lastStarted.Before(called) && t.lastGen == t.gen {
+			cash, at := t.last, t.lastStarted
+			t.mu.Unlock()
+			return cash, at, nil
+		}
 		gen := t.gen
-		settling := !t.invalidatedAt.IsZero() && t.now().Sub(t.invalidatedAt) < t.fillSettle
+		started := t.now()
+		settling := !t.invalidatedAt.IsZero() && started.Sub(t.invalidatedAt) < t.fillSettle
 		t.mu.Unlock()
 		balance, err := t.balances.BalanceAllowance(ctx, "COLLATERAL", "")
 		if err != nil {
@@ -222,6 +239,7 @@ func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time
 		now := t.now()
 		t.mu.Lock()
 		if t.gen == gen {
+			t.last, t.lastStarted, t.lastGen = cash, started, gen
 			if !settling {
 				t.cash, t.cashAt = cash, now
 			}

@@ -142,8 +142,10 @@ func (r *Reconciler) Reconcile(ctx context.Context) error {
 	return err
 }
 
-// reconcile reports whether the pass reached every unresolved order, along
-// with the errors of the pass.
+// reconcile reports whether the pass completed, along with its errors. A pass
+// in which one order fails still completes, but not one in which every order
+// lookup failed, or the trade replay failed with no order to look up: that is
+// the exchange or the store being unreachable, which health must see.
 func (r *Reconciler) reconcile(ctx context.Context) (bool, error) {
 	// A fill the store cannot apply must not stall order reconciliation. Order
 	// state comes from REST order lookups, not from fills, and an order left
@@ -154,13 +156,21 @@ func (r *Reconciler) reconcile(ctx context.Context) (bool, error) {
 	}
 	reconcileErr := r.replayTrades(ctx, oldestCreated(orders))
 	fillsCurrent := reconcileErr == nil
+	failed := 0
 	for _, order := range orders {
 		if err := r.reconcileOrder(ctx, order, fillsCurrent); err != nil {
+			failed++
 			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("reconcile %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
 	}
 	// A cancelled context failed the orders it had not reached.
-	return ctx.Err() == nil, reconcileErr
+	completed := ctx.Err() == nil
+	if len(orders) > 0 {
+		completed = completed && failed < len(orders)
+	} else {
+		completed = completed && fillsCurrent
+	}
+	return completed, reconcileErr
 }
 
 // replayTrades replays account trades newer than the max trade age. The

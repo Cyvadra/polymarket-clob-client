@@ -108,11 +108,16 @@ type fakeCLOB struct {
 	orders map[string]*clobclient.Order
 	trades []clobclient.Trade
 	err    error
+	// orderErrs fails lookups of the named orders only.
+	orderErrs map[string]error
 }
 
 func (c *fakeCLOB) Order(_ context.Context, orderID string) (*clobclient.Order, error) {
 	if c.err != nil {
 		return nil, c.err
+	}
+	if err := c.orderErrs[orderID]; err != nil {
+		return nil, err
 	}
 	return c.orders[orderID], nil
 }
@@ -539,8 +544,15 @@ func TestReconcileReplaysOldTradesOfAnUnresolvedOrder(t *testing.T) {
 }
 
 func TestPassWithAFailingOrderStillCountsAsSuccess(t *testing.T) {
-	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
-	reconciler, _ := New(repository, &fakeCLOB{err: errors.New("network failure")}, nil, "", time.Now, time.Second)
+	repository := &fakeStore{orders: []store.SignedOrderRecord{
+		{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3},
+		{IntentID: "intent-2", ChildSequence: 1, ExchangeOrderID: "order-2", State: statemachine.StateLive, Revision: 3},
+	}}
+	client := &fakeCLOB{
+		orders:    map[string]*clobclient.Order{"order-2": {ID: "order-2", Status: "LIVE"}},
+		orderErrs: map[string]error{"order-1": errors.New("bad order")},
+	}
+	reconciler, _ := New(repository, client, nil, "", time.Now, time.Second)
 	var reported error
 	reconciler.SetErrorHandler(func(err error) { reported = err })
 	reconciler.pass(context.Background())
@@ -548,6 +560,15 @@ func TestPassWithAFailingOrderStillCountsAsSuccess(t *testing.T) {
 		t.Fatal("expected the order error to be reported")
 	}
 	if reconciler.LastSuccess().IsZero() {
-		t.Fatal("a pass that reached every order must stamp its success")
+		t.Fatal("a pass in which only one order failed must stamp its success")
+	}
+}
+
+func TestPassWithEveryOrderFailingIsNotASuccess(t *testing.T) {
+	repository := &fakeStore{orders: []store.SignedOrderRecord{{IntentID: "intent-1", ChildSequence: 1, ExchangeOrderID: "order-1", State: statemachine.StateLive, Revision: 3}}}
+	reconciler, _ := New(repository, &fakeCLOB{err: errors.New("network failure")}, nil, "", time.Now, time.Second)
+	reconciler.pass(context.Background())
+	if !reconciler.LastSuccess().IsZero() {
+		t.Fatal("a pass in which every order lookup failed must not stamp success")
 	}
 }
