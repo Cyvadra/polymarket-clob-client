@@ -4,10 +4,6 @@ Open items restored from before 5d6b78b; the done ones stay in git history.
 
 ## Quote ladders for pmm (requested 2026-11-09)
 
-- [ ] Run the Postgres store tests (`go test -tags postgres
-  ./pkg/store/postgres/ -run Quote`, with `EXECUTION_TEST_POSTGRES_URL`)
-  against a scratch database, not the live one. (`000012_quote_lanes.sql` was
-  applied on aws-london-light on 2026-11-09.)
 - [ ] Live checks before pmm enables FairDeltaQuote (pmm `NOTICE.md`):
   - On `executiond-london`, publish two quotes that share a level. In
     `order_events`, check that no `CANCEL_REQUESTED` and no new child appear
