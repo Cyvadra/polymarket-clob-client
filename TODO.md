@@ -29,6 +29,9 @@ Open items restored from before 5d6b78b; the done ones stay in git history.
   exchange's side. It costs 1-2s of FIFO queue position on a lane's first
   quote. Check whether it tracks the first order per market or token
   (exchange-side lookup) and whether a pre-warm call could absorb it.
+- [ ] Ladder POST ttfb rises about +100ms per child (186, 288, 393ms). Check
+  for per-account throttling or a proxy queue; concurrent cancels might
+  worsen it.
 
 ## Reposting (2026-11-09)
 
