@@ -63,6 +63,9 @@ func Plan(request Request) (Decision, error) {
 	if err := checkMinOrderSize(shares, request.Market.MinOrderSize); err != nil {
 		return Decision{}, err
 	}
+	if err := checkMarketableNotional(request, price, shares); err != nil {
+		return Decision{}, err
+	}
 	return Decision{
 		Price:       decimal.FormatPrice(price),
 		Shares:      shares,
@@ -125,6 +128,37 @@ func checkMinOrderSize(shares string, minOrderSize float64) error {
 	}
 	if parsed+1e-9 < minOrderSize {
 		return belowMinOrderSizeError{reason: fmt.Sprintf("planned shares %s are below the market minimum order size %.4f", shares, minOrderSize)}
+	}
+	return nil
+}
+
+// minMarketableNotional is the smallest order the exchange accepts when it
+// would take liquidity, measured at the order's limit price.
+const minMarketableNotional = 1.0
+
+// checkMarketableNotional refuses a SPLIT_PRESERVE sell that would cross the
+// book while worth less than minMarketableNotional at its limit price, which
+// the exchange rejects. A preserve sells the complement, so an aggressive buy
+// of a favourite becomes a cheap sell: 5 Up at 0.90 is a $0.50 sell of Down at
+// 0.10. A sell that rests is held only to the share minimum, and one priced
+// without a fresh quote is left to the exchange.
+func checkMarketableNotional(request Request, price float64, shares string) error {
+	intent := request.Intent
+	if intent.Policy.Style != protocol.ExecutionStyleSplitPreserve || intent.Side != protocol.SideSell {
+		return nil
+	}
+	quote, ok := freshQuoteForToken(request)
+	if !ok || quote.Bid <= 0 || price > quote.Bid {
+		return nil
+	}
+	size, err := decimal.PositiveFloat(shares)
+	if err != nil {
+		return err
+	}
+	if notional := size * price; notional+1e-9 < minMarketableNotional {
+		return belowMinOrderSizeError{reason: fmt.Sprintf(
+			"the preserve sells %s of the complement at %s, crossing its bid %s: $%.4f, under the exchange's $%g minimum for a marketable order",
+			shares, decimal.FormatPrice(price), decimal.FormatPrice(quote.Bid), notional, minMarketableNotional)}
 	}
 	return nil
 }
