@@ -5,16 +5,26 @@ Open items restored from before 5d6b78b; the done ones stay in git history.
 ## Quote ladders for pmm (requested 2026-11-09)
 
 - [ ] Run the Postgres store tests (`go test -tags postgres
-  ./pkg/store/postgres/ -run Quote`, with `EXECUTION_TEST_POSTGRES_URL`) and
-  apply migration `000012_quote_lanes.sql`.
+  ./pkg/store/postgres/ -run Quote`, with `EXECUTION_TEST_POSTGRES_URL`)
+  against a scratch database, not the live one. (`000012_quote_lanes.sql` was
+  applied on aws-london-light on 2026-11-09.)
 - [ ] Live checks before pmm enables FairDeltaQuote (pmm `NOTICE.md`):
   - On `executiond-london`, publish two quotes that share a level. In
     `order_events`, check that no `CANCEL_REQUESTED` and no new child appear
     at the shared price.
-  - Check that the post-only cross wording (39c6357) also holds for a level
-    posted through the batch `/orders` call (per-order `errorMsg`).
+  - Partial evidence from the 2026-11-09 Quote/ObiQuote lanes (no quote lanes
+    since 2026-11-10): the 5 `quote requote` cancels had no new child at the
+    same price within 5 s. All 5 same-price reposts were a `quote empty`
+    cancel followed by the quote returning ~0.1-1 s later (queue position
+    lost). A two-quote shared level wasn't directly observed.
+  - [x] Post-only cross wording holds for batch posts: intent 2c0bdfb4 posted
+    3 levels in one batch on 2026-11-09 15:09:11, and each got
+    `POST_ONLY_CROSS` "invalid post-only order: order crosses book".
   - Check `executiond_quote_fill_to_cancel_seconds` after the first real
-    fills. It bounds how often a sweep fills two levels.
+    fills. It bounds how often a sweep fills two levels. One sample so far
+    (2026-11-09 15:39:15, intent 12e11f76): fill seen to cancel requested
+    727 ms, cancel answered 860 ms after the fill. Most of that is before the
+    request goes out, so look there first.
   - The requote rate: about 60 level cancels per quoted market in pmm's
     replay of 2026-11-01. Compare `executiond_quote_levels_total` with the
     exchange's limits and `executiond_loop_pass_overruns_total`.
