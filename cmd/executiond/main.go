@@ -165,6 +165,10 @@ func run() error {
 	})
 	warmExchangeConnections(ctx, clob, cfg.KeepWarmInterval, stats.observeKeepWarm)
 
+	if err := warmOrderPath(ctx, store, clob); err != nil {
+		return err
+	}
+
 	execution, err := executor.New(store, clob, time.Now)
 	if err != nil {
 		return err
@@ -879,4 +883,24 @@ func refreshDrawdown(ctx context.Context, limits *equity.DrawdownLimits, obs *ob
 // drawdownLimited reports whether any drawdown limit, wallet or strategy, is set.
 func (c config) drawdownLimited() bool {
 	return !c.MaxDrawdown.IsZero() || len(c.StrategyMaxDrawdown) > 0 || !c.StrategyDefaultMaxDrawdown.IsZero()
+}
+
+// warmOrderPath rehearses an open's database writes on every idle pool
+// connection (rolled back) and signs a throwaway order, before any intent
+// arrives. A failure stops startup: live orders would fail the same way.
+func warmOrderPath(ctx context.Context, store *postgres.Store, clob *clobclient.Client) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	conns, err := store.Warmup(ctx)
+	if err != nil {
+		return fmt.Errorf("startup database check: %w", err)
+	}
+	db := time.Since(start)
+	start = time.Now()
+	if err := clob.WarmSigner(); err != nil {
+		return fmt.Errorf("startup signer check: %w", err)
+	}
+	log.Printf("order path warm: db=%s (%d conns) sign=%s", db.Round(time.Microsecond), conns, time.Since(start).Round(time.Microsecond))
+	return nil
 }

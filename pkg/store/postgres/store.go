@@ -325,6 +325,15 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 	if record.IntentID == "" {
 		return false, fmt.Errorf("intent ID is required")
 	}
+	commandTag, err := s.execAsync(ctx, insertIntentSQL, intentArgs(record)...)
+	if err != nil {
+		return false, fmt.Errorf("insert intent: %w", err)
+	}
+	return commandTag.RowsAffected() == 1, nil
+}
+
+// intentArgs is insertIntentSQL's arguments for record, defaults filled in.
+func intentArgs(record store.OrderIntentRecord) []any {
 	policy := record.Policy
 	if len(policy) == 0 {
 		policy = []byte("{}")
@@ -342,16 +351,12 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 		status = statemachine.StateIntentReceived
 	}
 
-	commandTag, err := s.execAsync(ctx, insertIntentSQL, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
+	return []any{record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt,
 		record.TargetEquityFraction, record.SizedEquityUSD, record.RequestID,
-		record.SignalPrice, record.MaxSignalDrift, record.BottomPrice, record.ScalingMode)
-	if err != nil {
-		return false, fmt.Errorf("insert intent: %w", err)
-	}
-	return commandTag.RowsAffected() == 1, nil
+		record.SignalPrice, record.MaxSignalDrift, record.BottomPrice, record.ScalingMode}
 }
 
 func (s *Store) Intent(ctx context.Context, intentID string) (store.OrderIntentRecord, error) {

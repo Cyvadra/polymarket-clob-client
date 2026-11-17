@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math"
 	"math/big"
@@ -227,4 +228,20 @@ func poly1271Signature(key *ecdsa.PrivateKey, domain common.Hash, maker common.A
 	inner[64] += 27
 	contentsType := hexutil.Encode([]byte(v2OrderType))[2:]
 	return "0x" + hexutil.Encode(inner)[2:] + hexutil.Encode(domain.Bytes())[2:] + hexutil.Encode(contentsHash.Bytes())[2:] + contentsType + fmt.Sprintf("%04x", len(v2OrderType)), nil
+}
+
+// WarmSigner signs a throwaway order on each exchange, standard and neg-risk,
+// so the first real order does not pay for the signer's first use. Nothing is
+// looked up or sent; an error means this client cannot sign orders.
+func (c *Client) WarmSigner() error {
+	for _, negRisk := range []bool{false, true} {
+		signed, err := c.signOrder(UserOrder{TokenID: "1", Side: SideBuy, Price: 0.5, Shares: 5, OrderType: OrderTypeGTC}, 0.01, negRisk)
+		if err != nil {
+			return fmt.Errorf("warm up signer: %w", err)
+		}
+		if _, err := json.Marshal(signed); err != nil {
+			return fmt.Errorf("warm up signer: %w", err)
+		}
+	}
+	return nil
 }
