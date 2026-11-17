@@ -72,6 +72,16 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	case !strings.Contains(cfg.URL, "pool_min_conns"):
 		poolConfig.MinConns = min(idlePoolConns, poolConfig.MaxConns)
 	}
+	// Opens can be an hour apart. pgx's defaults (idle 30m, lifetime 1h)
+	// would hand nearly every one a fresh connection, whose backend loads
+	// its catalog caches and prepares each statement on the order's path.
+	if !strings.Contains(cfg.URL, "pool_max_conn_idle_time") {
+		poolConfig.MaxConnIdleTime = connIdleTime
+	}
+	if !strings.Contains(cfg.URL, "pool_max_conn_lifetime") {
+		poolConfig.MaxConnLifetime = connLifetime
+	}
+	poolConfig.AfterConnect = prepareHotStatements
 	if cfg.ConnectTimeout > 0 {
 		poolConfig.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
 	}
@@ -88,6 +98,85 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 	return &Store{pool: pool, maxOpenBuyNotionalUSD: cfg.MaxOpenBuyNotionalUSD, lockSlots: make(chan struct{}, lockSlotCount(poolConfig.MaxConns))}, nil
+}
+
+// The statements every open runs on its way to the exchange. Each new pool
+// connection prepares them (prepareHotStatements).
+const (
+	beginSQL       = `BEGIN`
+	asyncCommitSQL = `SET LOCAL synchronous_commit TO OFF`
+	commitSQL      = `COMMIT`
+)
+
+const insertIntentSQL = `
+		INSERT INTO order_intents (
+			intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
+			token_id, outcome, side, target_usd, limit_price,
+			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
+			status, policy, created_at, updated_at,
+			target_equity_fraction, sized_equity_usd, request_id,
+			signal_price, max_signal_drift, bottom_price, scaling_mode
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7,
+			$8, $9, $10, NULLIF($11, '')::numeric, $12,
+			$13, $14, $15, $16, $17,
+			$18, $19, $20, $21,
+			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric, $24,
+			NULLIF($25, '')::numeric, NULLIF($26, '')::numeric, NULLIF($27, '')::numeric, $28
+		)
+		ON CONFLICT (intent_id) DO NOTHING
+	`
+
+const insertReservationSQL = `
+			INSERT INTO reservations (
+				reservation_id, intent_id, child_sequence, unique_tag, market_id, condition_id, token_id,
+				outcome, side, shares, notional, state, reason, created_at, updated_at
+			) VALUES (
+				$1, $2, NULLIF($3, 0), $4, $5, $6, $7,
+				$8, $9, $10, $11, $12, $13, $14, $15
+			)
+		`
+
+const insertOrderSQL = `
+		INSERT INTO orders (
+			intent_id, child_sequence, signed_payload, signed_order_hash, salt,
+			exchange_order_id, requested_shares, matched_shares, price, order_type,
+			post_only, state, revision, created_at, updated_at
+		) VALUES (
+			$1, $2, $3::jsonb, $4, $5,
+			NULLIF($6, ''), $7, COALESCE(NULLIF($8, ''), '0')::numeric, $9, $10,
+			$11, $12, $13, $14, now()
+		)
+		RETURNING matched_shares::text, exchange_order_id, updated_at
+	`
+
+const (
+	connIdleTime = 24 * time.Hour
+	connLifetime = 24 * time.Hour
+)
+
+// hotStatements are prepared on every new connection, so an open never waits
+// for a statement to be parsed and planned, nor for its tables' catalog
+// entries to load. pgx uses a statement prepared under its own SQL as the
+// name in place of its cache.
+var hotStatements = []string{
+	beginSQL, asyncCommitSQL, commitSQL,
+	insertIntentSQL, insertReservationSQL, insertOrderSQL, orderEventSQL, intentStatusSQL,
+}
+
+// It is best effort: before Migrate has created the tables, or if a statement
+// will not prepare, the connection is still handed out and pgx prepares the
+// statement on its first use, as it would without this.
+func prepareHotStatements(ctx context.Context, conn *pgx.Conn) error {
+	for _, sql := range hotStatements {
+		if _, err := conn.Prepare(ctx, sql, sql); err != nil {
+			if ctx.Err() != nil || conn.IsClosed() {
+				return err
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // execAsync runs one statement in its own transaction committed
@@ -119,10 +208,10 @@ func (s *Store) execAsync(ctx context.Context, sql string, args ...any) (pgconn.
 // already posted: the exchange then holds an order the store never recorded,
 // which only the account's trades and REST reconciliation can reveal.
 func queueAsync(batch *pgx.Batch, body func(*pgx.Batch)) {
-	batch.Queue(`BEGIN`)
-	batch.Queue(`SET LOCAL synchronous_commit TO OFF`)
+	batch.Queue(beginSQL)
+	batch.Queue(asyncCommitSQL)
 	body(batch)
-	batch.Queue(`COMMIT`)
+	batch.Queue(commitSQL)
 }
 
 // asyncExecer runs each Exec through execAsync.
@@ -253,24 +342,7 @@ func (s *Store) InsertIntent(ctx context.Context, record store.OrderIntentRecord
 		status = statemachine.StateIntentReceived
 	}
 
-	commandTag, err := s.execAsync(ctx, `
-		INSERT INTO order_intents (
-			intent_id, unique_tag, strategy, kind, market_id, event_slug, condition_id,
-			token_id, outcome, side, target_usd, limit_price,
-			time_in_force, post_only, feature_seq, feature_completed_at, expires_at,
-			status, policy, created_at, updated_at,
-			target_equity_fraction, sized_equity_usd, request_id,
-			signal_price, max_signal_drift, bottom_price, scaling_mode
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, NULLIF($11, '')::numeric, $12,
-			$13, $14, $15, $16, $17,
-			$18, $19, $20, $21,
-			NULLIF($22, '')::numeric, NULLIF($23, '')::numeric, $24,
-			NULLIF($25, '')::numeric, NULLIF($26, '')::numeric, NULLIF($27, '')::numeric, $28
-		)
-		ON CONFLICT (intent_id) DO NOTHING
-	`, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
+	commandTag, err := s.execAsync(ctx, insertIntentSQL, record.IntentID, record.UniqueTag, record.Strategy, record.Kind, record.MarketID, record.EventSlug, record.ConditionID,
 		record.TokenID, record.Outcome, record.Side, record.TargetUSD, record.LimitPrice,
 		record.TimeInForce, record.PostOnly, record.FeatureSeq, zeroTimeToNil(record.FeatureCompletedAt), zeroTimeToNil(record.ExpiresAt),
 		status, policy, createdAt, updatedAt,
@@ -384,18 +456,7 @@ func (s *Store) PersistSubmittingOrder(ctx context.Context, record store.SignedO
 // queueSubmittingOrder queues PersistSubmittingOrder's statements; the order
 // row's stored values are scanned into submitting and exchangeOrderID.
 func queueSubmittingOrder(batch *pgx.Batch, signed store.SignedOrderRecord, submitting *store.SignedOrderRecord, to statemachine.State, reason string, exchangeOrderID **string) {
-	insertOrder := batch.Queue(`
-		INSERT INTO orders (
-			intent_id, child_sequence, signed_payload, signed_order_hash, salt,
-			exchange_order_id, requested_shares, matched_shares, price, order_type,
-			post_only, state, revision, created_at, updated_at
-		) VALUES (
-			$1, $2, $3::jsonb, $4, $5,
-			NULLIF($6, ''), $7, COALESCE(NULLIF($8, ''), '0')::numeric, $9, $10,
-			$11, $12, $13, $14, now()
-		)
-		RETURNING matched_shares::text, exchange_order_id, updated_at
-	`, submitting.IntentID, submitting.ChildSequence, submitting.SignedPayload, submitting.SignedOrderHash, submitting.Salt,
+	insertOrder := batch.Queue(insertOrderSQL, submitting.IntentID, submitting.ChildSequence, submitting.SignedPayload, submitting.SignedOrderHash, submitting.Salt,
 		submitting.ExchangeOrderID, submitting.RequestedShares, submitting.MatchedShares, submitting.Price, submitting.OrderType,
 		submitting.PostOnly, submitting.State, submitting.Revision, submitting.CreatedAt)
 	insertOrder.QueryRow(func(row pgx.Row) error {
@@ -1107,15 +1168,7 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	insert := func(execer interface {
 		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	}) error {
-		_, err := execer.Exec(ctx, `
-			INSERT INTO reservations (
-				reservation_id, intent_id, child_sequence, unique_tag, market_id, condition_id, token_id,
-				outcome, side, shares, notional, state, reason, created_at, updated_at
-			) VALUES (
-				$1, $2, NULLIF($3, 0), $4, $5, $6, $7,
-				$8, $9, $10, $11, $12, $13, $14, $15
-			)
-		`, record.ReservationID, record.IntentID, record.ChildSequence, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
+		_, err := execer.Exec(ctx, insertReservationSQL, record.ReservationID, record.IntentID, record.ChildSequence, record.UniqueTag, record.MarketID, record.ConditionID, record.TokenID,
 			record.Outcome, record.Side, record.Shares, record.Notional, state, record.Reason, createdAt, updatedAt)
 		switch {
 		case err == nil:
