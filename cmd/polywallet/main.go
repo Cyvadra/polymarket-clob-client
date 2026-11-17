@@ -2,6 +2,7 @@
 // through Polymarket's gasless relayer:
 //
 //	polywallet split      --condition 0x… --amount 10        # 10 pUSD -> 10 Up + 10 Down
+//	polywallet merge      --condition 0x… --amount 10        # 10 Up + 10 Down -> 10 pUSD
 //	polywallet send-token --to 0x… --token-id 6751… --amount 5
 //
 // Amounts are decimal pUSD or shares (6 decimals). Each command checks the
@@ -49,7 +50,7 @@ func run(args []string) error {
 	flags.BoolVar(&yes, "yes", false, "sign and submit; without it only the plan is printed")
 	flags.DurationVar(&wait, "wait", 3*time.Minute, "how long to wait for the relayer to confirm")
 	switch cmd {
-	case "split":
+	case "split", "merge":
 		flags.StringVar(&conditionID, "condition", "", "market condition ID (0x…, 32 bytes)")
 	case "send-token":
 		flags.StringVar(&to, "to", "", "recipient address")
@@ -100,6 +101,19 @@ func run(args []string) error {
 		for _, t := range market.Tokens {
 			summary += fmt.Sprintf("\n  %-5s %s", t.Outcome, t.TokenID)
 		}
+	case "merge":
+		if conditionID == "" {
+			return errors.New("--condition is required")
+		}
+		var market *clobclient.Market
+		calls, market, err = client.MergeCalls(ctx, conditionID, amount)
+		if err != nil {
+			return err
+		}
+		summary = fmt.Sprintf("merge %s of each outcome of %q into %s pUSD", clobclient.FormatUnits(amount), market.Question, clobclient.FormatUnits(amount))
+		for _, t := range market.Tokens {
+			summary += fmt.Sprintf("\n  %-5s %s", t.Outcome, t.TokenID)
+		}
 	case "send-token":
 		calls, err = client.SendTokenCalls(ctx, to, tokenID, amount)
 		if err != nil {
@@ -147,6 +161,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: polywallet <command> [flags]
 
   split       --condition 0x… --amount N   turn N pUSD into N Up + N Down
+  merge       --condition 0x… --amount N   turn N Up + N Down back into N pUSD
   send-token  --to 0x… --token-id ID --amount N
                                            send N shares of an outcome token
 

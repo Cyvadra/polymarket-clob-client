@@ -128,8 +128,8 @@ secrets, is only read locally by `deploy.sh`, and is never uploaded.
 ## Wallet operations (polywallet)
 
 `polywallet` is a local test tool, not shipped by `deploy.sh`. It splits pUSD
-into Up + Down tokens and sends pUSD or outcome tokens from a deposit wallet
-through Polymarket's gasless relayer. It reads the host's private
+into Up + Down tokens, merges pairs back into pUSD, and sends outcome tokens
+from a deposit wallet through Polymarket's gasless relayer. It reads the host's private
 `executiond.env`, which must set `POLYMARKET_RELAYER_API_KEY` (and
 `POLYMARKET_RELAYER_API_KEY_ADDRESS` when the key belongs to another address).
 The env file names the key's server paths, so
@@ -143,6 +143,11 @@ go build -o /tmp/polywallet ./cmd/polywallet
  POLYMARKET_PRIVATE_KEY_PASSPHRASE_FILE=scripts/private/germany/private-key.pass \
  /tmp/polywallet split --condition 0x… --amount 1)
 ```
+
+`merge --condition 0x… --amount 1` reverses a split: it needs that many of
+both tokens, and works on a closed or resolved market too. Add
+`POLYMARKET_PROXY_URL=…` to route the CLOB and relayer calls through another
+proxy than the env file's; chain reads go straight to the RPC endpoint.
 
 ## PnL report
 
