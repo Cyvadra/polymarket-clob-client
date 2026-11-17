@@ -114,6 +114,11 @@ func (c *FillConsumer) consume(ctx context.Context, fill AccountFill, holdable b
 	}) {
 		return false, nil
 	}
+	if err == store.ErrNotFound && holdable {
+		// The row may have committed, and its pending entry been resolved,
+		// between the lookup and Hold: look once more before dropping.
+		order, err = c.store.OrderByExchangeID(ctx, fill.ExchangeOrderID)
+	}
 	if err == store.ErrNotFound {
 		// A fill for an order this executiond never signed means the wallet was
 		// traded outside the runtime, or a fill raced ahead of order

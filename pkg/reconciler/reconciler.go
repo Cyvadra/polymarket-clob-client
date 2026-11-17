@@ -159,7 +159,8 @@ func (r *Reconciler) reconcile(ctx context.Context) (bool, error) {
 			reconcileErr = errors.Join(reconcileErr, fmt.Errorf("reconcile %s/%d: %w", order.IntentID, order.ChildSequence, err))
 		}
 	}
-	return true, reconcileErr
+	// A cancelled context failed the orders it had not reached.
+	return ctx.Err() == nil, reconcileErr
 }
 
 // replayTrades replays account trades newer than the max trade age. The

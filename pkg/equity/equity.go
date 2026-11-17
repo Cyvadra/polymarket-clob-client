@@ -189,12 +189,17 @@ func (t *Tracker) read(ctx context.Context, maxAge time.Duration) (float64, time
 		}
 		now := t.now()
 		t.mu.Lock()
-		if t.gen == gen || attempt >= 2 {
+		if t.gen == gen {
 			t.cash, t.cashAt = cash, now
 			t.mu.Unlock()
 			return cash, now, nil
 		}
 		t.mu.Unlock()
+		if attempt >= 2 {
+			// Fills keep overtaking the read: use it, but do not cache a
+			// balance that may predate one.
+			return cash, now, nil
+		}
 	}
 }
 

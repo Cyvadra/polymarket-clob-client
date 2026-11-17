@@ -222,9 +222,8 @@ func (e *Executor) placeChild(ctx context.Context, intent protocol.ExecutionInte
 // The commit and the POST run side by side: the row's content does not depend
 // on the exchange's answer, and the commit is done long before the answer
 // lands. sendOrder waits for it before recording anything about that answer.
-// An account-stream event that beats the commit is dropped, as any event for
-// an unknown order is; the reconciler's trade replay applies a fill it
-// carried once the row exists.
+// An account-stream event that beats the commit is held by PendingOrders and
+// replayed once the row exists.
 func (e *Executor) placeReservedChild(ctx context.Context, intent protocol.ExecutionIntent, child plannedChild) error {
 	reservationID := reservationID(intent.IntentID, child.Sequence)
 	releaseCashHold(ctx)
@@ -319,7 +318,10 @@ func (e *Executor) settleOrphan(ctx context.Context, intent protocol.ExecutionIn
 	ctx = context.WithoutCancel(ctx)
 	if submitErr != nil && isOrderRejected(submitErr) {
 		_ = e.store.Release(ctx, reservationID, "order rejected and never stored")
-		return fmt.Errorf("%w (order rejected: %v)", persistErr, submitErr)
+		e.reportError(fmt.Errorf("persist rejected order %s for intent %s: %w", orderID, intent.IntentID, persistErr))
+		// The exchange's refusal decides the intent's outcome, as it would
+		// had the row committed.
+		return rejection{code: protocol.ReasonOrderRejected, reason: rejectionReason(submitErr), cause: submitErr}
 	}
 	err := fmt.Errorf("%w: order %s for intent %s: %w", ErrOrphanOrder, orderID, intent.IntentID, persistErr)
 	e.reportError(err)
