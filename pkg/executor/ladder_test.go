@@ -444,7 +444,7 @@ func TestParseLadder(t *testing.T) {
 		"scaling not flat":  {edit: func(i *protocol.ExecutionIntent) { i.ScalingMode = "pyramid" }, wantErr: true},
 		"scaling missing":   {edit: func(i *protocol.ExecutionIntent) { i.ScalingMode = "" }, wantErr: true},
 		"sell":              {edit: func(i *protocol.ExecutionIntent) { i.Side = protocol.SideSell }, wantErr: true},
-		"not post-only":     {edit: func(i *protocol.ExecutionIntent) { i.PostOnly = false }, wantErr: true},
+		"not post-only":     {edit: func(i *protocol.ExecutionIntent) { i.PostOnly = false }, levels: 11},
 		"not GTC":           {edit: func(i *protocol.ExecutionIntent) { i.TimeInForce = protocol.TimeInForceFAK }, wantErr: true},
 		"long decimal tail": {edit: func(i *protocol.ExecutionIntent) { i.BottomPrice = "0.5000000001" }, wantErr: true},
 	} {

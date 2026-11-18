@@ -87,8 +87,8 @@ func wholeCents(text string) (int, bool) {
 // one place that defines what a well-formed ladder is: intent validation and
 // planning both call it.
 func parseLadder(intent protocol.ExecutionIntent) (ladderSpec, error) {
-	if intent.Side != protocol.SideBuy || intent.TimeInForce != protocol.TimeInForceGTC || !intent.PostOnly {
-		return ladderSpec{}, invalid("multi-level limit must be a post-only GTC buy")
+	if intent.Side != protocol.SideBuy || intent.TimeInForce != protocol.TimeInForceGTC {
+		return ladderSpec{}, invalid("multi-level limit must be a GTC buy")
 	}
 	if intent.ScalingMode != protocol.ScalingModeFlat {
 		return ladderSpec{}, invalid("multi-level limit supports scaling_mode %q only, not %q", protocol.ScalingModeFlat, intent.ScalingMode)
