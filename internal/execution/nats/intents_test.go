@@ -357,3 +357,16 @@ func TestOpenDispatcherAtShutdown(t *testing.T) {
 		t.Fatalf("ran %q and dropped %d, want only 1 run and 2 dropped", got, dropped)
 	}
 }
+
+func TestSubscribeOpenStampsReceivedAt(t *testing.T) {
+	gated := newGatedOpenExecutor()
+	handler, work, _ := subscribeOpen(t, gated, testAllowlist(t))
+	before := time.Now()
+	deliverOpen(t, handler, protocol.ExecutionOpenRequest{SchemaVersion: protocol.SchemaVersionV1, RequestID: "r", UniqueTag: "lane-a", Strategy: "strategy", ConditionID: "condition", TokenID: "token", Outcome: "Up", Side: protocol.SideBuy})
+	got := <-gated.entered
+	close(gated.release)
+	drain(t, work)
+	if got.ReceivedAt.Before(before) || got.ReceivedAt.After(time.Now()) {
+		t.Fatalf("ReceivedAt = %v, want stamped on delivery after %v", got.ReceivedAt, before)
+	}
+}

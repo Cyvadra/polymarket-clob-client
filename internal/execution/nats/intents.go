@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/executor"
@@ -72,10 +73,13 @@ func newOpenDispatcher(ctx context.Context, exec OpenExecutor, allowed *Allowlis
 }
 
 func (d *openDispatcher) handle(_ context.Context, payload []byte) error {
+	// Stamped before the decode, so the queue stage includes it.
+	rx := time.Now()
 	req, err := natsbus.DecodeJSON[protocol.ExecutionOpenRequest](payload)
 	if err != nil {
 		return err
 	}
+	req.ReceivedAt = rx
 	if strings.TrimSpace(req.Strategy) != "" && !d.allowed.Allows(req.Strategy) {
 		return nil
 	}

@@ -30,11 +30,13 @@ func logOrderTiming(t transport.Timing) {
 // an order's latency into ours and the network's. tif and post_only split the
 // http line's ttfb by whether the exchange's taker delay (250ms on crypto
 // up/down markets) could hold the order before it answers.
+// wire and queue precede took: decision to NATS callback, and callback to
+// the start of pre-post.
 // The stage figures are plain milliseconds so the line is easy to aggregate.
 func logPrePost(intent protocol.ExecutionIntent, prePost time.Duration, s executor.PrePostStages) {
-	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s size=%s inventory=%s insert=%s plan=%s reserve=%s sign=%s publish=%s persist_wait=%s",
+	log.Printf("order pre-post %s %s %s intent=%s tif=%s post_only=%t took=%s size=%s inventory=%s insert=%s plan=%s reserve=%s sign=%s publish=%s persist_wait=%s wire=%s queue=%s",
 		intent.Kind, intent.Side, intent.Strategy, intent.IntentID, intent.TimeInForce, intent.PostOnly, ms(prePost),
-		plainMS(s.Size), plainMS(s.Inventory), plainMS(s.Insert), plainMS(s.Plan), plainMS(s.Reserve), plainMS(s.Sign), plainMS(s.Publish), plainMS(s.PersistWait))
+		plainMS(s.Size), plainMS(s.Inventory), plainMS(s.Insert), plainMS(s.Plan), plainMS(s.Reserve), plainMS(s.Sign), plainMS(s.Publish), plainMS(s.PersistWait), plainMS(s.Wire), plainMS(s.Queue))
 }
 
 // plainMS formats d as milliseconds with two decimals and no unit.

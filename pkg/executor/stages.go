@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"time"
+
+	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 )
 
 // PrePostStages splits an order's pre-post latency into the steps it spent
@@ -21,6 +23,13 @@ type PrePostStages struct {
 	// PersistWait is not pre-post: the signed order commits alongside the
 	// POST, and this is how long the answer then waited for that commit.
 	PersistWait time.Duration
+	// Wire and Queue come before pre-post and are not in it. Wire is from the
+	// engine's decision (the request's created_at) to executiond's NATS
+	// callback, on two processes' clocks; Queue is from that callback to the
+	// start of pre-post: decode, allowlist, lane queue and worker wake-up.
+	// An open only; zero when a timestamp is missing or out of order.
+	Wire  time.Duration
+	Queue time.Duration
 }
 
 type stagesKey struct{}
@@ -73,3 +82,21 @@ func stageReserve(s *PrePostStages) *time.Duration     { return &s.Reserve }
 func stageSign(s *PrePostStages) *time.Duration        { return &s.Sign }
 func stagePersistWait(s *PrePostStages) *time.Duration { return &s.PersistWait }
 func stagePublish(s *PrePostStages) *time.Duration     { return &s.Publish }
+
+// recordDelivery fills the Wire and Queue stages of an open request.
+func recordDelivery(ctx context.Context, req protocol.ExecutionOpenRequest) {
+	stages, ok := ctx.Value(stagesKey{}).(*PrePostStages)
+	if !ok || req.ReceivedAt.IsZero() {
+		return
+	}
+	if !req.CreatedAt.IsZero() {
+		if d := req.ReceivedAt.Sub(req.CreatedAt); d > 0 {
+			stages.Wire = d
+		}
+	}
+	if start, ok := ctx.Value(receivedAtKey{}).(time.Time); ok {
+		if d := start.Sub(req.ReceivedAt); d > 0 {
+			stages.Queue = d
+		}
+	}
+}

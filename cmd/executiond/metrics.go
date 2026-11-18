@@ -82,7 +82,7 @@ func newMetrics() *metrics {
 			Name: "executiond_order_prepost_seconds", Help: "Request arrival to order POST: sizing, locks, persistence and signing.", Buckets: latencyBuckets,
 		}, []string{"kind", "tif", "post_only"}),
 		prePostStage: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name: "executiond_order_prepost_stage_seconds", Help: "Pre-post latency by stage; stages an order skipped are not observed.", Buckets: latencyBuckets,
+			Name: "executiond_order_prepost_stage_seconds", Help: "Pre-post latency by stage; stages an order skipped are not observed. wire (decision to NATS callback) and queue (callback to pre-post start) precede pre-post.", Buckets: latencyBuckets,
 		}, []string{"stage"}),
 		cancel: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "executiond_cancel_seconds", Help: "Exchange cancel calls, from send to answer.", Buckets: latencyBuckets,
@@ -163,7 +163,7 @@ func (m *metrics) observePrePost(intent protocol.ExecutionIntent, prePost time.D
 	for _, st := range []struct {
 		name string
 		took time.Duration
-	}{{"size", s.Size}, {"inventory", s.Inventory}, {"insert", s.Insert}, {"plan", s.Plan}, {"reserve", s.Reserve}, {"sign", s.Sign}, {"publish", s.Publish}, {"persist_wait", s.PersistWait}} {
+	}{{"size", s.Size}, {"inventory", s.Inventory}, {"insert", s.Insert}, {"plan", s.Plan}, {"reserve", s.Reserve}, {"sign", s.Sign}, {"publish", s.Publish}, {"persist_wait", s.PersistWait}, {"wire", s.Wire}, {"queue", s.Queue}} {
 		if st.took > 0 {
 			m.prePostStage.WithLabelValues(st.name).Observe(st.took.Seconds())
 		}

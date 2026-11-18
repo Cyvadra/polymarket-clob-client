@@ -46,6 +46,7 @@ func newExecutionID() string {
 
 func (e *Executor) ExecuteOpen(ctx context.Context, req protocol.ExecutionOpenRequest) error {
 	ctx = withReceivedAt(ctx)
+	recordDelivery(ctx, req)
 	intent := protocol.ExecutionIntent{
 		SchemaVersion:      req.SchemaVersion,
 		IntentID:           newExecutionID(),

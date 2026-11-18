@@ -210,6 +210,9 @@ type ExecutionOpenRequest struct {
 	SignalPrice    string          `json:"signal_price,omitempty"`
 	MaxSignalDrift string          `json:"max_signal_drift,omitempty"`
 	Policy         ExecutionPolicy `json:"policy,omitempty"`
+	// ReceivedAt is when the receiver's NATS callback got the message. It is
+	// never on the wire: the receiver sets it so the queued request carries it.
+	ReceivedAt time.Time `json:"-"`
 }
 
 // ExecutionQuoteRequest states which whole cents a quote lane (unique_tag,
