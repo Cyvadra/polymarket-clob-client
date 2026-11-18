@@ -65,7 +65,7 @@ func inventoryLevel(ctx context.Context, q interface {
 	}
 	if err := q.QueryRow(ctx, `
 		SELECT COALESCE(SUM(shares) FILTER (WHERE action = 'SPLIT' AND state IN ('PENDING', 'SUBMITTED', 'UNKNOWN')), 0)::text,
-			COALESCE(bool_or(action = 'MERGE' AND state <> 'FAILED'), false)
+			COALESCE(bool_or(action = 'MERGE'), false)
 		FROM ctf_operations WHERE unique_tag = $1 AND condition_id = $2
 	`, uniqueTag, conditionID).Scan(&level.InFlight, &level.Merged); err != nil {
 		return level, fmt.Errorf("read inventory operations: %w", err)
@@ -241,11 +241,11 @@ func insertCTFOperation(ctx context.Context, tx pgx.Tx, op *store.CTFOperationRe
 	return nil
 }
 
-func (s *Store) ArmCTFOperation(ctx context.Context, opID string, baseline []string, deadline time.Time) error {
+func (s *Store) ArmCTFOperation(ctx context.Context, opID string, baseline []string, armedAt, deadline time.Time) error {
 	tag, err := s.pool.Exec(ctx, `
-		UPDATE ctf_operations SET baseline = $2, deadline = $3, updated_at = now()
+		UPDATE ctf_operations SET baseline = $2, deadline = $3, armed_at = $4, updated_at = now()
 		WHERE op_id = $1 AND state = 'PENDING'
-	`, opID, baseline, deadline)
+	`, opID, baseline, deadline, armedAt)
 	if err != nil {
 		return fmt.Errorf("arm ctf operation: %w", err)
 	}
@@ -342,16 +342,16 @@ func (s *Store) ConfirmCTFOperation(ctx context.Context, opID, txHash string, at
 const ctfOperationSelect = `
 	SELECT op_id, request_id, strategy, unique_tag, market_id, condition_id, action,
 		COALESCE(target_shares::text, ''), shares::text, tokens, outcomes, state, relayer_tx_id, tx_hash, error,
-		baseline, deadline, created_at, updated_at
+		baseline, armed_at, deadline, created_at, updated_at
 	FROM ctf_operations`
 
 func scanCTFOperation(row pgx.Row) (store.CTFOperationRecord, error) {
 	var op store.CTFOperationRecord
 	var action, state string
-	var deadline *time.Time
+	var armedAt, deadline *time.Time
 	if err := row.Scan(&op.OpID, &op.RequestID, &op.Strategy, &op.UniqueTag, &op.MarketID, &op.ConditionID, &action,
 		&op.TargetShares, &op.Shares, &op.Tokens, &op.Outcomes, &state, &op.RelayerTxID, &op.TxHash, &op.Error,
-		&op.Baseline, &deadline, &op.CreatedAt, &op.UpdatedAt); err != nil {
+		&op.Baseline, &armedAt, &deadline, &op.CreatedAt, &op.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return op, err
 		}
@@ -361,7 +361,43 @@ func scanCTFOperation(row pgx.Row) (store.CTFOperationRecord, error) {
 	if deadline != nil {
 		op.Deadline = *deadline
 	}
+	if armedAt != nil {
+		op.ArmedAt = *armedAt
+	}
 	return op, nil
+}
+
+// ExchangeNetShares sums the wallet's exchange fills of each token matched at
+// or after since, bought less sold, in base units. Fills booked from splits,
+// merges and transfers are not trades and are left out.
+func (s *Store) ExchangeNetShares(ctx context.Context, tokens []string, since time.Time) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT t.token_id, COALESCE(ROUND(SUM(CASE WHEN f.side = 'BUY' THEN f.shares ELSE -f.shares END) * 1000000), 0)::text
+		FROM unnest($1::text[]) AS t(token_id)
+		LEFT JOIN fills f ON f.token_id = t.token_id AND f.source = 'CLOB' AND f.trade_status <> 'FAILED'
+			AND COALESCE(f.exchange_time, f.received_at) >= $2
+		GROUP BY t.token_id
+	`, tokens, since)
+	if err != nil {
+		return nil, fmt.Errorf("query exchange net shares: %w", err)
+	}
+	defer rows.Close()
+	net := map[string]string{}
+	for rows.Next() {
+		var token, total string
+		if err := rows.Scan(&token, &total); err != nil {
+			return nil, fmt.Errorf("scan exchange net shares: %w", err)
+		}
+		net[token] = total
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan exchange net shares: %w", err)
+	}
+	out := make([]string, len(tokens))
+	for i, token := range tokens {
+		out[i] = net[token]
+	}
+	return out, nil
 }
 
 func (s *Store) OpenCTFOperations(ctx context.Context) ([]store.CTFOperationRecord, error) {

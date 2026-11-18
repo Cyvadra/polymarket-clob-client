@@ -325,3 +325,20 @@ func TestCancelOrdersResultSendsIDListAndReadsRefusals(t *testing.T) {
 		t.Fatalf("0xb should be refused as gone, got %q", reason)
 	}
 }
+
+// The exchange answers /balance-allowance/update with 200 and no body; that
+// is its success, not an error (2026-11-17 production: every refresh after a
+// split or merge was reported as "empty response").
+func TestUpdateBalanceAllowanceAcceptsEmptyBody(t *testing.T) {
+	var path, query string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, query = r.URL.Path, r.URL.RawQuery
+	}))
+	defer server.Close()
+	if err := newTestClient(t, server.URL).UpdateBalanceAllowance(context.Background(), "CONDITIONAL", "123"); err != nil {
+		t.Fatalf("UpdateBalanceAllowance: %v", err)
+	}
+	if path != "/balance-allowance/update" || !strings.Contains(query, "asset_type=CONDITIONAL") || !strings.Contains(query, "token_id=123") {
+		t.Fatalf("unexpected request %s?%s", path, query)
+	}
+}

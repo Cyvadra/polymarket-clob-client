@@ -66,6 +66,45 @@ func TestSizeHoldsFreeCashUntilRelease(t *testing.T) {
 	}
 }
 
+type fakeCommitments struct{ openBuys, splitting string }
+
+func (f fakeCommitments) OpenBuyNotional(context.Context) (string, error)   { return f.openBuys, nil }
+func (f fakeCommitments) InFlightSplitCash(context.Context) (string, error) { return f.splitting, nil }
+
+// A split in flight still sits in the CLOB's cash until it lands: entries
+// must not size against it.
+func TestSizeCountsSplitsInFlight(t *testing.T) {
+	sizer := newTestSizer(t, "10000000", "0")
+	sizer.openBuys = fakeCommitments{openBuys: "0", splitting: "6"}
+	// $10 cash less $6 splitting leaves $4; an 8% entry of $60 equity is $4.80.
+	if _, err := sizer.Size(context.Background(), "0.08"); !errors.Is(err, ErrInsufficientCash) {
+		t.Fatalf("entry against a split's cash: err=%v, want insufficient cash", err)
+	}
+}
+
+// A split claims free cash through the sizer, so an entry cannot take the
+// same dollars while the split is being recorded, and the claim gives way
+// once it is.
+func TestClaimHoldsFreeCashForASplit(t *testing.T) {
+	sizer := newTestSizer(t, "10000000", "4")
+	granted, claim, err := sizer.Claim(context.Background(), 15)
+	if err != nil || granted != 6 {
+		t.Fatalf("claim: granted %v err %v, want the $6 free", granted, err)
+	}
+	if _, err := sizer.Size(context.Background(), "0.01"); !errors.Is(err, ErrInsufficientCash) {
+		t.Fatalf("entry during a claim: err=%v, want insufficient cash", err)
+	}
+	claim.Release()
+	if granted, claim, err := sizer.Claim(context.Background(), 2); err != nil || granted != 2 {
+		t.Fatalf("claim under free cash: granted %v err %v, want 2", granted, err)
+	} else {
+		claim.Release()
+	}
+	if sizer.pending != 0 {
+		t.Fatalf("pending=%v", sizer.pending)
+	}
+}
+
 func TestSizeRejectsBadFractions(t *testing.T) {
 	sizer := newTestSizer(t, "50000000", "0")
 	for _, fraction := range []string{"0", "-0.1", "3", "abc", "NaN", "0.2500001"} {

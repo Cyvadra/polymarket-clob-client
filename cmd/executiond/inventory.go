@@ -6,7 +6,6 @@ import (
 	"log"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
-	"github.com/Cyvadra/polymarket-clob-client/internal/decimal"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/nats"
 	"github.com/Cyvadra/polymarket-clob-client/internal/execution/protocol"
 	"github.com/Cyvadra/polymarket-clob-client/pkg/equity"
@@ -22,7 +21,7 @@ import (
 //
 // It returns the manager and the request subscription, which shutdown waits
 // on before the store closes.
-func startInventory(ctx context.Context, clob *clobclient.Client, store *postgres.Store, execution *executor.Executor, wallet *equity.Tracker,
+func startInventory(ctx context.Context, clob *clobclient.Client, store *postgres.Store, execution *executor.Executor, wallet *equity.Tracker, sizer *equity.Sizer,
 	events protocol.ExecutionEventPublisher, limits *equity.DrawdownLimits, cfg config, bus *natsbus.Bus, stats *metrics) (*inventory.Manager, nats.Drainer, error) {
 	if err := clob.CheckRelayer(); err != nil {
 		return nil, nil, fmt.Errorf("EXECUTION_INVENTORY_ENABLED needs the relayer: %w", err)
@@ -33,34 +32,11 @@ func startInventory(ctx context.Context, clob *clobclient.Client, store *postgre
 	}
 	manager, err := inventory.New(inventory.Config{
 		Chain: clob, Store: store, Canceler: execution, Publish: events, Gate: gate,
-		// A split spends cash neither the open buys nor the splits still in
-		// flight have committed.
-		FreeCash: func(ctx context.Context) (float64, error) {
-			balance, err := clob.BalanceAllowance(ctx, "COLLATERAL", "")
-			if err != nil {
-				return 0, err
-			}
-			cash, err := decimal.FromBaseUnits(balance.Balance)
-			if err != nil {
-				return 0, err
-			}
-			committed, err := store.OpenBuyNotional(ctx)
-			if err != nil {
-				return 0, err
-			}
-			open, err := decimal.NonNegativeFloat(committed)
-			if err != nil {
-				return 0, err
-			}
-			splitting, err := store.InFlightSplitCash(ctx)
-			if err != nil {
-				return 0, err
-			}
-			pending, err := decimal.NonNegativeFloat(splitting)
-			if err != nil {
-				return 0, err
-			}
-			return cash - open - pending, nil
+		// A split spends free cash through the entry sizer, so entries and
+		// splits never count the same dollars free.
+		ClaimCash: func(ctx context.Context, want float64) (float64, func(), error) {
+			granted, claim, err := sizer.Claim(ctx, want)
+			return granted, claim.Release, err
 		},
 		// The split or merge moved cash: equity and sizing read it afresh.
 		OnBooked: wallet.Invalidate,

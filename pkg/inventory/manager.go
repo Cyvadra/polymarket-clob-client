@@ -38,7 +38,7 @@ type Chain interface {
 	ExecuteWalletBatch(ctx context.Context, calls []clobclient.WalletCall, metadata string, deadline time.Time) (*clobclient.RelayerTransaction, error)
 	RelayerTransactionStatus(ctx context.Context, id string) (*clobclient.RelayerTransaction, error)
 	TokenBalance(ctx context.Context, tokenID string) (string, error)
-	UpdateBalanceAllowance(ctx context.Context, assetType, tokenID string) (*clobclient.BalanceAllowance, error)
+	UpdateBalanceAllowance(ctx context.Context, assetType, tokenID string) error
 }
 
 // Canceler withdraws the preserves resting against a lane's inventory.
@@ -56,10 +56,13 @@ type Config struct {
 	Store    store.InventoryStore
 	Canceler Canceler
 	Publish  protocol.ExecutionEventPublisher
-	// FreeCash is the pUSD a split may spend; nil leaves the split to the
-	// wallet's balance.
-	FreeCash func(context.Context) (float64, error)
-	Gate     Gate
+	// ClaimCash holds up to want USD of free pUSD for a split and returns
+	// what it holds, with a release the manager calls once the split is
+	// recorded (and so counted as in flight). Entries size from the same
+	// free cash, so the two never spend the same dollars. nil leaves the
+	// split to the wallet's balance.
+	ClaimCash func(ctx context.Context, want float64) (float64, func(), error)
+	Gate      Gate
 	// OnBooked runs after an operation books, once the exchange has been told
 	// the wallet's balances changed: the place to drop cached cash.
 	OnBooked func()
@@ -244,14 +247,21 @@ func (m *Manager) split(ctx context.Context, req protocol.ExecutionInventoryRequ
 	if err != nil {
 		return err
 	}
-	maxShares := ""
+	maxShares, release := "", func() {}
 	m.splitMu.Lock()
-	if m.cfg.FreeCash != nil {
-		free, err := m.cfg.FreeCash(ctx)
+	if m.cfg.ClaimCash != nil {
+		// A pair costs one dollar, and the gap is at most the target.
+		want, err := decimal.NonNegativeFloat(req.TargetShares)
 		if err != nil {
 			m.splitMu.Unlock()
-			return fmt.Errorf("read free cash: %w", err)
+			return refuse(protocol.ReasonInvalidIntent, "target_shares %q: %s", req.TargetShares, err)
 		}
+		free, claimed, err := m.cfg.ClaimCash(ctx, want)
+		if err != nil {
+			m.splitMu.Unlock()
+			return fmt.Errorf("claim free cash: %w", err)
+		}
+		release = claimed
 		if free < 0 {
 			free = 0
 		}
@@ -261,6 +271,9 @@ func (m *Manager) split(ctx context.Context, req protocol.ExecutionInventoryRequ
 		}
 	}
 	op, gap, ok, err := m.cfg.Store.BeginSplit(ctx, m.operation(req, tokens), maxShares)
+	// The split is recorded, and InFlightSplitCash counts it from here, or
+	// it failed: either way the claim's work is done.
+	release()
 	m.splitMu.Unlock()
 	if errors.Is(err, store.ErrInventoryClosed) {
 		return refuse(protocol.ReasonInventoryClosed, "lane %s has merged its inventory", req.UniqueTag)
@@ -369,8 +382,9 @@ func (m *Manager) run(ctx context.Context, op store.CTFOperationRecord, result *
 		m.mark(ctx, op.OpID, store.CTFFailed, "", "", err.Error())
 		return refuse(protocol.ReasonRelayerFailed, "read balances before %s: %s", strings.ToLower(string(op.Action)), err)
 	}
-	op.Baseline, op.Deadline = baseline, m.cfg.Now().Add(m.cfg.BatchTTL)
-	if err := m.cfg.Store.ArmCTFOperation(ctx, op.OpID, op.Baseline, op.Deadline); err != nil {
+	now := m.cfg.Now()
+	op.Baseline, op.ArmedAt, op.Deadline = baseline, now, now.Add(m.cfg.BatchTTL)
+	if err := m.cfg.Store.ArmCTFOperation(ctx, op.OpID, op.Baseline, op.ArmedAt, op.Deadline); err != nil {
 		m.mark(ctx, op.OpID, store.CTFFailed, "", "", err.Error())
 		return err
 	}
@@ -389,8 +403,14 @@ func (m *Manager) run(ctx context.Context, op store.CTFOperationRecord, result *
 	m.mark(ctx, op.OpID, store.CTFSubmitted, tx.ID, tx.Hash, "")
 	waitCtx, cancel := context.WithTimeout(ctx, m.cfg.ConfirmWait)
 	defer cancel()
+	lastErr := ""
 	for {
 		status, err := m.cfg.Chain.RelayerTransactionStatus(waitCtx, tx.ID)
+		if err != nil && waitCtx.Err() == nil && err.Error() != lastErr {
+			// Reported once each time it changes, not every poll.
+			lastErr = err.Error()
+			m.report(fmt.Errorf("read relayer transaction %s: %w", tx.ID, err))
+		}
 		if err == nil {
 			if status.State == "STATE_CONFIRMED" {
 				if err := m.confirm(ctx, op, status.Hash); err != nil {
@@ -421,13 +441,13 @@ func (m *Manager) confirm(ctx context.Context, op store.CTFOperationRecord, txHa
 		return fmt.Errorf("book %s %s: %w", strings.ToLower(string(op.Action)), op.OpID, err)
 	}
 	for _, token := range op.Tokens {
-		if _, err := m.cfg.Chain.UpdateBalanceAllowance(ctx, "CONDITIONAL", token); err != nil {
+		if err := m.cfg.Chain.UpdateBalanceAllowance(ctx, "CONDITIONAL", token); err != nil {
 			m.report(fmt.Errorf("refresh exchange balance of %s: %w", token, err))
 		}
 	}
 	// A split spends pUSD and a merge returns it: either way free cash and
 	// equity must read the new balance.
-	if _, err := m.cfg.Chain.UpdateBalanceAllowance(ctx, "COLLATERAL", ""); err != nil {
+	if err := m.cfg.Chain.UpdateBalanceAllowance(ctx, "COLLATERAL", ""); err != nil {
 		m.report(fmt.Errorf("refresh exchange collateral balance: %w", err))
 	}
 	if m.cfg.OnBooked != nil {
@@ -546,8 +566,13 @@ func (m *Manager) resolveOnce(ctx context.Context, op store.CTFOperationRecord) 
 }
 
 // landed reports whether the wallet's balance of every token moved by the
-// operation's shares since it was armed: up for a split, down for a merge. A
-// trade moves one token, a split or merge moves both.
+// operation's shares since it was armed, up for a split and down for a
+// merge, once the wallet's own exchange fills since then are taken out:
+// other lanes keep trading the condition's tokens while it is unresolved.
+//
+// A fill not yet recorded, or one matched before the baseline and mined
+// after it, still skews a read; a split or merge moves both tokens by its
+// shares at once, which a stray trade on one token does not imitate.
 func (m *Manager) landed(ctx context.Context, op store.CTFOperationRecord) (bool, error) {
 	if len(op.Baseline) != len(op.Tokens) {
 		return false, nil
@@ -560,13 +585,25 @@ func (m *Manager) landed(ctx context.Context, op store.CTFOperationRecord) (bool
 	if err != nil {
 		return false, err
 	}
+	since := op.ArmedAt
+	if since.IsZero() {
+		// Armed before armed_at was recorded: the deadline less the batch
+		// lifetime is when it was armed, unless BatchTTL has since changed.
+		since = op.Deadline.Add(-m.cfg.BatchTTL)
+	}
+	traded, err := m.cfg.Store.ExchangeNetShares(ctx, op.Tokens, since)
+	if err != nil {
+		return false, err
+	}
 	for i := range op.Tokens {
 		before, ok1 := new(big.Int).SetString(op.Baseline[i], 10)
 		after, ok2 := new(big.Int).SetString(now[i], 10)
-		if !ok1 || !ok2 {
-			return false, fmt.Errorf("unreadable balance of %s", op.Tokens[i])
+		net, ok3 := new(big.Int).SetString(traded[i], 10)
+		if !ok1 || !ok2 || !ok3 {
+			return false, fmt.Errorf("unreadable balance or fills of %s", op.Tokens[i])
 		}
 		moved := new(big.Int).Sub(after, before)
+		moved.Sub(moved, net)
 		if op.Action == store.CTFMerge {
 			moved.Neg(moved)
 		}

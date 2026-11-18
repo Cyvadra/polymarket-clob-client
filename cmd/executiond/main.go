@@ -441,7 +441,7 @@ func run() error {
 	var inventoryWork nats.Drainer
 	var inventoryManager *inventory.Manager
 	if cfg.InventoryEnabled {
-		inventoryManager, inventoryWork, err = startInventory(ctx, clob, store, execution, wallet, events, limits, cfg, bus, stats)
+		inventoryManager, inventoryWork, err = startInventory(ctx, clob, store, execution, wallet, sizer, events, limits, cfg, bus, stats)
 		if err != nil {
 			return err
 		}

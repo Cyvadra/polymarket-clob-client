@@ -418,17 +418,15 @@ func (c *Client) BalanceAllowance(ctx context.Context, assetType, tokenID string
 	return &out, nil
 }
 
-func (c *Client) UpdateBalanceAllowance(ctx context.Context, assetType, tokenID string) (*BalanceAllowance, error) {
+// UpdateBalanceAllowance asks the exchange to re-read the wallet's on-chain
+// balance and allowance. The endpoint answers 200 with an empty body, so
+// there is nothing to decode; read the result with BalanceAllowance.
+func (c *Client) UpdateBalanceAllowance(ctx context.Context, assetType, tokenID string) error {
 	query := url.Values{"asset_type": []string{assetType}, "signature_type": []string{strconv.Itoa(int(c.cfg.SignatureType))}}
 	if tokenID != "" {
 		query.Set("token_id", tokenID)
 	}
-	var out BalanceAllowance
-	err := c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/balance-allowance/update", Query: query, Headers: c.l2Headers}, &out)
-	if err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return c.transport.Do(ctx, transport.Request{Method: "GET", Path: "/balance-allowance/update", Query: query, Headers: c.l2Headers}, nil)
 }
 
 func (c *Client) Trades(ctx context.Context, nextCursor string) ([]Trade, string, error) {

@@ -600,8 +600,10 @@ type CTFOperationRecord struct {
 	TxHash       string
 	Error        string
 	// Baseline is each token's wallet balance in base units just before
-	// submission, and Deadline the signed batch's deadline (ArmCTFOperation).
+	// submission, ArmedAt when it was read, and Deadline the signed batch's
+	// deadline (ArmCTFOperation).
 	Baseline  []string
+	ArmedAt   time.Time
 	Deadline  time.Time
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -610,8 +612,9 @@ type CTFOperationRecord struct {
 // InventoryLevel is the split inventory of one lane. Remaining is the pairs
 // free to back a new SPLIT_PRESERVE open: the smaller side held, less what
 // resting preserves have reserved. InFlight is the pairs of splits not yet
-// booked, an unknown submission included. Merged means the lane has merged
-// and takes no further split.
+// booked, an unknown submission included. Merged means a merge was asked for
+// on the lane, whatever became of it: the lane takes no further split, and a
+// merge that failed leaves its pairs to a retried merge or to settlement.
 type InventoryLevel struct {
 	Remaining string
 	// Reserved is the shares resting preserves hold across both tokens.
@@ -636,9 +639,13 @@ type InventoryStore interface {
 	// BeginMerge records a merge of op.Shares pairs, all remaining when it is
 	// empty, and marks the lane merged. ok is false when nothing is left.
 	BeginMerge(ctx context.Context, op CTFOperationRecord) (recorded CTFOperationRecord, ok bool, err error)
-	// ArmCTFOperation records the balances and deadline an operation is
-	// submitted against, before it is submitted.
-	ArmCTFOperation(ctx context.Context, opID string, baseline []string, deadline time.Time) error
+	// ArmCTFOperation records the balances an operation is submitted
+	// against, when they were read, and its deadline, before it is submitted.
+	ArmCTFOperation(ctx context.Context, opID string, baseline []string, armedAt, deadline time.Time) error
+	// ExchangeNetShares is, for each token, the shares the wallet's exchange
+	// fills matched at or after since bought less those they sold, in base
+	// units: what trades, not splits or merges, moved its balance by.
+	ExchangeNetShares(ctx context.Context, tokens []string, since time.Time) ([]string, error)
 	MarkCTFOperation(ctx context.Context, opID string, state CTFOpState, relayerTxID, txHash, errText string) error
 	// ConfirmCTFOperation books a landed operation's fills and marks it
 	// CONFIRMED in one transaction; booking it again changes nothing.

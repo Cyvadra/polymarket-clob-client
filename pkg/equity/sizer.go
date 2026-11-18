@@ -29,6 +29,13 @@ type OpenBuySource interface {
 	OpenBuyNotional(context.Context) (string, error)
 }
 
+// SplitCashSource reports the pUSD that splits still in flight will spend.
+// An OpenBuySource that implements it has that cash counted as committed
+// too: until a split lands, the CLOB still counts its pUSD as cash.
+type SplitCashSource interface {
+	InFlightSplitCash(context.Context) (string, error)
+}
+
 // Entry is a sized entry. Release must be called once the entry's buy has been
 // reserved in the store, or has failed, so its hold on free cash ends.
 type Entry struct {
@@ -91,18 +98,47 @@ func (s *Sizer) SetLossAnchor(anchor *LossAnchor) {
 }
 
 // Size resolves fraction × equity into a target in USD, checked against free
-// cash: the balance less working buys and entries still being placed.
-//
-// The balance and open buys are read without the lock, so concurrent entries
-// do not wait out each other's round trips. That is safe unless an entry is
-// released in between: its hold is gone from pending, and if the read of open
-// buys came before its reservation, it is counted nowhere. Size then reads
-// again, and after maxSizeAttempts holds the lock across the read.
+// cash: the balance less working buys, splits in flight, and entries and
+// claims still being placed.
 func (s *Sizer) Size(ctx context.Context, fraction string) (Entry, error) {
 	f, anchor, err := s.fraction(fraction)
 	if err != nil {
 		return Entry{}, err
 	}
+	return s.readThenHold(ctx, anchor, func(equityUSD, cash, openBuys float64, err error) (Entry, error) {
+		return s.hold(f, equityUSD, cash, openBuys, err)
+	})
+}
+
+// Claim holds up to want USD of free cash for a caller that spends it some
+// other way than an entry's buy, such as a split. It returns the USD held,
+// none when there is no free cash, and an Entry whose Release ends the hold
+// once the caller's own record counts what it spends (for a split, once the
+// operation is recorded and InFlightSplitCash includes it).
+func (s *Sizer) Claim(ctx context.Context, want float64) (float64, Entry, error) {
+	s.mu.Lock()
+	anchor := s.anchor
+	s.mu.Unlock()
+	var granted float64
+	entry, err := s.readThenHold(ctx, anchor, func(_, cash, openBuys float64, err error) (Entry, error) {
+		if err != nil {
+			return Entry{}, err
+		}
+		granted = math.Max(0, math.Min(want, cash-openBuys-s.pending))
+		return s.claim(granted), nil
+	})
+	return granted, entry, err
+}
+
+// readThenHold reads the base, cash and commitments and passes them to hold
+// under s.mu.
+//
+// The balance and open buys are read without the lock, so concurrent entries
+// do not wait out each other's round trips. That is safe unless an entry is
+// released in between: its hold is gone from pending, and if the read of open
+// buys came before its reservation, it is counted nowhere. It then reads
+// again, and after maxSizeAttempts holds the lock across the read.
+func (s *Sizer) readThenHold(ctx context.Context, anchor *LossAnchor, hold func(equityUSD, cash, openBuys float64, err error) (Entry, error)) (Entry, error) {
 	for attempt := 1; ; attempt++ {
 		locked := attempt >= maxSizeAttempts
 		s.mu.Lock()
@@ -118,7 +154,7 @@ func (s *Sizer) Size(ctx context.Context, fraction string) (Entry, error) {
 			s.mu.Unlock()
 			continue
 		}
-		entry, err := s.hold(f, equityUSD, cash, openBuys, err)
+		entry, err := hold(equityUSD, cash, openBuys, err)
 		s.mu.Unlock()
 		return entry, err
 	}
@@ -180,6 +216,17 @@ func (s *Sizer) read(ctx context.Context, anchor *LossAnchor) (equityUSD, cash, 
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("open buy notional: %w", err)
 	}
+	if splits, ok := s.openBuys.(SplitCashSource); ok {
+		splitting, err := splits.InFlightSplitCash(ctx)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("load in-flight split cash: %w", err)
+		}
+		pending, err := decimal.NonNegativeFloat(splitting)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("in-flight split cash: %w", err)
+		}
+		openBuys += pending
+	}
 	return equityUSD, cash, openBuys, nil
 }
 
@@ -196,20 +243,24 @@ func (s *Sizer) hold(f, equityUSD, cash, openBuys float64, readErr error) (Entry
 	if target > free {
 		return Entry{}, fmt.Errorf("%w: entry needs %.6f, free cash is %.6f", ErrInsufficientCash, target, math.Max(free, 0))
 	}
-	s.pending += target
+	entry := s.claim(target)
+	entry.TargetUSD, entry.EquityUSD = strconv.FormatFloat(target, 'f', -1, 64), equityUSD
+	return entry, nil
+}
+
+// claim adds amount to pending until the returned Entry is released. s.mu
+// must be held.
+func (s *Sizer) claim(amount float64) Entry {
+	s.pending += amount
 	var once sync.Once
-	return Entry{
-		TargetUSD: strconv.FormatFloat(target, 'f', -1, 64),
-		EquityUSD: equityUSD,
-		release: func() {
-			once.Do(func() {
-				s.mu.Lock()
-				defer s.mu.Unlock()
-				s.pending -= target
-				s.releases++
-			})
-		},
-	}, nil
+	return Entry{release: func() {
+		once.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.pending -= amount
+			s.releases++
+		})
+	}}
 }
 
 // base is the equity an entry is a fraction of, and the wallet's cash.

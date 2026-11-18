@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,6 +26,8 @@ type memStore struct {
 	reserved float64
 	// confirmFails fails that many ConfirmCTFOperation calls first.
 	confirmFails int
+	// traded is the wallet's net exchange fills per token, in base units.
+	traded map[string]int64
 }
 
 func newMemStore() *memStore { return &memStore{ops: map[string]*store.CTFOperationRecord{}} }
@@ -88,11 +91,21 @@ func (s *memStore) BeginMerge(_ context.Context, op store.CTFOperationRecord) (s
 	return op, true, nil
 }
 
-func (s *memStore) ArmCTFOperation(_ context.Context, opID string, baseline []string, deadline time.Time) error {
+func (s *memStore) ArmCTFOperation(_ context.Context, opID string, baseline []string, armedAt, deadline time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ops[opID].Baseline, s.ops[opID].Deadline = baseline, deadline
+	s.ops[opID].Baseline, s.ops[opID].ArmedAt, s.ops[opID].Deadline = baseline, armedAt, deadline
 	return nil
+}
+
+func (s *memStore) ExchangeNetShares(_ context.Context, tokens []string, _ time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(tokens))
+	for i, token := range tokens {
+		out[i] = big.NewInt(s.traded[token]).String()
+	}
+	return out, nil
 }
 
 func (s *memStore) MarkCTFOperation(_ context.Context, opID string, state store.CTFOpState, txID, _, _ string) error {
@@ -165,6 +178,9 @@ type fakeChain struct {
 	refreshed  []string
 	// statusErr fails every relayer status read.
 	statusErr error
+	// trade moves balances as the batch is submitted, as other lanes'
+	// exchange fills would, by token in base units.
+	trade map[string]int64
 }
 
 func newFakeChain() *fakeChain {
@@ -190,6 +206,9 @@ func (c *fakeChain) ExecuteWalletBatch(_ context.Context, calls []clobclient.Wal
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.submitted++
+	for token, shares := range c.trade {
+		c.balances[token].Add(c.balances[token], big.NewInt(shares))
+	}
 	if c.submitErr != nil && !(errors.Is(c.submitErr, clobclient.ErrSubmitOutcomeUnknown) && c.lands) {
 		c.inBatch.Add(-1)
 		return nil, c.submitErr
@@ -229,11 +248,11 @@ func (c *fakeChain) TokenBalance(_ context.Context, token string) (string, error
 	return c.balances[token].String(), nil
 }
 
-func (c *fakeChain) UpdateBalanceAllowance(_ context.Context, assetType, _ string) (*clobclient.BalanceAllowance, error) {
+func (c *fakeChain) UpdateBalanceAllowance(_ context.Context, assetType, _ string) error {
 	c.mu.Lock()
 	c.refreshed = append(c.refreshed, assetType)
 	c.mu.Unlock()
-	return &clobclient.BalanceAllowance{}, nil
+	return nil
 }
 
 type nopCanceler struct{ calls atomic.Int32 }
@@ -306,9 +325,17 @@ func TestSplitTopsUpToTargetAndRefills(t *testing.T) {
 func TestSplitIsCappedByFreeCash(t *testing.T) {
 	chain, st, pub := newFakeChain(), newMemStore(), &results{}
 	m := newTestManager(t, chain, st, pub)
-	m.cfg.FreeCash = func(context.Context) (float64, error) { return 40, nil }
+	var wanted float64
+	var claimed, released int
+	m.cfg.ClaimCash = func(_ context.Context, want float64) (float64, func(), error) {
+		wanted, claimed = want, claimed+1
+		return 40, func() { released++ }, nil
+	}
 	if err := m.ExecuteInventory(context.Background(), request(protocol.InventorySplit, "100")); err != nil {
 		t.Fatal(err)
+	}
+	if wanted != 100 || claimed != 1 || released != 1 {
+		t.Fatalf("claim: wanted %v, claimed %d, released %d", wanted, claimed, released)
 	}
 	if r := pub.last(); r.Status != protocol.ResultSucceeded || r.ReasonCode != protocol.ReasonInventoryCapped || decimal.Compare(f(r.Shares), "40") > 0 || r.Shares < 39.99 {
 		t.Fatalf("capped split: %+v", r)
@@ -336,6 +363,36 @@ func TestUnknownSubmissionResolvesFromTheChainWithoutResubmitting(t *testing.T) 
 		}
 		if got := st.state(st.order[0]); got != want || chain.submitted != 1 {
 			t.Fatalf("landed=%v: state %s after %d submissions, want %s after 1", landed, got, chain.submitted, want)
+		}
+	}
+}
+
+// Other lanes trade the condition's tokens while a blind operation is
+// resolved: their fills are taken out of the balance moves, so a split that
+// landed under a sell still confirms, and two buys do not pass for a split.
+func TestBlindResolutionDiscountsTheWalletsTrades(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lands bool
+		trade map[string]int64
+		want  store.CTFOpState
+	}{
+		{"landed under a sell", true, map[string]int64{"down": -3_000_000}, store.CTFConfirmed},
+		{"not landed under two buys", false, map[string]int64{"up": 10_000_000, "down": 10_000_000}, store.CTFFailed},
+	} {
+		chain, st, pub := newFakeChain(), newMemStore(), &results{}
+		chain.submitErr, chain.lands, chain.trade = clobclient.ErrSubmitOutcomeUnknown, tc.lands, tc.trade
+		st.traded = tc.trade
+		m := newTestManager(t, chain, st, pub)
+		m.cfg.BatchTTL = -time.Hour
+		now := time.Now()
+		m.cfg.Now = func() time.Time { return now.Add(2 * time.Minute) }
+		_ = m.ExecuteInventory(context.Background(), request(protocol.InventorySplit, "10"))
+		if err := m.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if got := st.state(st.order[0]); got != tc.want {
+			t.Fatalf("%s: state %s, want %s", tc.name, got, tc.want)
 		}
 	}
 }
@@ -471,6 +528,39 @@ func TestUnresolvedBlindOperationHoldsTheCondition(t *testing.T) {
 
 // An operation the relayer cannot report on is not left in flight forever:
 // once its signed deadline has passed, the wallet's balances decide it.
+// A relayer that cannot be read while a request waits on it is reported,
+// once per distinct error rather than every poll.
+func TestConfirmWaitReportsRelayerReadErrors(t *testing.T) {
+	chain, st, pub := newFakeChain(), newMemStore(), &results{}
+	chain.statusErr = errors.New("relayer: 401 unauthorized")
+	m := newTestManager(t, chain, st, pub)
+	m.cfg.ConfirmWait = 20 * time.Millisecond
+	var mu sync.Mutex
+	var reported []string
+	m.cfg.OnError = func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		reported = append(reported, err.Error())
+	}
+	_ = m.ExecuteInventory(context.Background(), request(protocol.InventorySplit, "10"))
+	m.Stop()
+	_ = m.Wait(context.Background())
+	if r := pub.last(); r.ReasonCode != protocol.ReasonRelayerUnknown {
+		t.Fatalf("result %+v", r)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	waits := 0
+	for _, msg := range reported {
+		if strings.HasPrefix(msg, "read relayer transaction") {
+			waits++
+		}
+	}
+	if waits != 1 {
+		t.Fatalf("reported %d relayer read errors while waiting, want 1: %q", waits, reported)
+	}
+}
+
 func TestUnreadableRelayerResolvesFromTheChainAfterTheDeadline(t *testing.T) {
 	for _, landed := range []bool{true, false} {
 		chain, st := newFakeChain(), newMemStore()

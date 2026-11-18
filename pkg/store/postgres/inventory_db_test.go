@@ -327,11 +327,26 @@ func TestMergeInFlightIsNotFreeInventory(t *testing.T) {
 	if _, ok, err := s.BeginMerge(context.Background(), lane.op("m2")); err != nil || ok {
 		t.Fatalf("second merge: ok=%v err=%v, want nothing to merge", ok, err)
 	}
-	// A failed merge gives its pairs back.
+	// A failed merge gives its pairs back, but the lane stays closed: the
+	// strategy asked to merge, and a failure before submission (a restart,
+	// a refusal) must not reopen it to splits.
 	if err := s.MarkCTFOperation(context.Background(), merge.OpID, store.CTFFailed, "", "", "refused"); err != nil {
 		t.Fatal(err)
 	}
-	requireDecimal(t, "remaining after the merge failed", lane.level(t, s).Remaining, "10")
+	level := lane.level(t, s)
+	requireDecimal(t, "remaining after the merge failed", level.Remaining, "10")
+	if !level.Merged {
+		t.Fatal("a failed merge reopened the lane")
+	}
+	op := lane.op("s2")
+	op.TargetShares = "20"
+	if _, _, _, err := s.BeginSplit(context.Background(), op, ""); !errors.Is(err, store.ErrInventoryClosed) {
+		t.Fatalf("split after a failed merge: %v, want ErrInventoryClosed", err)
+	}
+	// A retried merge still merges the pairs given back.
+	if retry, ok, err := s.BeginMerge(context.Background(), lane.op("m3")); err != nil || !ok || retry.Shares != "10.000000" && retry.Shares != "10" {
+		t.Fatalf("retried merge: ok=%v err=%v shares=%q", ok, err, retry.Shares)
+	}
 }
 
 func TestEmptyMergeStillClosesTheLane(t *testing.T) {
