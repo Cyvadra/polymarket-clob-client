@@ -9,12 +9,15 @@ import (
 // it on. A stage the order's path skipped stays zero; the remainder of the
 // total is bookkeeping between stages.
 type PrePostStages struct {
-	Size    time.Duration // equity sizing of a fraction-sized open
-	Insert  time.Duration // persisting the intent
-	Plan    time.Duration // market rules, drift check and planning
-	Reserve time.Duration // reserving exposure
-	Sign    time.Duration // signing, with its metadata lookups
-	Publish time.Duration // publishing the submit-requested transition
+	Size time.Duration // equity sizing of a fraction-sized open
+	// Inventory is a preserve open's read of its lane's split inventory,
+	// including any wait for a split in flight.
+	Inventory time.Duration
+	Insert    time.Duration // persisting the intent
+	Plan      time.Duration // market rules, drift check and planning
+	Reserve   time.Duration // reserving exposure
+	Sign      time.Duration // signing, with its metadata lookups
+	Publish   time.Duration // publishing the submit-requested transition
 	// PersistWait is not pre-post: the signed order commits alongside the
 	// POST, and this is how long the answer then waited for that commit.
 	PersistWait time.Duration
@@ -63,6 +66,7 @@ func stagesOf(ctx context.Context) PrePostStages {
 }
 
 func stageSize(s *PrePostStages) *time.Duration        { return &s.Size }
+func stageInventory(s *PrePostStages) *time.Duration   { return &s.Inventory }
 func stageInsert(s *PrePostStages) *time.Duration      { return &s.Insert }
 func stagePlan(s *PrePostStages) *time.Duration        { return &s.Plan }
 func stageReserve(s *PrePostStages) *time.Duration     { return &s.Reserve }

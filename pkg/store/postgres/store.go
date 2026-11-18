@@ -162,7 +162,13 @@ const (
 var hotStatements = []string{
 	beginSQL, asyncCommitSQL, commitSQL,
 	insertIntentSQL, insertReservationSQL, insertOrderSQL, orderEventSQL, intentStatusSQL,
+	// A SPLIT_PRESERVE open's: its level and position read, and its
+	// reservation (reserveSell); lanePositionSQL is also every close's.
+	inventoryLevelSQL, lanePositionSQL, lockInventorySQL, reserveSellSQL,
 }
+
+// lanePositionSQL reads one lane's position ($1 condition, $2 token, $3 tag).
+var lanePositionSQL = positionSelectSQL() + " WHERE p.condition_id = $1 AND p.token_id = $2 AND p.unique_tag = $3"
 
 // warmConnection readies each new pool connection for an open: it prepares
 // the hot statements, then rehearses an open's writes (rehearseOpen) so the
@@ -216,16 +222,37 @@ func (s *Store) execAsync(ctx context.Context, sql string, args ...any) (pgconn.
 			return nil
 		})
 	})
-	err := s.pool.SendBatch(ctx, batch).Close()
+	err := s.sendAsync(ctx, batch)
 	return tag, err
+}
+
+// sendAsync sends a queueAsync batch. A statement that fails leaves its
+// connection in the aborted transaction, which the pool would destroy on
+// release (a new one must be warmed again, warmConnection): an expected
+// failure such as a unique violation rolls back here instead, on the same
+// connection, so it is returned to the pool ready for the next open.
+func (s *Store) sendAsync(ctx context.Context, batch *pgx.Batch) error {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	err = conn.SendBatch(ctx, batch).Close()
+	if err != nil && !conn.Conn().IsClosed() && conn.Conn().PgConn().TxStatus() != 'I' {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_, _ = conn.Exec(rctx, "ROLLBACK")
+		cancel()
+	}
+	return err
 }
 
 // queueAsync queues the statements body queues as one transaction committed
 // with synchronous_commit off: the commit returns before its WAL reaches the
 // disk, where a durable one waits for the flush (about 4ms on a local disk,
 // against 0.1ms for the round trip). It is for the writes an open makes on
-// its way to the exchange: the intent, a BUY's reservation, and the order
-// itself (PersistSubmittingOrder).
+// its way to the exchange: the intent, a reservation (a BUY's, and every
+// SELL's, a strategy close's included: reserveSell), and the order itself
+// (PersistSubmittingOrder). Send it with sendAsync.
 //
 // Postgres's WAL writer flushes such a commit within three wal_writer_delay
 // (600ms by default), and Close flushes them all (FlushCommits), so a
@@ -471,7 +498,7 @@ func (s *Store) PersistSubmittingOrder(ctx context.Context, record store.SignedO
 	queueAsync(batch, func(batch *pgx.Batch) {
 		queueSubmittingOrder(batch, signed, &submitting, transition.To, reason, &exchangeOrderID)
 	})
-	if err := s.pool.SendBatch(ctx, batch).Close(); err != nil {
+	if err := s.sendAsync(ctx, batch); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			return store.SignedOrderRecord{}, store.ErrDuplicate
 		}
@@ -1230,36 +1257,22 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 		return fmt.Errorf("insert reservation: %w", err)
 	}
 	// A BUY under no exposure cap checks nothing a transaction would hold: it
-	// is one insert, committed without waiting for the disk (execAsync).
+	// is one insert, committed without waiting for the disk (execAsync). A
+	// SELL is one batch of the same kind (reserveSell).
 	if record.Side == "BUY" && s.maxOpenBuyNotionalUSD == "" {
 		return insert(asyncExecer{s})
+	}
+	if record.Side == "SELL" {
+		row := record
+		row.State, row.CreatedAt, row.UpdatedAt = state, createdAt, updatedAt
+		return s.reserveSell(ctx, row)
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin reserve: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if record.Side == "SELL" && isInventoryTag(record.UniqueTag) {
-		if err := reserveInventory(ctx, tx, record.UniqueTag, record.ConditionID, record.Shares); err != nil {
-			return err
-		}
-	}
-	if record.Side == "SELL" {
-		commandTag, err := tx.Exec(ctx, `
-			UPDATE positions
-			SET available_size = available_size - $1::numeric,
-				reserved_size = reserved_size + $1::numeric,
-				source_revision = source_revision + 1,
-				updated_at = $2
-			WHERE condition_id = $3 AND token_id = $4 AND unique_tag = $5 AND available_size >= $1::numeric
-		`, record.Shares, updatedAt, record.ConditionID, record.TokenID, record.UniqueTag)
-		if err != nil {
-			return fmt.Errorf("reserve sell position: %w", err)
-		}
-		if commandTag.RowsAffected() != 1 {
-			return store.ErrConflict
-		}
-	} else if err := s.checkOpenBuyExposure(ctx, tx, record.Notional); err != nil {
+	if err := s.checkOpenBuyExposure(ctx, tx, record.Notional); err != nil {
 		return err
 	}
 	if err := insert(tx); err != nil {
@@ -1267,6 +1280,80 @@ func (s *Store) Reserve(ctx context.Context, record store.ReservationRecord) err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit reservation: %w", err)
+	}
+	return nil
+}
+
+// reserveSellSQL reserves a SELL in one statement: on an inventory lane ($16
+// its tag, empty otherwise) it checks the lane still has the pairs and no
+// merge recorded, then moves the shares from available to reserved and
+// inserts the reservation, each step only if the one before held. Its
+// arguments are insertReservationSQL's ($4 unique tag, $6 condition, $7
+// token, $10 shares, $15 updated_at) and $16. It returns which steps held.
+var reserveSellSQL = `
+	WITH inv AS (
+		SELECT $16::text = '' OR (
+			(` + remainingSQLFor("$6", "$16") + `)::numeric >= $10::numeric
+			AND NOT EXISTS (
+				SELECT 1 FROM ctf_operations c
+				WHERE c.condition_id = $6 AND c.unique_tag || '` + inventorySuffix + `' = $16::text
+					AND c.action = 'MERGE' AND c.state <> 'FAILED')) AS ok
+	), upd AS (
+		UPDATE positions
+		SET available_size = available_size - $10::numeric,
+			reserved_size = reserved_size + $10::numeric,
+			source_revision = source_revision + 1,
+			updated_at = $15::timestamptz
+		WHERE condition_id = $6 AND token_id = $7 AND unique_tag = $4 AND available_size >= $10::numeric
+			AND (SELECT ok FROM inv)
+		RETURNING 1
+	), ins AS (
+		INSERT INTO reservations (
+			reservation_id, intent_id, child_sequence, unique_tag, market_id, condition_id, token_id,
+			outcome, side, shares, notional, state, reason, created_at, updated_at
+		)
+		SELECT $1::text, $2::text, NULLIF($3::integer, 0), $4::text, $5::text, $6::text, $7::text,
+			$8::text, $9::text, $10::numeric, $11::numeric, $12::text, $13::text, $14::timestamptz, $15::timestamptz
+		WHERE EXISTS (SELECT 1 FROM upd)
+		RETURNING 1
+	)
+	SELECT (SELECT ok FROM inv), EXISTS (SELECT 1 FROM upd), EXISTS (SELECT 1 FROM ins)
+`
+
+// reserveSell reserves a SELL as one pipelined batch committed without
+// waiting for the disk (queueAsync): the inventory lane's lock, then
+// reserveSellSQL. The lock is its own statement so reserveSellSQL takes its
+// snapshot once the lock is held. Like the intent and a BUY's reservation, a
+// crash of the database server can lose the last fraction of a second of it.
+func (s *Store) reserveSell(ctx context.Context, row store.ReservationRecord) error {
+	invTag := ""
+	if isInventoryTag(row.UniqueTag) {
+		invTag = row.UniqueTag
+	}
+	var inventoryOK, updated, inserted bool
+	batch := &pgx.Batch{}
+	queueAsync(batch, func(b *pgx.Batch) {
+		if invTag != "" {
+			b.Queue(lockInventorySQL, inventoryLockKey(invTag, row.ConditionID))
+		}
+		b.Queue(reserveSellSQL, append(reservationArgs(row), invTag)...).QueryRow(func(r pgx.Row) error {
+			return r.Scan(&inventoryOK, &updated, &inserted)
+		})
+	})
+	err := s.sendAsync(ctx, batch)
+	switch {
+	case isUniqueConstraint(err, "reservations_one_active_sell_idx"):
+		return store.ErrActiveSellReservation
+	case isUniqueViolation(err):
+		return store.ErrDuplicate
+	case err != nil:
+		return fmt.Errorf("reserve sell: %w", err)
+	case !inventoryOK:
+		return store.ErrInsufficientInventory
+	case !updated:
+		return store.ErrConflict
+	case !inserted:
+		return fmt.Errorf("reserve sell: reservation not inserted")
 	}
 	return nil
 }
@@ -1517,7 +1604,7 @@ func (s *Store) SettlePosition(ctx context.Context, conditionID, tokenID, unique
 
 // LanePosition reads the position row of one lane, by its primary key.
 func (s *Store) LanePosition(ctx context.Context, conditionID, tokenID, uniqueTag string) (store.PositionRecord, bool, error) {
-	position, err := scanPosition(s.pool.QueryRow(ctx, positionSelectSQL()+" WHERE p.condition_id = $1 AND p.token_id = $2 AND p.unique_tag = $3", conditionID, tokenID, uniqueTag))
+	position, err := scanPosition(s.pool.QueryRow(ctx, lanePositionSQL, conditionID, tokenID, uniqueTag))
 	if errors.Is(err, store.ErrNotFound) {
 		return store.PositionRecord{}, false, nil
 	}

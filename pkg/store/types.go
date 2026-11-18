@@ -654,6 +654,10 @@ type InventoryStore interface {
 	// UNKNOWN, for recovery.
 	OpenCTFOperations(ctx context.Context) ([]CTFOperationRecord, error)
 	InventoryLevel(ctx context.Context, uniqueTag, conditionID string) (InventoryLevel, error)
+	// InventoryLevelAndPosition is InventoryLevel plus the inventory lane's
+	// position in tokenID, read in one round trip; found is false when the
+	// lane holds no row for the token.
+	InventoryLevelAndPosition(ctx context.Context, uniqueTag, conditionID, tokenID string) (InventoryLevel, PositionRecord, bool, error)
 	// CTFOperationsSettling reports whether any operation is in flight or
 	// was confirmed after since: cash may not reflect it yet.
 	CTFOperationsSettling(ctx context.Context, since time.Time) (bool, error)

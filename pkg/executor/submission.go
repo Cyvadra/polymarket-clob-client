@@ -449,7 +449,7 @@ func (e *Executor) planInitialChild(ctx context.Context, intent protocol.Executi
 	}
 	request := tactics.Request{Intent: intent, Market: market, Now: e.now().UTC()}
 	if intent.Side == protocol.SideSell {
-		position, found, err := e.positionFor(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag)
+		position, found, err := e.carriedPosition(ctx, intent)
 		if err != nil {
 			return plannedChild{}, err
 		}

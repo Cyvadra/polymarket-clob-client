@@ -707,19 +707,21 @@ func (m *Manager) Complement(ctx context.Context, conditionID, tokenID string) (
 
 // AwaitInventory reads a lane's inventory, waiting while it is short of
 // shares and a split is still in flight, until deadline. It never waits on a
-// lane with enough inventory, or with nothing in flight to wait for.
-func (m *Manager) AwaitInventory(ctx context.Context, uniqueTag, conditionID, shares string, deadline time.Time) (store.InventoryLevel, error) {
+// lane with enough inventory, or with nothing in flight to wait for. With the
+// level comes the inventory lane's position in sellToken, read in the same
+// round trip, so the sell's planning need not read it again.
+func (m *Manager) AwaitInventory(ctx context.Context, uniqueTag, conditionID, sellToken, shares string, deadline time.Time) (store.InventoryLevel, store.PositionRecord, bool, error) {
 	for {
 		m.bookedMu.Lock()
 		booked := m.booked
 		m.bookedMu.Unlock()
-		level, err := m.cfg.Store.InventoryLevel(ctx, uniqueTag, conditionID)
+		level, position, found, err := m.cfg.Store.InventoryLevelAndPosition(ctx, uniqueTag, conditionID, sellToken)
 		if err != nil {
-			return level, err
+			return level, position, found, err
 		}
 		now := m.cfg.Now()
 		if decimal.Compare(level.Remaining, shares) >= 0 || !decimal.Positive(level.InFlight) || deadline.IsZero() || !now.Before(deadline) {
-			return level, nil
+			return level, position, found, nil
 		}
 		wait := 250 * time.Millisecond
 		if left := deadline.Sub(now); left < wait {
@@ -727,7 +729,7 @@ func (m *Manager) AwaitInventory(ctx context.Context, uniqueTag, conditionID, sh
 		}
 		select {
 		case <-ctx.Done():
-			return level, ctx.Err()
+			return level, position, found, ctx.Err()
 		case <-booked:
 		case <-time.After(wait):
 		}

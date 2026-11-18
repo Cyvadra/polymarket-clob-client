@@ -18,8 +18,9 @@ type Inventory interface {
 	// Complement names the other outcome token of a binary condition.
 	Complement(ctx context.Context, conditionID, tokenID string) (complementID, outcome string, err error)
 	// AwaitInventory reads a lane's inventory, waiting while it is short of
-	// shares and a split is still in flight, until deadline.
-	AwaitInventory(ctx context.Context, uniqueTag, conditionID, shares string, deadline time.Time) (store.InventoryLevel, error)
+	// shares and a split is still in flight, until deadline, with the
+	// inventory lane's position in sellToken from the same read.
+	AwaitInventory(ctx context.Context, uniqueTag, conditionID, sellToken, shares string, deadline time.Time) (store.InventoryLevel, store.PositionRecord, bool, error)
 }
 
 // SetInventory enables SPLIT_PRESERVE opens.
@@ -32,10 +33,13 @@ func (e *Executor) SetInventory(inventory Inventory) { e.inventory = inventory }
 // the strategy sees an ordinary BUY: the store moves the bought shares to the
 // strategy lane as the sell fills, and the result is reported as the BUY.
 func (e *Executor) executePreserve(ctx context.Context, intent protocol.ExecutionIntent) error {
-	sell, err := e.preserveIntent(ctx, intent)
+	sell, position, err := e.preserveIntent(ctx, intent)
 	if err != nil {
 		e.publishOpenRejection(intent, err)
 		return err
+	}
+	if position != nil {
+		ctx = context.WithValue(ctx, lanePositionKey{}, *position)
 	}
 	if err := e.Execute(ctx, sell); err != nil {
 		var unresolved unresolvedSubmission
@@ -48,47 +52,55 @@ func (e *Executor) executePreserve(ctx context.Context, intent protocol.Executio
 }
 
 // preserveIntent turns a SPLIT_PRESERVE BUY into the SELL it places, sized by
-// the inventory that backs it.
-func (e *Executor) preserveIntent(ctx context.Context, intent protocol.ExecutionIntent) (protocol.ExecutionIntent, error) {
+// the inventory that backs it. It also returns the inventory lane's position
+// in the sold token, read with the level, for planning to use in place of a
+// read of its own (nil when the lane holds none).
+func (e *Executor) preserveIntent(ctx context.Context, intent protocol.ExecutionIntent) (protocol.ExecutionIntent, *store.PositionRecord, error) {
 	if e.inventory == nil {
-		return intent, reject(protocol.ReasonUnsupportedStyle, "split inventory is not enabled on this executiond")
+		return intent, nil, reject(protocol.ReasonUnsupportedStyle, "split inventory is not enabled on this executiond")
 	}
 	if intent.Policy.Preserve != nil {
-		return intent, invalid("policy.preserve is set by executiond only")
+		return intent, nil, invalid("policy.preserve is set by executiond only")
 	}
 	if intent.Side != protocol.SideBuy {
-		return intent, invalid("%s opens a buy", protocol.ExecutionStyleSplitPreserve)
+		return intent, nil, invalid("%s opens a buy", protocol.ExecutionStyleSplitPreserve)
 	}
 	if protocol.IsInventoryTag(intent.UniqueTag) {
-		return intent, invalid("unique tag %q names an inventory lane", intent.UniqueTag)
+		return intent, nil, invalid("unique tag %q names an inventory lane", intent.UniqueTag)
 	}
 	now := e.now().UTC()
 	if err := validateIntentAt(intent, now); err != nil {
-		return intent, err
+		return intent, nil, err
 	}
 	complementPrice, ok := complement(intent.LimitPrice)
 	if !ok {
-		return intent, invalid("invalid limit price %q", intent.LimitPrice)
+		return intent, nil, invalid("invalid limit price %q", intent.LimitPrice)
 	}
 	digits := clobclient.SharePrecisionDigits(protocol.SideSell, intent.TimeInForce)
 	requested, ok := decimal.DivideAndRoundDown(intent.TargetUSD, intent.LimitPrice, digits)
 	if !ok {
-		return intent, reject(protocol.ReasonUnplannable, "target usd %s buys less than one share unit at %s", intent.TargetUSD, intent.LimitPrice)
+		return intent, nil, reject(protocol.ReasonUnplannable, "target usd %s buys less than one share unit at %s", intent.TargetUSD, intent.LimitPrice)
 	}
-	level, err := e.inventory.AwaitInventory(ctx, intent.UniqueTag, intent.ConditionID, requested, preserveDeadline(intent, now))
+	// The complement comes from memory once the market is known, so it is
+	// resolved first and the level read can bring the sold token's position.
+	// A lane with no free inventory is still refused as such when the
+	// complement cannot be found: its error waits until the level is read.
+	complementID, complementOutcome, complementErr := e.inventory.Complement(ctx, intent.ConditionID, intent.TokenID)
+	inventoryStart := time.Now()
+	level, position, found, err := e.inventory.AwaitInventory(ctx, intent.UniqueTag, intent.ConditionID, complementID, requested, preserveDeadline(intent, now))
+	stage(ctx, inventoryStart, stageInventory)
 	if err != nil {
-		return intent, fmt.Errorf("read split inventory: %w", err)
+		return intent, nil, fmt.Errorf("read split inventory: %w", err)
 	}
 	shares := requested
 	if decimal.Compare(level.Remaining, shares) < 0 {
 		shares = level.Remaining
 	}
 	if shares, ok = decimal.FloorTo(shares, digits); !ok || !decimal.Positive(shares) {
-		return intent, reject(protocol.ReasonInsufficientInventory, "lane holds no free split inventory for %s shares", requested)
+		return intent, nil, reject(protocol.ReasonInsufficientInventory, "lane holds no free split inventory for %s shares", requested)
 	}
-	complementID, complementOutcome, err := e.inventory.Complement(ctx, intent.ConditionID, intent.TokenID)
-	if err != nil {
-		return intent, fmt.Errorf("find complement token: %w", err)
+	if complementErr != nil {
+		return intent, nil, fmt.Errorf("find complement token: %w", complementErr)
 	}
 	sell := intent
 	sell.UniqueTag = protocol.InventoryTag(intent.UniqueTag)
@@ -98,7 +110,7 @@ func (e *Executor) preserveIntent(ctx context.Context, intent protocol.Execution
 	// which is how a SELL's bound reads.
 	if intent.SignalPrice != "" {
 		if sell.SignalPrice, ok = complement(intent.SignalPrice); !ok {
-			return intent, invalid("invalid signal price %q", intent.SignalPrice)
+			return intent, nil, invalid("invalid signal price %q", intent.SignalPrice)
 		}
 	}
 	sell.Policy.MidPrice, sell.Policy.InitialPrice, sell.Policy.MaxPrice, sell.Policy.MinPrice = "", "", "", ""
@@ -107,7 +119,10 @@ func (e *Executor) preserveIntent(ctx context.Context, intent protocol.Execution
 		LimitPrice: intent.LimitPrice, SignalPrice: intent.SignalPrice,
 		RequestedShares: requested, Shares: shares,
 	}
-	return sell, nil
+	if !found {
+		return sell, nil, nil
+	}
+	return sell, &position, nil
 }
 
 // preserveDeadline is how long an open may wait for a split in flight: until

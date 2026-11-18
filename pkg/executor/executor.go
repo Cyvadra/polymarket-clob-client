@@ -357,6 +357,22 @@ type receivedAtKey struct{}
 // the submit that places its order.
 type intentCreatedAtKey struct{}
 
+// lanePositionKey carries a position already read on the way to planning (a
+// preserve open reads its inventory lane's with the level), so planning does
+// not read it again. Reserve still checks the size it reserves atomically, so
+// a position a moment old cannot oversell.
+type lanePositionKey struct{}
+
+// carriedPosition is the lane's position for a sell's planning: the one the
+// context carries when it is this lane's, else a read.
+func (e *Executor) carriedPosition(ctx context.Context, intent protocol.ExecutionIntent) (store.PositionRecord, bool, error) {
+	if p, ok := ctx.Value(lanePositionKey{}).(store.PositionRecord); ok &&
+		p.ConditionID == intent.ConditionID && p.TokenID == intent.TokenID && p.UniqueTag == intent.UniqueTag {
+		return p, true, nil
+	}
+	return e.positionFor(ctx, intent.ConditionID, intent.TokenID, intent.UniqueTag)
+}
+
 // withReceivedAt stamps when a request arrived, keeping an earlier stamp so
 // an open that is sized before Execute is timed from its true start.
 func withReceivedAt(ctx context.Context) context.Context {

@@ -409,3 +409,118 @@ func TestSplitGapIsTruncatedLikeTheSplit(t *testing.T) {
 	requireDecimal(t, "gap", gap, recorded.Shares)
 	requireDecimal(t, "shares", recorded.Shares, "10.123456")
 }
+
+// TestReserveSellBatchOutcomes holds reserveSell, the one-batch SELL
+// reservation, to the refusals the interactive transaction gave.
+func TestReserveSellBatchOutcomes(t *testing.T) {
+	s := testStore(t)
+	lane := newInventoryLane(t, s)
+	ctx := context.Background()
+	lane.split(t, s, "s1", "10", "")
+	if err := reserveOn(t, s, lane, "p1", "4"); err != nil {
+		t.Fatalf("reserve 4 of 10: %v", err)
+	}
+	down := lanePosition(t, s, lane.conditionID, lane.down, lane.inv)
+	requireDecimal(t, "reserved", down.ReservedSize, "4")
+	requireDecimal(t, "available", down.AvailableSize, "6")
+	requireDecimal(t, "remaining", lane.level(t, s).Remaining, "6")
+	// Past the inventory: refused, and nothing moves.
+	if err := reserveOn(t, s, lane, "p2", "7"); !errors.Is(err, store.ErrInsufficientInventory) {
+		t.Fatalf("reserve 7 of 6: %v, want ErrInsufficientInventory", err)
+	}
+	requireDecimal(t, "reserved after refusal", lanePosition(t, s, lane.conditionID, lane.down, lane.inv).ReservedSize, "4")
+	var rows int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM reservations WHERE unique_tag = $1`, lane.inv).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("reservations = %d, %v; want the first only", rows, err)
+	}
+	// The same reservation again: a duplicate, and the store still works.
+	err := s.Reserve(ctx, store.ReservationRecord{
+		ReservationID: lane.tag + "-p1:1", IntentID: lane.tag + "-p1", ChildSequence: 1, ConditionID: lane.conditionID, TokenID: lane.down,
+		UniqueTag: lane.inv, Outcome: "Down", Side: "SELL", Shares: "1", Notional: "0",
+	})
+	if !errors.Is(err, store.ErrDuplicate) {
+		t.Fatalf("duplicate reservation: %v, want ErrDuplicate", err)
+	}
+	requireDecimal(t, "reserved after duplicate", lanePosition(t, s, lane.conditionID, lane.down, lane.inv).ReservedSize, "4")
+	if err := reserveOn(t, s, lane, "p3", "2"); err != nil {
+		t.Fatalf("reserve after a duplicate: %v", err)
+	}
+	// A lane holding nothing (not an inventory lane): no position to sell.
+	other := newInventoryLane(t, s)
+	err = s.Reserve(ctx, store.ReservationRecord{
+		ReservationID: other.tag + "-c:1", IntentID: other.tag + "-c", ChildSequence: 1, ConditionID: other.conditionID, TokenID: other.up,
+		UniqueTag: other.tag, Outcome: "Up", Side: "SELL", Shares: "1", Notional: "0",
+	})
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("sell with no position: %v, want ErrConflict", err)
+	}
+}
+
+func TestConcurrentPreserveReservationsNeverOversell(t *testing.T) {
+	s := testStore(t)
+	lane := newInventoryLane(t, s)
+	lane.split(t, s, "s1", "10", "")
+	const n = 12
+	errs := make(chan error, n)
+	for i := range n {
+		go func() {
+			errs <- reserveOnAsync(s, lane, fmt.Sprintf("c%d", i), "2")
+		}()
+	}
+	ok := 0
+	for range n {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case errors.Is(err, store.ErrInsufficientInventory):
+		default:
+			t.Fatalf("concurrent reserve: %v", err)
+		}
+	}
+	if ok != 5 {
+		t.Fatalf("%d reservations of 2 held on 10 pairs, want 5", ok)
+	}
+	requireDecimal(t, "remaining", lane.level(t, s).Remaining, "0")
+}
+
+// reserveOnAsync is reserveOn for a goroutine: it reports instead of failing.
+func reserveOnAsync(s *Store, l inventoryLane, id, shares string) error {
+	ctx := context.Background()
+	intentID := l.tag + "-" + id
+	if _, err := s.InsertIntent(ctx, store.OrderIntentRecord{
+		IntentID: intentID, UniqueTag: l.inv, Strategy: "split-test", Kind: store.IntentOpen,
+		ConditionID: l.conditionID, TokenID: l.down, Outcome: "Down", Side: store.SideSell, TargetUSD: "1",
+		LimitPrice: "0.5", TimeInForce: store.TimeInForceGTC, Status: statemachine.StateIntentReceived,
+		Policy: []byte(`{"style":"SPLIT_PRESERVE"}`), ExpiresAt: time.Now().Add(time.Minute),
+	}); err != nil {
+		return err
+	}
+	return s.Reserve(ctx, store.ReservationRecord{
+		ReservationID: intentID + ":1", IntentID: intentID, ChildSequence: 1, ConditionID: l.conditionID, TokenID: l.down,
+		UniqueTag: l.inv, Outcome: "Down", Side: "SELL", Shares: shares, Notional: "0",
+	})
+}
+
+func TestInventoryLevelAndPositionReadsBothInOneTrip(t *testing.T) {
+	s := testStore(t)
+	lane := newInventoryLane(t, s)
+	ctx := context.Background()
+	if _, _, found, err := s.InventoryLevelAndPosition(ctx, lane.tag, lane.conditionID, lane.down); err != nil || found {
+		t.Fatalf("empty lane: found=%v err=%v", found, err)
+	}
+	lane.split(t, s, "s1", "10", "")
+	if err := reserveOn(t, s, lane, "p1", "3"); err != nil {
+		t.Fatal(err)
+	}
+	level, position, found, err := s.InventoryLevelAndPosition(ctx, lane.tag, lane.conditionID, lane.down)
+	if err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if want := lane.level(t, s); level != want {
+		t.Fatalf("level %+v, InventoryLevel %+v", level, want)
+	}
+	if position.TokenID != lane.down || position.UniqueTag != lane.inv {
+		t.Fatalf("position is not the inventory lane's Down: %+v", position)
+	}
+	requireDecimal(t, "position available", position.AvailableSize, "7")
+}

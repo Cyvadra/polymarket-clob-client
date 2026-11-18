@@ -156,6 +156,11 @@ func (s *memStore) InventoryLevel(context.Context, string, string) (store.Invent
 	return s.level(), nil
 }
 
+func (s *memStore) InventoryLevelAndPosition(ctx context.Context, tag, conditionID, _ string) (store.InventoryLevel, store.PositionRecord, bool, error) {
+	level, err := s.InventoryLevel(ctx, tag, conditionID)
+	return level, store.PositionRecord{}, false, err
+}
+
 func (s *memStore) CTFOperationsSettling(context.Context, time.Time) (bool, error) { return false, nil }
 
 func (s *memStore) state(opID string) store.CTFOpState {
@@ -441,10 +446,10 @@ func TestAwaitInventoryWaitsOnlyWhenShortWithASplitInFlight(t *testing.T) {
 	ctx := context.Background()
 	st.held = 50
 	start := time.Now()
-	if level, _ := m.AwaitInventory(ctx, "lane", "c", "40", start.Add(time.Second)); level.Remaining != f(50) || time.Since(start) > 100*time.Millisecond {
+	if level, _, _, _ := m.AwaitInventory(ctx, "lane", "c", "down", "40", start.Add(time.Second)); level.Remaining != f(50) || time.Since(start) > 100*time.Millisecond {
 		t.Fatal("waited although the inventory covered the open")
 	}
-	if _, _ = m.AwaitInventory(ctx, "lane", "c", "80", start.Add(time.Second)); time.Since(start) > 100*time.Millisecond {
+	if _, _, _, _ = m.AwaitInventory(ctx, "lane", "c", "down", "80", start.Add(time.Second)); time.Since(start) > 100*time.Millisecond {
 		t.Fatal("waited with nothing in flight")
 	}
 	st.ops["op"] = &store.CTFOperationRecord{OpID: "op", Action: store.CTFSplit, Shares: "50", State: store.CTFSubmitted, Tokens: []string{"up", "down"}}
@@ -452,7 +457,7 @@ func TestAwaitInventoryWaitsOnlyWhenShortWithASplitInFlight(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		_ = m.confirm(ctx, *st.ops["op"], "")
 	}()
-	level, _ := m.AwaitInventory(ctx, "lane", "c", "80", time.Now().Add(5*time.Second))
+	level, _, _, _ := m.AwaitInventory(ctx, "lane", "c", "down", "80", time.Now().Add(5*time.Second))
 	if level.Remaining != f(100) {
 		t.Fatalf("woke with %s remaining, want 100", level.Remaining)
 	}

@@ -33,48 +33,97 @@ var (
 	isInventoryTag = protocol.IsInventoryTag
 )
 
+// lockInventorySQL takes an inventory lane's lock for the transaction.
+const lockInventorySQL = `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`
+
+// inventoryLockKey names an inventory lane's lock.
+func inventoryLockKey(invTag, conditionID string) string {
+	return "inventory:" + invTag + ":" + conditionID
+}
+
 // lockInventory serializes every write that sizes from an inventory lane.
 func lockInventory(ctx context.Context, tx pgx.Tx, invTag, conditionID string) error {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "inventory:"+invTag+":"+conditionID); err != nil {
+	if _, err := tx.Exec(ctx, lockInventorySQL, inventoryLockKey(invTag, conditionID)); err != nil {
 		return fmt.Errorf("lock inventory: %w", err)
 	}
 	return nil
 }
 
-// remainingSQL is the pairs an inventory lane ($1 condition, $2 tag) still
+// remainingSQL is the pairs an inventory lane ({cond} condition, {tag} tag) still
 // has free: the smaller side held less every share resting preserves have
 // reserved, each of which will use one pair, and less every pair a merge in
 // flight will burn when it lands.
 const remainingSQL = `
 	SELECT GREATEST(CASE WHEN count(*) = 2 THEN MIN(position_size) - SUM(reserved_size) ELSE 0 END
 		- (SELECT COALESCE(SUM(c.shares), 0) FROM ctf_operations c
-			WHERE c.condition_id = $1 AND c.unique_tag || '` + inventorySuffix + `' = $2
+			WHERE c.condition_id = {cond} AND c.unique_tag || '` + inventorySuffix + `' = {tag}
 				AND c.action = 'MERGE' AND c.state IN ('PENDING', 'SUBMITTED', 'UNKNOWN')), 0)::text
-	FROM positions WHERE condition_id = $1 AND unique_tag = $2
+	FROM positions WHERE condition_id = {cond} AND unique_tag = {tag}
+`
+
+// remainingSQLFor is remainingSQL reading the condition and the inventory tag
+// from the given placeholders.
+func remainingSQLFor(cond, tag string) string {
+	return strings.NewReplacer("{cond}", cond, "{tag}", tag).Replace(remainingSQL)
+}
+
+// inventoryLevelSQL reads a lane's level in one statement ($1 condition, $2
+// inventory tag, $3 strategy tag): the remaining pairs and the reserved
+// shares from positions, the splits in flight and whether a merge was asked
+// for from ctf_operations.
+var inventoryLevelSQL = `
+	SELECT (` + remainingSQLFor("$1", "$2") + `),
+		(SELECT COALESCE(SUM(reserved_size), 0)::text FROM positions WHERE condition_id = $1 AND unique_tag = $2),
+		(SELECT COALESCE(SUM(shares) FILTER (WHERE action = 'SPLIT' AND state IN ('PENDING', 'SUBMITTED', 'UNKNOWN')), 0)::text
+			FROM ctf_operations WHERE unique_tag = $3 AND condition_id = $1),
+		(SELECT COALESCE(bool_or(action = 'MERGE' AND state <> 'FAILED'), false) FROM ctf_operations WHERE unique_tag = $3 AND condition_id = $1)
 `
 
 func inventoryLevel(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, uniqueTag, conditionID string) (store.InventoryLevel, error) {
 	var level store.InventoryLevel
-	if err := q.QueryRow(ctx, `
-		SELECT (`+remainingSQL+`), COALESCE(SUM(reserved_size), 0)::text
-		FROM positions WHERE condition_id = $1 AND unique_tag = $2
-	`, conditionID, inventoryTag(uniqueTag)).Scan(&level.Remaining, &level.Reserved); err != nil {
-		return level, fmt.Errorf("read remaining inventory: %w", err)
-	}
-	if err := q.QueryRow(ctx, `
-		SELECT COALESCE(SUM(shares) FILTER (WHERE action = 'SPLIT' AND state IN ('PENDING', 'SUBMITTED', 'UNKNOWN')), 0)::text,
-			COALESCE(bool_or(action = 'MERGE' AND state <> 'FAILED'), false)
-		FROM ctf_operations WHERE unique_tag = $1 AND condition_id = $2
-	`, uniqueTag, conditionID).Scan(&level.InFlight, &level.Merged); err != nil {
-		return level, fmt.Errorf("read inventory operations: %w", err)
+	if err := q.QueryRow(ctx, inventoryLevelSQL, conditionID, inventoryTag(uniqueTag), uniqueTag).
+		Scan(&level.Remaining, &level.Reserved, &level.InFlight, &level.Merged); err != nil {
+		return level, fmt.Errorf("read inventory level: %w", err)
 	}
 	return level, nil
 }
 
 func (s *Store) InventoryLevel(ctx context.Context, uniqueTag, conditionID string) (store.InventoryLevel, error) {
 	return inventoryLevel(ctx, s.pool, uniqueTag, conditionID)
+}
+
+// InventoryLevelAndPosition reads a lane's level and the inventory lane's
+// position in tokenID in one round trip, for a preserve open: the level sizes
+// the sell and the position is what planning would otherwise read again.
+// found is false when the inventory lane holds no row for the token.
+func (s *Store) InventoryLevelAndPosition(ctx context.Context, uniqueTag, conditionID, tokenID string) (store.InventoryLevel, store.PositionRecord, bool, error) {
+	batch := &pgx.Batch{}
+	var level store.InventoryLevel
+	var position store.PositionRecord
+	found := false
+	batch.Queue(inventoryLevelSQL, conditionID, inventoryTag(uniqueTag), uniqueTag).QueryRow(func(row pgx.Row) error {
+		if err := row.Scan(&level.Remaining, &level.Reserved, &level.InFlight, &level.Merged); err != nil {
+			return fmt.Errorf("read inventory level: %w", err)
+		}
+		return nil
+	})
+	batch.Queue(lanePositionSQL, conditionID, tokenID, inventoryTag(uniqueTag)).QueryRow(func(row pgx.Row) error {
+		p, err := scanPosition(row)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return nil
+		case err != nil:
+			return fmt.Errorf("read inventory position: %w", err)
+		}
+		position, found = p, true
+		return nil
+	})
+	if err := s.pool.SendBatch(ctx, batch).Close(); err != nil {
+		return store.InventoryLevel{}, store.PositionRecord{}, false, err
+	}
+	return level, position, found, nil
 }
 
 func (s *Store) BeginSplit(ctx context.Context, op store.CTFOperationRecord, maxShares string) (store.CTFOperationRecord, string, bool, error) {
@@ -626,28 +675,6 @@ func settlePreserveTransfer(ctx context.Context, tx pgx.Tx, record store.FillRec
 				return err
 			}
 		}
-	}
-	return nil
-}
-
-// reserveInventory checks, under the inventory lock, that the lane's
-// remaining inventory backs a preserve reserving shares.
-func reserveInventory(ctx context.Context, tx pgx.Tx, invTag, conditionID, shares string) error {
-	if err := lockInventory(ctx, tx, invTag, conditionID); err != nil {
-		return err
-	}
-	// A lane with a merge recorded is closing: its pairs go to the merge.
-	var enough bool
-	if err := tx.QueryRow(ctx, `
-		SELECT (`+remainingSQL+`)::numeric >= $3::numeric AND NOT EXISTS (
-			SELECT 1 FROM ctf_operations c
-			WHERE c.condition_id = $1 AND c.unique_tag || '`+inventorySuffix+`' = $2
-				AND c.action = 'MERGE' AND c.state <> 'FAILED')
-	`, conditionID, invTag, shares).Scan(&enough); err != nil {
-		return fmt.Errorf("check inventory: %w", err)
-	}
-	if !enough {
-		return store.ErrInsufficientInventory
 	}
 	return nil
 }
