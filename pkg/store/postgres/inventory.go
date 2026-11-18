@@ -65,7 +65,7 @@ func inventoryLevel(ctx context.Context, q interface {
 	}
 	if err := q.QueryRow(ctx, `
 		SELECT COALESCE(SUM(shares) FILTER (WHERE action = 'SPLIT' AND state IN ('PENDING', 'SUBMITTED', 'UNKNOWN')), 0)::text,
-			COALESCE(bool_or(action = 'MERGE'), false)
+			COALESCE(bool_or(action = 'MERGE' AND state <> 'FAILED'), false)
 		FROM ctf_operations WHERE unique_tag = $1 AND condition_id = $2
 	`, uniqueTag, conditionID).Scan(&level.InFlight, &level.Merged); err != nil {
 		return level, fmt.Errorf("read inventory operations: %w", err)

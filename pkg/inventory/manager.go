@@ -63,8 +63,9 @@ type Config struct {
 	// split to the wallet's balance.
 	ClaimCash func(ctx context.Context, want float64) (float64, func(), error)
 	Gate      Gate
-	// OnBooked runs after an operation books, once the exchange has been told
-	// the wallet's balances changed: the place to drop cached cash.
+	// OnBooked runs as soon as an operation books, when the store stops
+	// counting a split as in flight, and again once the exchange has been
+	// told the wallet's balances changed: the place to drop cached cash.
 	OnBooked func()
 	Now      func() time.Time
 	OnError  func(error)
@@ -440,6 +441,11 @@ func (m *Manager) confirm(ctx context.Context, op store.CTFOperationRecord, txHa
 	if err := m.cfg.Store.ConfirmCTFOperation(ctx, op.OpID, txHash, m.cfg.Now().UTC()); err != nil {
 		return fmt.Errorf("book %s %s: %w", strings.ToLower(string(op.Action)), op.OpID, err)
 	}
+	// Booking drops a split from InFlightSplitCash: cached cash from before
+	// it landed would now read the spent pUSD as free.
+	if m.cfg.OnBooked != nil {
+		m.cfg.OnBooked()
+	}
 	for _, token := range op.Tokens {
 		if err := m.cfg.Chain.UpdateBalanceAllowance(ctx, "CONDITIONAL", token); err != nil {
 			m.report(fmt.Errorf("refresh exchange balance of %s: %w", token, err))
@@ -543,7 +549,20 @@ func (m *Manager) resolveOnce(ctx context.Context, op store.CTFOperationRecord) 
 			return true, nil
 		}
 		if m.pastDeadline(op) {
-			m.mark(ctx, op.OpID, store.CTFFailed, "", status.Hash, "signed deadline passed and the relayer still reports "+status.State)
+			// The deadline only stops a batch not yet executed; one the
+			// relayer saw executed or mined is on chain, so the wallet's
+			// balances decide.
+			landed, err := m.landed(ctx, op)
+			if err != nil {
+				return false, err
+			}
+			if landed {
+				if err := m.confirm(ctx, op, status.Hash); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+			m.mark(ctx, op.OpID, store.CTFFailed, "", status.Hash, "signed deadline passed, the relayer still reports "+status.State+" and the chain shows no change")
 			return true, nil
 		}
 		return false, nil

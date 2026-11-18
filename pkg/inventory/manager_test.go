@@ -488,8 +488,8 @@ func TestSplitRefreshesCollateralAndDropsCachedCash(t *testing.T) {
 	for _, asset := range refreshed {
 		collateral = collateral || asset == "COLLATERAL"
 	}
-	if !collateral || booked.Load() != 1 {
-		t.Fatalf("refreshed %v, OnBooked ran %d times; want COLLATERAL and once", refreshed, booked.Load())
+	if !collateral || booked.Load() != 2 {
+		t.Fatalf("refreshed %v, OnBooked ran %d times; want COLLATERAL and twice (on booking and after the refresh)", refreshed, booked.Load())
 	}
 }
 
