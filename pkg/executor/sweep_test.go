@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,33 @@ func TestSweepLeavesOtherMarketsAlone(t *testing.T) {
 	}
 	if lister.lookups["btc"] != 1 {
 		t.Fatalf("btc looked up %d times, want 1", lister.lookups["btc"])
+	}
+}
+
+func TestSweepReportsSluglessAndFailedMarketsOnce(t *testing.T) {
+	storer := &knownOrdersStore{fakeStore: &fakeStore{}, known: map[string]bool{}}
+	client := &sweepCLOB{fakeCLOB: &fakeCLOB{}}
+	exec, err := New(storer, client, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec.SetErrorHandler(func(error) {})
+	lister := &slugLister{
+		orders: []clobclient.Order{{ID: "a", Market: "bare"}, {ID: "b", Market: "bare"}, {ID: "c", Market: "gone"}, {ID: "d", Market: "gone"}},
+		slugs:  map[string]string{"bare": ""},
+	}
+	err = exec.SweepUnknownOrders(context.Background(), lister, UnknownOrderSweep{MarketPrefixes: []string{"*"}})
+	if len(client.canceled) != 0 {
+		t.Fatalf("canceled %v, want nothing", client.canceled)
+	}
+	if err == nil || !strings.Contains(err.Error(), "no slug") {
+		t.Fatalf("err %v, want the slugless market reported", err)
+	}
+	if lister.lookups["bare"] != 1 || lister.lookups["gone"] != 1 {
+		t.Fatalf("lookups %v, want one per market", lister.lookups)
+	}
+	if n := strings.Count(err.Error(), "resolve market"); n != 2 {
+		t.Fatalf("%d lookup errors, want one per market: %v", n, err)
 	}
 }
 

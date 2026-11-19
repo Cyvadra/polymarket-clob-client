@@ -67,6 +67,7 @@ func (e *Executor) SweepUnknownOrders(ctx context.Context, lister OpenOrderListe
 	var unknown []string
 	var lookupErrs error
 	slugs := map[string]string{}
+	unresolved := map[string]bool{}
 	for _, order := range orders {
 		if order.ID == "" {
 			continue
@@ -79,11 +80,25 @@ func (e *Executor) SweepUnknownOrders(ctx context.Context, lister OpenOrderListe
 		default:
 			continue
 		}
+		if unresolved[order.Market] {
+			continue
+		}
 		slug, ok := slugs[order.Market]
 		if !ok {
+			// A market without a slug (the /clob-markets fallback carries
+			// none) cannot be matched; it is unresolved, not out of scope.
+			// One failure is reported per market, not per order.
 			market, err := lister.Market(ctx, order.Market)
-			if err != nil || market == nil {
-				lookupErrs = errors.Join(lookupErrs, fmt.Errorf("resolve market %q of unknown open order %s; left open: %w", order.Market, order.ID, err))
+			switch {
+			case err != nil:
+			case market == nil:
+				err = errors.New("market not found")
+			case market.Slug == "":
+				err = errors.New("market has no slug")
+			}
+			if err != nil {
+				unresolved[order.Market] = true
+				lookupErrs = errors.Join(lookupErrs, fmt.Errorf("resolve market %q of unknown open order %s; its row-less orders are left open: %w", order.Market, order.ID, err))
 				continue
 			}
 			slug = market.Slug
