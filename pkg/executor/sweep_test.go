@@ -136,3 +136,21 @@ func TestSweepCancelsOnlyOrdersWithoutRows(t *testing.T) {
 		t.Fatalf("reported = %v, want the cancelled orphan", reported)
 	}
 }
+
+func TestUnknownOrderSweepMatchesGlobs(t *testing.T) {
+	opts := UnknownOrderSweep{MarketPrefixes: []string{"*-updown-*", "sol-5m"}}
+	for slug, want := range map[string]bool{
+		"btc-updown-5m-1763500000":  true,
+		"eth-updown-15m-1763500000": true,
+		"sol-5m-x":                  true,
+		"us-election-2028":          false,
+		"updown-btc":                false,
+	} {
+		if got := opts.matches(slug); got != want {
+			t.Errorf("matches(%q) = %v, want %v", slug, got, want)
+		}
+	}
+	if ValidateMarketPattern("[btc") == nil {
+		t.Error("want a malformed pattern rejected")
+	}
+}

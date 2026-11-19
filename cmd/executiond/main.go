@@ -725,6 +725,9 @@ func configFromEnv() (config, error) {
 	}
 	for _, prefix := range strings.Split(os.Getenv("EXECUTION_UNKNOWN_ORDER_SWEEP_MARKETS"), ",") {
 		if prefix = strings.TrimSpace(prefix); prefix != "" {
+			if err := executor.ValidateMarketPattern(prefix); err != nil {
+				return config{}, fmt.Errorf("EXECUTION_UNKNOWN_ORDER_SWEEP_MARKETS: %q: %w", prefix, err)
+			}
 			cfg.UnknownOrderSweep.MarketPrefixes = append(cfg.UnknownOrderSweep.MarketPrefixes, prefix)
 		}
 	}

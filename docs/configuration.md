@@ -222,7 +222,7 @@ deviate from the default.
 | `EXECUTION_RECONCILE_INTERVAL` | `30s` | REST reconciliation frequency. |
 | `EXECUTION_SETTLEMENT_SWEEP_INTERVAL` | `1m` | How often lanes in resolved markets are checked and emptied once their shares are worth nothing. |
 | `EXECUTION_UNKNOWN_ORDER_SWEEP_DISABLED` | `false` | Skip the startup sweep that cancels open orders with no stored row. |
-| `EXECUTION_UNKNOWN_ORDER_SWEEP_MARKETS` | unset | Comma-separated market slug prefixes (e.g. `btc-updown-5m`). The startup sweep cancels row-less orders only in matching markets; unset sweeps nothing, so manual orders elsewhere are left alone. |
+| `EXECUTION_UNKNOWN_ORDER_SWEEP_MARKETS` | unset | Comma-separated market slug patterns: a plain entry is a prefix (`btc-updown-5m`); one with `*`, `?` or `[...]` is a glob matched against the whole slug (`*-updown-*`). The startup sweep cancels row-less orders only in matching markets; unset sweeps nothing, so manual orders elsewhere are left alone. |
 | `EXECUTION_MISSING_ORDER_GRACE_PERIOD` | `2m` | How long an unresolved submitted order may return REST 404 before it is failed. |
 | `EXECUTION_RECONCILE_MAX_TRADE_AGE` | `24h` | How far back trade replay looks on each reconciliation pass. Trades older than this are skipped rather than replayed. |
 | `EXECUTION_RESULT_PRICE_WAIT` | `3500ms` | How long a terminal open or close result waits for the fills that price it before publishing. The order message that ends an order can arrive ahead of its trade messages; if the fills still have not landed, the result carries the order's own limit price as `average_price`. `0` does not wait: the result is priced at once from whatever fills are already recorded, with the same fallback. |

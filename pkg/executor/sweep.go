@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	clobclient "github.com/Cyvadra/polymarket-clob-client"
@@ -20,13 +21,28 @@ type OpenOrderLister interface {
 // UnknownOrderSweep scopes SweepUnknownOrders. With Disabled set, or no
 // MarketPrefixes, the sweep does nothing.
 type UnknownOrderSweep struct {
-	Disabled       bool
-	MarketPrefixes []string // market slug prefixes, e.g. "btc-updown-5m"
+	Disabled bool
+	// MarketPrefixes are market slug patterns. One without glob characters
+	// is a prefix ("btc-updown-5m"); one with them ("*-updown-*") must match
+	// the whole slug, as path.Match does.
+	MarketPrefixes []string
+}
+
+// ValidateMarketPattern reports a malformed glob pattern.
+func ValidateMarketPattern(pattern string) error {
+	_, err := path.Match(pattern, "")
+	return err
 }
 
 func (o UnknownOrderSweep) matches(slug string) bool {
-	for _, prefix := range o.MarketPrefixes {
-		if strings.HasPrefix(slug, prefix) {
+	for _, pattern := range o.MarketPrefixes {
+		if !strings.ContainsAny(pattern, `*?[\`) {
+			if strings.HasPrefix(slug, pattern) {
+				return true
+			}
+			continue
+		}
+		if ok, _ := path.Match(pattern, slug); ok {
 			return true
 		}
 	}
