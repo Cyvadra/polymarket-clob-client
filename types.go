@@ -97,6 +97,7 @@ type OrderResponse struct {
 type Order struct {
 	ID           string `json:"id"`
 	Status       string `json:"status"`
+	Market       string `json:"market"`
 	AssetID      string `json:"asset_id"`
 	Side         Side   `json:"side"`
 	OriginalSize string `json:"original_size"`

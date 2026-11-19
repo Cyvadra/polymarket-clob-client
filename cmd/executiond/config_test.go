@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -255,5 +256,24 @@ func TestConfigFromEnvStrategyDefaultDrawdown(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		})
+	}
+}
+
+func TestConfigFromEnvReadsUnknownOrderSweep(t *testing.T) {
+	withEnv(t, map[string]string{
+		"EXECUTION_ALLOWED_STRATEGIES":           "late-gap",
+		"EXECUTION_UNKNOWN_ORDER_SWEEP_DISABLED": "true",
+		"EXECUTION_UNKNOWN_ORDER_SWEEP_MARKETS":  " btc-updown-5m, ,eth-updown-15m",
+	})
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatalf("configFromEnv: %v", err)
+	}
+	if !cfg.UnknownOrderSweep.Disabled || !reflect.DeepEqual(cfg.UnknownOrderSweep.MarketPrefixes, []string{"btc-updown-5m", "eth-updown-15m"}) {
+		t.Fatalf("sweep=%+v", cfg.UnknownOrderSweep)
+	}
+	withEnv(t, map[string]string{"EXECUTION_ALLOWED_STRATEGIES": "late-gap", "EXECUTION_UNKNOWN_ORDER_SWEEP_DISABLED": "maybe"})
+	if _, err := configFromEnv(); err == nil {
+		t.Fatal("expected a bad bool to be rejected")
 	}
 }

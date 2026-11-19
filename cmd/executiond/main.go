@@ -40,6 +40,7 @@ type config struct {
 	FeatureInterval            time.Duration
 	ReconcileInterval          time.Duration
 	SettlementInterval         time.Duration
+	UnknownOrderSweep          executor.UnknownOrderSweep
 	MissingOrderGrace          time.Duration
 	MaxTradeAge                time.Duration
 	ResultPriceWait            time.Duration
@@ -245,7 +246,15 @@ func run() error {
 
 	// An order posted just before a crash may have no row; nothing else would
 	// ever see it. Sweep before taking intents, while none can be mid-commit.
-	if err := execution.SweepUnknownOrders(ctx, clob); err != nil {
+	switch {
+	case cfg.UnknownOrderSweep.Disabled:
+		log.Printf("unknown-order sweep: disabled")
+	case len(cfg.UnknownOrderSweep.MarketPrefixes) == 0:
+		log.Printf("unknown-order sweep: no markets configured, skipping")
+	default:
+		log.Printf("unknown-order sweep: restricted to markets %v", cfg.UnknownOrderSweep.MarketPrefixes)
+	}
+	if err := execution.SweepUnknownOrders(ctx, clob, cfg.UnknownOrderSweep); err != nil {
 		// Only an order actually found without a row is an orphan; a failed
 		// listing or lookup is reported as the error it is.
 		if errors.Is(err, executor.ErrOrphanAlert) {
@@ -705,6 +714,18 @@ func configFromEnv() (config, error) {
 				return config{}, fmt.Errorf("EXECUTION_SIZE_AFTER_LOSS_ONLY must be true or false")
 			}
 			cfg.SizeAfterLossOnly = enabled
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("EXECUTION_UNKNOWN_ORDER_SWEEP_DISABLED")); value != "" {
+		disabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return config{}, fmt.Errorf("EXECUTION_UNKNOWN_ORDER_SWEEP_DISABLED must be true or false")
+		}
+		cfg.UnknownOrderSweep.Disabled = disabled
+	}
+	for _, prefix := range strings.Split(os.Getenv("EXECUTION_UNKNOWN_ORDER_SWEEP_MARKETS"), ",") {
+		if prefix = strings.TrimSpace(prefix); prefix != "" {
+			cfg.UnknownOrderSweep.MarketPrefixes = append(cfg.UnknownOrderSweep.MarketPrefixes, prefix)
 		}
 	}
 	if value := strings.TrimSpace(os.Getenv("EXECUTION_INVENTORY_ENABLED")); value != "" {
